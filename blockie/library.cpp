@@ -178,8 +178,8 @@ bool Library::open(const std::string& data_root)
         db_ = nullptr;
         return false;
     }
-    sqlite3_exec(db_, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;", nullptr,
-                 nullptr, nullptr);
+    sqlite3_exec(db_, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=2000;",
+                 nullptr, nullptr, nullptr);
     if (!init_schema())
         return false;
     seed_systems();

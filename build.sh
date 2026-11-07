@@ -332,9 +332,12 @@ build_app() {
     fetch "$xdg_url" "$cache/xdg-shell-1.41.xml" "$xdg_sha"
     wayland-scanner client-header "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-client-protocol.h"
     wayland-scanner private-code "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-protocol.c"
-    local wl_cflags wl_libs xkb_cflags xkb_libs
+    pkg-config --exists libcurl || { echo "build.sh: libcurl not found" >&2; return 1; }
+    local wl_cflags wl_libs xkb_cflags xkb_libs curl_cflags curl_libs
     wl_cflags=$(pkg-config --cflags wayland-client)
     wl_libs=$(pkg-config --libs wayland-client)
+    curl_cflags=$(pkg-config --cflags libcurl)
+    curl_libs=$(pkg-config --libs libcurl)
     xkb_cflags=
     xkb_libs=
     if pkg-config --exists xkbcommon; then
@@ -360,18 +363,19 @@ build_app() {
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
+    pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
     pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
         "$root/blockie/present_wl.cpp"
-    pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
+    pool "$appobj/main.o" "$cxx" "${gflags[@]}" -pthread $wl_cflags $xkb_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/image.o" "$appobj/input_pad.o" \
-        "$appobj/launch.o" "$appobj/present_wl.o" "$appobj/main.o" \
-        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs -lpthread -lm \
-        -o "$out/app/blockie-frontend.tmp" || return 1
+        "$appobj/launch.o" "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
+        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs \
+        -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
 }

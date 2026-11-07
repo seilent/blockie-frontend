@@ -1,14 +1,18 @@
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <poll.h>
 #include <signal.h>
+#include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -26,6 +30,7 @@
 #include "launch.h"
 #include "library.h"
 #include "present_wl.h"
+#include "scraper.h"
 #include "screen_selector.h"
 
 namespace fd {
@@ -50,6 +55,17 @@ const char* action_name(PadAction a)
     }
     return "?";
 }
+
+struct ScrapeJob {
+    int index;
+    Game game;
+    std::string libretro_folder;
+};
+
+struct ArtDrop {
+    int index;
+    std::string path;
+};
 
 }
 
@@ -84,22 +100,36 @@ static int run()
     SelectorModel model;
     model.focus = 0;
     std::vector<Game> recent;
+    std::vector<ScrapeJob> jobs;
     if (lib.open("")) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
         for (const auto& sw : lib.systems_with_games())
             model.systems.push_back({sw.first.name, sw.second});
         recent = lib.recent_games(8);
-        for (const auto& g : recent) {
+        for (size_t i = 0; i < recent.size(); i++) {
+            const Game& g = recent[i];
             Image img;
+            bool had_art = false;
             for (const auto& m : lib.media(g.id))
                 if (m.type == "covers") {
                     DecodedImage d;
-                    if (load_png(m.path, d) && d.ok())
+                    if (load_png(m.path, d) && d.ok()) {
                         img = Image::from_portrait(d.rgb.data(), d.w, d.h);
+                        had_art = true;
+                    }
                     break;
                 }
             model.tiles.push_back(std::move(img));
+            if (!had_art) {
+                std::string folder;
+                for (const auto& sc : lib.config())
+                    if (sc.id == g.system_id) {
+                        folder = sc.libretro_folder;
+                        break;
+                    }
+                jobs.push_back({(int)i, g, folder});
+            }
         }
     }
 
@@ -267,6 +297,37 @@ static int run()
             sigprocmask(SIG_UNBLOCK, &mask, nullptr);
     }
 
+    std::mutex art_mutex;
+    std::vector<ArtDrop> art_drops;
+    std::atomic<bool> scrape_stop{false};
+    int art_evfd = jobs.empty() ? -1 : eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    std::thread scrape_thread;
+    if (!jobs.empty() && art_evfd < 0)
+        std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape disabled\n");
+    if (art_evfd >= 0) {
+        scrape_thread = std::thread([data_root, jobs = std::move(jobs), art_evfd, &art_mutex, &art_drops,
+                                     &scrape_stop]() {
+            Library wlib;
+            if (!wlib.open(data_root))
+                return;
+            Scraper sc(wlib, data_root);
+            for (const ScrapeJob& j : jobs) {
+                if (scrape_stop.load())
+                    break;
+                ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, j.game.name, ArtType::Covers);
+                if (o.cached && !o.path.empty()) {
+                    {
+                        std::lock_guard<std::mutex> lk(art_mutex);
+                        art_drops.push_back({j.index, o.path});
+                    }
+                    uint64_t one = 1;
+                    ssize_t w = write(art_evfd, &one, sizeof one);
+                    (void)w;
+                }
+            }
+        });
+    }
+
     wl_display* d = p.display();
     int wl_fd = p.event_fd();
     while (p.ready()) {
@@ -274,7 +335,7 @@ static int run()
             wl_display_dispatch_pending(d);
         wl_display_flush(d);
 
-        struct pollfd fds[3];
+        struct pollfd fds[4];
         fds[0].fd = wl_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
@@ -288,6 +349,14 @@ static int run()
             fds[pi].fd = pad.fd();
             fds[pi].events = POLLIN;
             fds[pi].revents = 0;
+            nfds++;
+        }
+        int ai = -1;
+        if (art_evfd >= 0) {
+            ai = nfds;
+            fds[ai].fd = art_evfd;
+            fds[ai].events = POLLIN;
+            fds[ai].revents = 0;
             nfds++;
         }
         int pr = poll(fds, nfds, -1);
@@ -331,6 +400,27 @@ static int run()
             }
         }
 
+        if (ai >= 0 && (fds[ai].revents & POLLIN)) {
+            uint64_t cnt;
+            while (read(art_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
+            }
+            std::vector<ArtDrop> drops;
+            {
+                std::lock_guard<std::mutex> lk(art_mutex);
+                drops.swap(art_drops);
+            }
+            for (const ArtDrop& drp : drops) {
+                if (drp.index < 0 || drp.index >= (int)model.tiles.size())
+                    continue;
+                DecodedImage dec;
+                if (load_png(drp.path, dec) && dec.ok()) {
+                    model.tiles[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
+                    if (child.pid <= 0)
+                        need_redraw = true;
+                }
+            }
+        }
+
         if (need_redraw) {
             redraw();
             need_redraw = false;
@@ -338,6 +428,11 @@ static int run()
     }
     if (child.pid > 0)
         kill(child.pid, SIGTERM);
+    scrape_stop.store(true);
+    if (scrape_thread.joinable())
+        scrape_thread.join();
+    if (art_evfd >= 0)
+        close(art_evfd);
     if (sfd >= 0)
         close(sfd);
     p.stop();
