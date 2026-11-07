@@ -349,6 +349,7 @@ int main()
         write_file(datpath, dat);
 
         fd::Scraper rs(lib, root, fetch);
+        rs.set_expected_dat_sha("gba", fd::Scraper::sha256_hex(dat));
         check(rs.resolve_name("gba", gbarom) == "Synth Game (USA)", "crc resolves to the No-Intro name via the dat");
         check(rs.resolve_name("psx", root + "/whatever.chd").empty(), "disc system is not content-resolved");
         check(rs.resolve_name("gba", root + "/missing.gba").empty(), "a missing rom resolves to empty");
@@ -367,8 +368,18 @@ int main()
         tb.modtime = 1000;
         utime(gbarom.c_str(), &tb);
         fd::Scraper rs3(lib, root, fetch);
+        rs3.set_expected_dat_sha("gba", fd::Scraper::sha256_hex(dat2));
         check(rs3.resolve_name("gba", gbarom) == "Renamed Game",
               "changing the rom mtime invalidates the cached resolution");
+
+        struct utimbuf tb2;
+        tb2.actime = 2000;
+        tb2.modtime = 2000;
+        utime(gbarom.c_str(), &tb2);
+        responder = [](const std::string&) { return fd::HttpResult{404, std::string(), false}; };
+        fd::Scraper rs5(lib, root, fetch);
+        check(rs5.resolve_name("gba", gbarom).empty(),
+              "a cached dat whose sha256 does not match the pin is not trusted, re-downloaded");
     }
 
     {

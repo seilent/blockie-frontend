@@ -43,16 +43,20 @@ public:
                                   const std::string& name, ArtType type);
     static std::optional<uint32_t> rom_crc(const std::string& path, const std::vector<std::string>& exts);
     static std::string sha256_hex(const std::string& data);
+    void set_expected_dat_sha(const std::string& system_id, const std::string& sha);
 
 private:
     const std::unordered_map<uint32_t, std::string>* dat_index(const std::string& system_id,
                                                                const std::string& basename);
+
+    std::string expected_dat_sha(const std::string& system_id) const;
 
     Library& lib_;
     std::string data_root_;
     Fetcher fetch_;
     std::unordered_map<std::string, std::unordered_map<uint32_t, std::string>> dat_cache_;
     std::unordered_set<std::string> dat_tried_;
+    std::unordered_map<std::string, std::string> dat_sha_override_;
 };
 
 }

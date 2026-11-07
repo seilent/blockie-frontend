@@ -558,6 +558,17 @@ std::string Scraper::sha256_hex(const std::string& data)
     return fd::sha256_hex(data);
 }
 
+void Scraper::set_expected_dat_sha(const std::string& system_id, const std::string& sha)
+{
+    dat_sha_override_[system_id] = sha;
+}
+
+std::string Scraper::expected_dat_sha(const std::string& system_id) const
+{
+    auto it = dat_sha_override_.find(system_id);
+    return it != dat_sha_override_.end() ? it->second : dat_sha(system_id);
+}
+
 const std::unordered_map<uint32_t, std::string>* Scraper::dat_index(const std::string& system_id,
                                                                     const std::string& basename)
 {
@@ -568,9 +579,10 @@ const std::unordered_map<uint32_t, std::string>* Scraper::dat_index(const std::s
         return nullptr;
     dat_tried_.insert(system_id);
 
+    std::string want = expected_dat_sha(system_id);
     std::string path = data_root_ + "/cache/dat/" + basename + ".dat";
     std::string body;
-    if (read_whole(path, body) && body.compare(0, 12, "clrmamepro (") == 0) {
+    if (read_whole(path, body) && body.compare(0, 12, "clrmamepro (") == 0 && sha256_hex(body) == want) {
         auto& m = dat_cache_[system_id];
         parse_dat(body, m);
         return &m;
@@ -579,7 +591,7 @@ const std::unordered_map<uint32_t, std::string>* Scraper::dat_index(const std::s
     HttpResult r = fetch_(dat_url(basename));
     if (r.transport_error || r.status != 200 || r.body.empty() || r.body.compare(0, 12, "clrmamepro (") != 0)
         return nullptr;
-    if (sha256_hex(r.body) != dat_sha(system_id))
+    if (sha256_hex(r.body) != want)
         return nullptr;
     write_atomic(path, r.body);
     auto& m = dat_cache_[system_id];
