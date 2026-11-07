@@ -71,6 +71,7 @@ scraperobj=$out/scraper/obj
 launchobj=$out/launch/obj
 testobj=$out/test/obj
 shotobj=$out/shot/obj
+imgobj=$out/image/obj
 fonts_dir=$out/fonts
 
 fetch() {
@@ -128,6 +129,12 @@ deps() {
             "harfbuzz-$hb_ver/src"
         mv "$hb_dir.part" "$hb_dir"
     fi
+}
+
+deps_img() {
+    mkdir -p "$cache/src"
+    unpack "$spng_url" "$spng_sha" "$spng_dir"
+    unpack "$zlib_url" "$zlib_sha" "$zlib_dir"
 }
 
 deps_sqlite() {
@@ -441,6 +448,31 @@ build_launch_test() {
     "$out/launch/blockie-launch-test"
 }
 
+imgflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers "${img_inc[@]}" -DSPNG_STATIC)
+
+build_image_test() {
+    deps_img
+    toolver=$("$cc" --version | head -n 1)
+    local c
+    for c in "${zlib_c[@]}"; do
+        pool "$depobj/zlib_$c.o" "$cc" "${cflags[@]}" $dep_harden "$zlib_dir/$c.c"
+    done
+    pool "$depobj/spng.o" "$cc" "${cflags[@]}" $dep_harden "$spng_dir/spng/spng.c"
+    drain
+    ((fail)) && return 1
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$imgobj/image.o" "$cxx" "${imgflags[@]}" $appcflags "$root/blockie/image.cpp"
+    pool "$testobj/image_test.o" "$cxx" "${imgflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/image"
+    "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$depobj/spng.o" "$depobj"/zlib_*.o $appldflags -lpthread -lm \
+        -o "$out/image/blockie-image-test.tmp"
+    mv "$out/image/blockie-image-test.tmp" "$out/image/blockie-image-test"
+    echo "build.sh: $out/image/blockie-image-test"
+    "$out/image/blockie-image-test"
+}
+
 build_shot() {
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -480,7 +512,8 @@ build_install() {
 }
 
 fail=0
-mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj" "$shotobj"
+mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj" "$shotobj" \
+    "$imgobj"
 case $target in
     all | generic | app | shot)
         deps
@@ -493,7 +526,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0
