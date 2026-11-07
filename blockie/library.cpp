@@ -27,15 +27,15 @@ struct SysSeed {
 };
 
 constexpr SysSeed kSystems[] = {
-    {"gb", "GB", "Nintendo - Game Boy", "gambatte", ".gb .zip .7z"},
-    {"gbc", "GBC", "Nintendo - Game Boy Color", "gambatte", ".gbc .zip .7z"},
-    {"nes", "NES", "Nintendo - Nintendo Entertainment System", "nestopia", ".nes .zip .7z"},
-    {"snes", "SNES", "Nintendo - Super Nintendo Entertainment System", "snes9x", ".sfc .smc .zip .7z"},
-    {"genesis", "Genesis", "Sega - Mega Drive - Genesis", "genesis_plus_gx", ".md .gen .bin .zip .7z"},
-    {"gba", "GBA", "Nintendo - Game Boy Advance", "mgba", ".gba .zip .7z"},
+    {"gb", "GB", "Nintendo - Game Boy", "gambatte", ".gb .zip"},
+    {"gbc", "GBC", "Nintendo - Game Boy Color", "gambatte", ".gbc .zip"},
+    {"nes", "NES", "Nintendo - Nintendo Entertainment System", "nestopia", ".nes .zip"},
+    {"snes", "SNES", "Nintendo - Super Nintendo Entertainment System", "snes9x", ".sfc .smc .zip"},
+    {"genesis", "Genesis", "Sega - Mega Drive - Genesis", "genesis_plus_gx", ".md .gen .bin .zip"},
+    {"gba", "GBA", "Nintendo - Game Boy Advance", "mgba", ".gba .zip"},
     {"psx", "PS1", "Sony - PlayStation", "pcsx_rearmed", ".cue .chd .m3u"},
-    {"n64", "N64", "Nintendo - Nintendo 64", "mupen64plus_next", ".z64 .n64"},
-    {"psp", "PSP", "Sony - PlayStation Portable", "ppsspp", ".iso .cso"},
+    {"n64", "N64", "Nintendo - Nintendo 64", "mupen64plus_next", ".z64 .n64 .v64 .zip"},
+    {"psp", "PSP", "Sony - PlayStation Portable", "ppsspp", ".iso .cso .chd .pbp"},
     {"dc", "DC", "Sega - Dreamcast", "flycast", ".chd .gdi .m3u"},
 };
 
