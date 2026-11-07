@@ -34,6 +34,10 @@ constexpr int kTileFirstTop = 80;
 constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
+constexpr int kDetailX = 512;
+constexpr int kDetailSystemBaseline = 120;
+constexpr int kDetailTitleBaseline = 232;
+
 constexpr int kScatterGrid = 6;
 constexpr int kScatterDot = 6;
 constexpr int kScatterAlphaLo = 7;
@@ -82,7 +86,8 @@ Rect fit_rect(int sw, int sh, int tx, int ty, int side, ArtFit fit)
 
 }
 
-void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit, bool scatter)
+void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit, bool scatter,
+                   bool detail)
 {
     bool on = focus_pane == Pane::Selector;
 
@@ -123,6 +128,14 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         int y = kTileFirstTop + r * kGridRowPitch;
         Rect tr{x, y, x + kTileSide, y + kTileSide};
         c.frame_aa(Rect64::of(tr.grow(kTileFocusBorder), Zoom{}), Rect64::of(tr, Zoom{}), kWhite, 256);
+    }
+
+    if (detail) {
+        fonts.draw(c, role::npArtist.style(), model.game_system.c_str(), x64(kDetailX), kDetailSystemBaseline, kWhite,
+                   alpha256(role::npArtist.alpha));
+        fonts.draw(c, role::npTitle.style(), model.game_title.c_str(), x64(kDetailX), kDetailTitleBaseline, kWhite,
+                   alpha256(role::npTitle.alpha));
+        return;
     }
 
     int focus_item = on ? model.focus : -1;

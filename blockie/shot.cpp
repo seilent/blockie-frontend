@@ -58,6 +58,9 @@ int main(int argc, char** argv)
     Pane focus = Pane::Selector;
     ArtFit fit = ArtFit::Cover;
     bool scatter = false;
+    bool detail = false;
+    std::string game_system;
+    std::string game_title;
     if (const char* env = getenv("BLOCKIE_FONTS"))
         font_dir = env;
     for (int i = 1; i < argc; i++) {
@@ -78,6 +81,14 @@ int main(int argc, char** argv)
             sys_focus = atoi(argv[++i]);
         else if (a == "--scatter")
             scatter = true;
+        else if (a == "--gamedetail" && i + 1 < argc) {
+            std::string v = argv[++i];
+            size_t bar = v.find('|');
+            game_system = bar == std::string::npos ? std::string() : v.substr(0, bar);
+            game_title = bar == std::string::npos ? v : v.substr(bar + 1);
+            detail = true;
+            focus = Pane::Details;
+        }
         else if (out.empty())
             out = a;
         else {
@@ -88,7 +99,7 @@ int main(int argc, char** argv)
     if (out.empty()) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
-                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--scatter]\n");
+                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]\n");
         return 2;
     }
     if (font_dir.empty())
@@ -123,10 +134,12 @@ int main(int argc, char** argv)
     if (focus == Pane::Details && tile_focus < 0)
         tile_focus = 0;
     model.tile_focus = tile_focus;
+    model.game_system = game_system;
+    model.game_title = game_title;
 
     Buffer buf;
     Canvas c(buf.surface());
-    draw_selector(c, fonts, model, focus, fit, scatter);
+    draw_selector(c, fonts, model, focus, fit, scatter, detail);
 
     if (!write_png(out, buf.surface())) {
         fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());

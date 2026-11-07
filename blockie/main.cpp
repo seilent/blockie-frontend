@@ -101,12 +101,15 @@ static int run()
     SelectorModel model;
     model.focus = 0;
     std::vector<Game> recent;
+    std::vector<std::string> sys_ids;
     std::vector<ScrapeJob> jobs;
     if (lib.open("")) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
-        for (const auto& sw : lib.systems_with_games())
+        for (const auto& sw : lib.systems_with_games()) {
             model.systems.push_back({sw.first.name, sw.second});
+            sys_ids.push_back(sw.first.id);
+        }
         recent = lib.recent_games(8);
         for (size_t i = 0; i < recent.size(); i++) {
             const Game& g = recent[i];
@@ -147,27 +150,43 @@ static int run()
     bool need_redraw = false;
     Pane pane = Pane::Selector;
     int tile_focus = 0;
+    bool system_view = false;
+    std::vector<Game> sysgames;
+    std::vector<Image> recent_hold;
+    int sys_focus = 0;
+    int sys_scroll = 0;
+    std::string sys_name;
     Launcher::Child child;
     int64_t child_game_id = -1;
+
+    auto load_cover = [&](const Game& g) -> Image {
+        Image img;
+        for (const auto& m : lib.media(g.id))
+            if (m.type == "covers") {
+                DecodedImage d;
+                if (load_png(m.path, d) && d.ok())
+                    img = Image::from_portrait(d.rgb.data(), d.w, d.h);
+                break;
+            }
+        return img;
+    };
     auto redraw = [&]() {
         int64_t tt = now_ms();
         p.begin_frame(tt, p.show_at(tt));
         p.begin_full();
         Canvas c(p.draw_target());
         fonts.begin_frame(-1);
-        model.tile_focus = pane == Pane::Details ? tile_focus : -1;
-        draw_selector(c, fonts, model, pane);
+        if (!system_view)
+            model.tile_focus = pane == Pane::Details ? tile_focus : -1;
+        draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view);
         p.present(kScreen);
         p.flip();
     };
     redraw();
 
-    auto try_launch = [&]() {
+    auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
             return;
-        if (tile_focus < 0 || tile_focus >= (int)recent.size())
-            return;
-        const Game& g = recent[tile_focus];
         std::string core, sysname;
         for (const auto& s : lib.config())
             if (s.id == g.system_id) {
@@ -221,6 +240,30 @@ static int run()
     };
 
     const int kCols = 2;
+    const int kRows = 4;
+    auto refresh_system = [&](bool rebuild) {
+        int start = sys_scroll * kCols;
+        if (rebuild) {
+            model.tiles.clear();
+            int end = start + kRows * kCols;
+            if (end > (int)sysgames.size())
+                end = (int)sysgames.size();
+            for (int i = start; i < end; i++)
+                model.tiles.push_back(load_cover(sysgames[i]));
+            model.section_label = sys_name;
+        }
+        model.game_system = sys_name;
+        model.game_title = (sys_focus >= 0 && sys_focus < (int)sysgames.size()) ? sysgames[sys_focus].name : std::string();
+        model.tile_focus = sys_focus - start;
+    };
+    auto exit_system = [&]() {
+        system_view = false;
+        model.tiles.swap(recent_hold);
+        recent_hold.clear();
+        model.section_label.clear();
+        pane = Pane::Selector;
+        need_redraw = true;
+    };
     auto apply = [&](PadAction a) {
         int cnt = (int)model.systems.size();
         int tiles = (int)model.tiles.size();
@@ -235,6 +278,53 @@ static int run()
                 pane = Pane::Details;
                 tile_focus = 0;
                 need_redraw = true;
+            } else if (a == PadAction::Accept && model.focus >= 0 && model.focus < (int)sys_ids.size()) {
+                sysgames = lib.games(sys_ids[model.focus]);
+                if (!sysgames.empty()) {
+                    sys_name = model.systems[model.focus].name;
+                    sys_focus = 0;
+                    sys_scroll = 0;
+                    system_view = true;
+                    model.tiles.swap(recent_hold);
+                    refresh_system(true);
+                    pane = Pane::Details;
+                    need_redraw = true;
+                }
+            }
+            return;
+        }
+        if (system_view) {
+            int total = (int)sysgames.size();
+            if (a == PadAction::Up && sys_focus - kCols >= 0) {
+                sys_focus -= kCols;
+                bool scrolled = sys_focus < sys_scroll * kCols;
+                if (scrolled)
+                    sys_scroll--;
+                refresh_system(scrolled);
+                need_redraw = true;
+            } else if (a == PadAction::Down && sys_focus + kCols < total) {
+                sys_focus += kCols;
+                bool scrolled = sys_focus >= (sys_scroll + kRows) * kCols;
+                if (scrolled)
+                    sys_scroll++;
+                refresh_system(scrolled);
+                need_redraw = true;
+            } else if (a == PadAction::Right && sys_focus % kCols < kCols - 1 && sys_focus + 1 < total) {
+                sys_focus++;
+                refresh_system(false);
+                need_redraw = true;
+            } else if (a == PadAction::Left) {
+                if (sys_focus % kCols > 0) {
+                    sys_focus--;
+                    refresh_system(false);
+                    need_redraw = true;
+                } else {
+                    exit_system();
+                }
+            } else if (a == PadAction::Accept && sys_focus >= 0 && sys_focus < total) {
+                try_launch(sysgames[sys_focus]);
+            } else if (a == PadAction::Back) {
+                exit_system();
             }
             return;
         }
@@ -254,7 +344,8 @@ static int run()
                 pane = Pane::Selector;
             need_redraw = true;
         } else if (a == PadAction::Accept) {
-            try_launch();
+            if (tile_focus >= 0 && tile_focus < (int)recent.size())
+                try_launch(recent[tile_focus]);
         } else if (a == PadAction::Back) {
             pane = Pane::Selector;
             need_redraw = true;
@@ -426,12 +517,13 @@ static int run()
                 drops.swap(art_drops);
             }
             for (const ArtDrop& drp : drops) {
-                if (drp.index < 0 || drp.index >= (int)model.tiles.size())
+                std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
+                if (drp.index < 0 || drp.index >= (int)grid.size())
                     continue;
                 DecodedImage dec;
                 if (load_png(drp.path, dec) && dec.ok()) {
-                    model.tiles[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
-                    if (child.pid <= 0)
+                    grid[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
+                    if (!system_view && child.pid <= 0)
                         need_redraw = true;
                 }
             }

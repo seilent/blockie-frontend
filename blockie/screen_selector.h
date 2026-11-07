@@ -22,9 +22,11 @@ struct SelectorModel {
     std::vector<Image> tiles;
     std::string section_label;
     int tile_focus = -1;
+    std::string game_system;
+    std::string game_title;
 };
 
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane,
-                   ArtFit fit = ArtFit::Cover, bool scatter = false);
+                   ArtFit fit = ArtFit::Cover, bool scatter = false, bool detail = false);
 
 }
