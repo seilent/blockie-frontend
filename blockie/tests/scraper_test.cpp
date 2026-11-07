@@ -1,11 +1,15 @@
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <ftw.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utime.h>
 
 #include "../library.h"
 #include "../scraper.h"
@@ -77,6 +81,88 @@ bool has_media(const std::vector<fd::MediaRef>& v, const std::string& type, cons
         if (m.type == type && m.source == source && m.path == path)
             return true;
     return false;
+}
+
+void put16(std::string& s, uint32_t v)
+{
+    s += (char)(v & 0xff);
+    s += (char)((v >> 8) & 0xff);
+}
+
+void put32(std::string& s, uint32_t v)
+{
+    s += (char)(v & 0xff);
+    s += (char)((v >> 8) & 0xff);
+    s += (char)((v >> 16) & 0xff);
+    s += (char)((v >> 24) & 0xff);
+}
+
+struct ZEnt {
+    std::string name;
+    uint32_t crc;
+    uint16_t method;
+    std::string data;
+};
+
+std::string build_zip(const std::vector<ZEnt>& ents)
+{
+    std::string out;
+    std::vector<uint32_t> offs;
+    for (const ZEnt& e : ents) {
+        offs.push_back((uint32_t)out.size());
+        put32(out, 0x04034b50);
+        put16(out, 20);
+        put16(out, 0);
+        put16(out, e.method);
+        put16(out, 0);
+        put16(out, 0);
+        put32(out, e.crc);
+        put32(out, (uint32_t)e.data.size());
+        put32(out, (uint32_t)e.data.size());
+        put16(out, (uint32_t)e.name.size());
+        put16(out, 0);
+        out += e.name;
+        out += e.data;
+    }
+    uint32_t cd_off = (uint32_t)out.size();
+    for (size_t i = 0; i < ents.size(); i++) {
+        const ZEnt& e = ents[i];
+        put32(out, 0x02014b50);
+        put16(out, 20);
+        put16(out, 20);
+        put16(out, 0);
+        put16(out, e.method);
+        put16(out, 0);
+        put16(out, 0);
+        put32(out, e.crc);
+        put32(out, (uint32_t)e.data.size());
+        put32(out, (uint32_t)e.data.size());
+        put16(out, (uint32_t)e.name.size());
+        put16(out, 0);
+        put16(out, 0);
+        put16(out, 0);
+        put16(out, 0);
+        put32(out, 0);
+        put32(out, offs[i]);
+        out += e.name;
+    }
+    uint32_t cd_size = (uint32_t)out.size() - cd_off;
+    put32(out, 0x06054b50);
+    put16(out, 0);
+    put16(out, 0);
+    put16(out, (uint32_t)ents.size());
+    put16(out, (uint32_t)ents.size());
+    put32(out, cd_size);
+    put32(out, cd_off);
+    put16(out, 0);
+    return out;
+}
+
+std::string hex8(uint32_t v)
+{
+    char b[9];
+    std::snprintf(b, sizeof b, "%08X", v);
+    return b;
 }
 
 const char* kGba = "Nintendo - Game Boy Advance";
@@ -203,6 +289,120 @@ int main()
         std::string cover = fd::Scraper::local_path(root, "gba", "Anguna", fd::ArtType::Covers);
         check(md.size() == 1 && has_media(md, "covers", "libretro", cover),
               "scrape_game fills only the type that exists (per-type 404 for the rest)");
+    }
+
+    {
+        std::string hp = root + "/crc_hello.bin";
+        write_file(hp, "hello");
+        std::optional<uint32_t> c = fd::Scraper::rom_crc(hp, {});
+        check(c && *c == 0x3610A686u, "crc32 of 'hello' matches the zlib value");
+        check(!fd::Scraper::rom_crc(root + "/does-not-exist.bin", {}).has_value(),
+              "crc of a missing file returns empty");
+
+        std::string payload = "this is a synthetic rom body for the zip tests";
+        write_file(root + "/raw.bin", payload);
+        std::optional<uint32_t> rc = fd::Scraper::rom_crc(root + "/raw.bin", {});
+        check(rc.has_value(), "crc of a written raw file succeeds");
+        uint32_t pcrc = rc ? *rc : 0;
+
+        write_file(root + "/stored.zip", build_zip({{"Game (USA).gba", pcrc, 0, payload}}));
+        std::optional<uint32_t> zs = fd::Scraper::rom_crc(root + "/stored.zip", {".gba", ".zip"});
+        check(zs && *zs == pcrc, "zip stored entry crc read from the central directory");
+
+        write_file(root + "/deflate.zip", build_zip({{"Game (USA).gba", pcrc, 8, "not-really-deflate"}}));
+        std::optional<uint32_t> zd = fd::Scraper::rom_crc(root + "/deflate.zip", {".gba", ".zip"});
+        check(zd && *zd == pcrc, "zip deflate entry crc read without inflating");
+
+        write_file(root + "/two.zip",
+                   build_zip({{"readme.txt", 0x11111111u, 0, "r"}, {"Game.gba", 0x22222222u, 0, "g"}}));
+        std::optional<uint32_t> z2 = fd::Scraper::rom_crc(root + "/two.zip", {".gba"});
+        check(z2 && *z2 == 0x22222222u, "zip picks the entry matching a system ext, not the first entry");
+
+        write_file(root + "/zero.zip", build_zip({}));
+        check(!fd::Scraper::rom_crc(root + "/zero.zip", {".gba"}).has_value(), "zip with zero entries returns empty");
+
+        std::string fakedata = std::string("\x50\x4b\x05\x06", 4) + std::string(18, '\0');
+        write_file(root + "/fake.zip", build_zip({{"Game.gba", 0x33333333u, 0, fakedata}}));
+        std::optional<uint32_t> zf = fd::Scraper::rom_crc(root + "/fake.zip", {".gba"});
+        check(zf && *zf == 0x33333333u, "entry data containing PK0506 bytes still reads the correct crc");
+
+        std::string z = build_zip({{"Game.gba", 0x44444444u, 0, "g"}});
+        write_file(root + "/trunc.zip", z.substr(0, z.size() - 10));
+        check(!fd::Scraper::rom_crc(root + "/trunc.zip", {".gba"}).has_value(), "truncated eocd returns empty");
+    }
+
+    {
+        std::string gbarom = root + "/synth.gba";
+        std::string body(256, '\0');
+        for (size_t i = 0; i < body.size(); i++)
+            body[i] = (char)(i * 7 + 3);
+        write_file(gbarom, body);
+        std::optional<uint32_t> rc = fd::Scraper::rom_crc(gbarom, {".gba", ".zip"});
+        check(rc.has_value(), "synth gba rom crc computes");
+        uint32_t crc = rc ? *rc : 0;
+
+        std::string datpath = root + "/cache/dat/Nintendo - Game Boy Advance.dat";
+        std::string dat = "clrmamepro (\n\tname \"Nintendo - Game Boy Advance\"\n)\n"
+                          "game (\n\tname \"Synth Game (USA)\"\n"
+                          "\trom ( name \"Synth Game (USA).gba\" size 256 crc " +
+                          hex8(crc) + " )\n)\n";
+        write_file(datpath, dat);
+
+        fd::Scraper rs(lib, root, fetch);
+        check(rs.resolve_name("gba", gbarom) == "Synth Game (USA)", "crc resolves to the No-Intro name via the dat");
+        check(rs.resolve_name("psx", root + "/whatever.chd").empty(), "disc system is not content-resolved");
+        check(rs.resolve_name("gba", root + "/missing.gba").empty(), "a missing rom resolves to empty");
+
+        std::string dat2 = "clrmamepro (\n\tname \"Nintendo - Game Boy Advance\"\n)\n"
+                           "game (\n\tname \"Renamed Game\"\n"
+                           "\trom ( name \"x.gba\" size 256 crc " +
+                           hex8(crc) + " )\n)\n";
+        write_file(datpath, dat2);
+        fd::Scraper rs2(lib, root, fetch);
+        check(rs2.resolve_name("gba", gbarom) == "Synth Game (USA)",
+              "a cached resolution is reused without re-reading the dat");
+
+        struct utimbuf tb;
+        tb.actime = 1000;
+        tb.modtime = 1000;
+        utime(gbarom.c_str(), &tb);
+        fd::Scraper rs3(lib, root, fetch);
+        check(rs3.resolve_name("gba", gbarom) == "Renamed Game",
+              "changing the rom mtime invalidates the cached resolution");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{404, std::string(), false}; };
+        fd::ArtOutcome a1 = scr.art(20, "gba", kGba, "Neg One", fd::ArtType::Covers);
+        check(a1.not_found, "first 404 returns not_found");
+        int c0 = calls;
+        fd::ArtOutcome a2 = scr.art(20, "gba", kGba, "Neg One", fd::ArtType::Covers);
+        check(a2.not_found && calls == c0, "a fresh negative-cache hit skips the fetch");
+
+        std::string lp = fd::Scraper::local_path(root, "gba", "Neg One", fd::ArtType::Covers);
+        write_file(lp, "sideloaded");
+        int c1 = calls;
+        fd::ArtOutcome a3 = scr.art(20, "gba", kGba, "Neg One", fd::ArtType::Covers);
+        check(a3.cached && calls == c1, "a later-sideloaded local file wins over the negative cache");
+
+        remove(lp.c_str());
+        responder = [](const std::string&) { return fd::HttpResult{200, "box", false}; };
+        int c2 = calls;
+        fd::ArtOutcome a4 = scr.art(20, "gba", kGba, "Neg One", fd::ArtType::Covers);
+        check(a4.cached && calls == c2 + 1, "a local hit cleared the negative row so the next lookup fetches again");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{200, "box", false}; };
+        lib.neg_mark("c4e17d4|gba|covers|Aged Miss", 1000);
+        int c0 = calls;
+        fd::ArtOutcome o = scr.art(21, "gba", kGba, "Aged Miss", fd::ArtType::Covers);
+        check(o.cached && calls == c0 + 1, "an aged (expired) negative row re-fetches");
+
+        lib.neg_mark("oldpin|gba|covers|Epoch Miss", (int64_t)std::time(nullptr));
+        int c1 = calls;
+        fd::ArtOutcome o2 = scr.art(22, "gba", kGba, "Epoch Miss", fd::ArtType::Covers);
+        check(o2.cached && calls == c1 + 1, "a negative row under a different dat epoch does not suppress the lookup");
     }
 
     rm_rf(root);

@@ -47,6 +47,14 @@ public:
     void set_media(int64_t game_id, const std::string& type, const std::string& path, const std::string& source);
     const std::vector<SystemCfg>& config() const;
 
+    bool neg_fresh(const std::string& key, int64_t ttl_seconds);
+    void neg_mark(const std::string& key, int64_t when);
+    void neg_clear(const std::string& key);
+    bool resolve_get(const std::string& rompath, int64_t size, int64_t mtime, const std::string& epoch,
+                     std::string& name_out);
+    void resolve_put(const std::string& rompath, int64_t size, int64_t mtime, const std::string& epoch,
+                     const std::string& name);
+
 private:
     bool init_schema();
     void seed_systems();

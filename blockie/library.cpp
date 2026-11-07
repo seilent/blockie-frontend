@@ -159,7 +159,10 @@ bool Library::init_schema()
         "CREATE UNIQUE INDEX IF NOT EXISTS game_sys_name ON game(system_id, name);"
         "CREATE TABLE IF NOT EXISTS media(game_id INTEGER, type TEXT, path TEXT, source TEXT,"
         " UNIQUE(game_id, type));"
-        "CREATE TABLE IF NOT EXISTS meta(game_id INTEGER, field TEXT, value TEXT, UNIQUE(game_id, field));";
+        "CREATE TABLE IF NOT EXISTS meta(game_id INTEGER, field TEXT, value TEXT, UNIQUE(game_id, field));"
+        "CREATE TABLE IF NOT EXISTS scrape_neg(key TEXT PRIMARY KEY, checked_at INTEGER);"
+        "CREATE TABLE IF NOT EXISTS scrape_resolve(rompath TEXT PRIMARY KEY, size INTEGER, mtime INTEGER,"
+        " epoch TEXT, name TEXT);";
     if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
         return false;
     sqlite3_exec(db_, "ALTER TABLE game ADD COLUMN last_played INTEGER;", nullptr, nullptr, nullptr);
@@ -488,6 +491,90 @@ void Library::set_media(int64_t game_id, const std::string& type, const std::str
     sqlite3_bind_text(st, 2, type.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 3, path.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 4, source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+bool Library::neg_fresh(const std::string& key, int64_t ttl_seconds)
+{
+    if (!db_)
+        return false;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "SELECT checked_at FROM scrape_neg WHERE key=?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    bool fresh = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        int64_t at = sqlite3_column_int64(st, 0);
+        fresh = ((int64_t)std::time(nullptr) - at) < ttl_seconds;
+    }
+    sqlite3_finalize(st);
+    return fresh;
+}
+
+void Library::neg_mark(const std::string& key, int64_t when)
+{
+    if (!db_)
+        return;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_,
+                       "INSERT INTO scrape_neg(key, checked_at) VALUES(?,?)"
+                       " ON CONFLICT(key) DO UPDATE SET checked_at=excluded.checked_at;",
+                       -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, when);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+void Library::neg_clear(const std::string& key)
+{
+    if (!db_)
+        return;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "DELETE FROM scrape_neg WHERE key=?;", -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+bool Library::resolve_get(const std::string& rompath, int64_t size, int64_t mtime, const std::string& epoch,
+                          std::string& name_out)
+{
+    if (!db_)
+        return false;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "SELECT name FROM scrape_resolve WHERE rompath=? AND size=? AND mtime=? AND epoch=?;", -1,
+                       &st, nullptr);
+    sqlite3_bind_text(st, 1, rompath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, size);
+    sqlite3_bind_int64(st, 3, mtime);
+    sqlite3_bind_text(st, 4, epoch.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const unsigned char* n = sqlite3_column_text(st, 0);
+        name_out = n ? (const char*)n : "";
+        found = true;
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+
+void Library::resolve_put(const std::string& rompath, int64_t size, int64_t mtime, const std::string& epoch,
+                          const std::string& name)
+{
+    if (!db_)
+        return;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_,
+                       "INSERT INTO scrape_resolve(rompath, size, mtime, epoch, name) VALUES(?,?,?,?,?)"
+                       " ON CONFLICT(rompath) DO UPDATE SET size=excluded.size, mtime=excluded.mtime,"
+                       " epoch=excluded.epoch, name=excluded.name;",
+                       -1, &st, nullptr);
+    sqlite3_bind_text(st, 1, rompath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 2, size);
+    sqlite3_bind_int64(st, 3, mtime);
+    sqlite3_bind_text(st, 4, epoch.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(st);
     sqlite3_finalize(st);
 }

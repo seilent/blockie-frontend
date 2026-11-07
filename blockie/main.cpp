@@ -317,11 +317,14 @@ static int run()
                 std::fprintf(stderr, "blockie-frontend: scrape db open failed\n");
                 return;
             }
-            Scraper sc(wlib, data_root);
+            Scraper sc(wlib, data_root, {}, &scrape_stop);
             for (const ScrapeJob& j : jobs) {
                 if (scrape_stop.load())
                     break;
-                ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, j.game.name, ArtType::Covers);
+                std::string eff = sc.resolve_name(j.game.system_id, j.game.rompath_abs);
+                if (eff.empty())
+                    eff = j.game.name;
+                ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, eff, ArtType::Covers);
                 const char* r = o.cached ? "ok" : o.not_found ? "404" : o.transient ? "err" : "miss";
                 std::fprintf(stderr, "blockie-frontend: scrape %s \"%s\" %s %s\n", j.game.system_id.c_str(),
                              j.game.name.c_str(), r, o.path.c_str());
