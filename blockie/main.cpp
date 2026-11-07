@@ -400,10 +400,12 @@ static int run()
         }
 
         if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
-            for (PadAction a : pad.poll()) {
-                std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(a));
-                if (p.activated())
+            std::vector<PadAction> acts = pad.poll();
+            if (p.activated()) {
+                for (PadAction a : acts) {
+                    std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(a));
                     apply(a);
+                }
             }
             if (!pad.is_open()) {
                 pad_ok = false;
