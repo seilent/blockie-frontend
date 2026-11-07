@@ -448,6 +448,19 @@ build_launch_test() {
     "$out/launch/blockie-launch-test"
 }
 
+build_pad_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$launchobj/input_pad.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
+    pool "$testobj/pad_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/pad_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/launch"
+    "$cxx" "$launchobj/input_pad.o" "$testobj/pad_test.o" $appldflags -o "$out/launch/blockie-pad-test.tmp"
+    mv "$out/launch/blockie-pad-test.tmp" "$out/launch/blockie-pad-test"
+    echo "build.sh: $out/launch/blockie-pad-test"
+    "$out/launch/blockie-pad-test"
+}
+
 imgflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers "${img_inc[@]}" -DSPNG_STATIC)
 
 build_image_test() {
@@ -527,7 +540,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0
