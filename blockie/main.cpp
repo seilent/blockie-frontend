@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <poll.h>
@@ -258,6 +259,21 @@ static int run()
             for (int i = start; i < end; i++)
                 model.tiles.push_back(load_cover(sysgames[i]));
             model.section_label = sys_name;
+            int lo = (sys_scroll - 1) * kCols;
+            if (lo < 0)
+                lo = 0;
+            int hi = (sys_scroll + kRows + 1) * kCols;
+            if (hi > (int)sysgames.size())
+                hi = (int)sysgames.size();
+            std::unordered_set<int64_t> keep;
+            for (int i = lo; i < hi; i++)
+                keep.insert(sysgames[i].id);
+            for (auto it = cover_cache.begin(); it != cover_cache.end();) {
+                if (keep.count(it->first))
+                    ++it;
+                else
+                    it = cover_cache.erase(it);
+            }
         }
         model.game_system = sys_name;
         model.game_title = (sys_focus >= 0 && sys_focus < (int)sysgames.size()) ? sysgames[sys_focus].name : std::string();
