@@ -16,12 +16,18 @@ elif [[ -n $appcflags ]]; then
 else
     dep_harden=
 fi
-target=${1:-all}
-
-case $target in
-    all | generic | app | scan | test | scraper) ;;
-    *) echo "build.sh: target $target, want all, generic, app, scan, test or scraper" >&2; exit 2 ;;
-esac
+destdir=${DESTDIR:-}
+prefix=${PREFIX:-/usr}
+target=all
+for a in "$@"; do
+    case $a in
+        DESTDIR=*) destdir=${a#DESTDIR=} ;;
+        PREFIX=*) prefix=${a#PREFIX=} ;;
+        all | generic | app | scan | test | scraper | install) target=$a ;;
+        *) echo "build.sh: arg $a, want a target (all generic app scan test scraper install) or DESTDIR=/PREFIX=" >&2
+            exit 2 ;;
+    esac
+done
 
 stb_url=https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h
 stb_sha=ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab
@@ -394,6 +400,15 @@ build_scraper_test() {
     "$out/scraper/blockie-scraper-test"
 }
 
+build_install() {
+    [[ -x $out/app/blockie-frontend ]] || { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
+    install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
+    install -Dm644 "$root/dist/blockie-frontend.service" "$destdir$prefix/lib/systemd/user/blockie-frontend.service" ||
+        return 1
+    install -Dm644 "$root/LICENSE" "$destdir$prefix/share/licenses/blockie-frontend/LICENSE" || return 1
+    echo "build.sh: installed to $destdir$prefix"
+}
+
 fail=0
 mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$testobj"
 case $target in
@@ -409,4 +424,5 @@ esac
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
 [[ $target == test ]] && { build_test && build_scraper_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 exit 0

@@ -1,0 +1,10 @@
+[Unit]
+Description=Blockie frontend
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Slice=blockie-emulation.slice
+ExecStart=/usr/libexec/blockie/blockie-frontend
+Restart=on-failure
+RestartSec=2
