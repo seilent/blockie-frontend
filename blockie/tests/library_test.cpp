@@ -96,6 +96,7 @@ int main()
     mkdirs(roms + "/gba/media");
     mkdirs(roms + "/psx");
     mkdirs(roms + "/ngpc");
+    mkdirs(roms + "/psp");
 
     write_file(roms + "/gba/Synth Game (USA).gba", "x");
     write_file(roms + "/gba/Homebrew Demo.zip", "x");
@@ -110,6 +111,17 @@ int main()
     write_file(roms + "/psx/Multi RPG (Disc 2).chd", "x");
     write_file(roms + "/psx/Standalone Game.chd", "x");
 
+    mkdirs(roms + "/psp/Folder Game");
+    write_file(roms + "/psp/Folder Game/EBOOT.PBP", "x");
+    mkdirs(roms + "/psp/Nested/Inner");
+    write_file(roms + "/psp/Nested/Inner/EBOOT.PBP", "x");
+    mkdirs(roms + "/psp/Dump/PSP/GAME/ABCD00001");
+    write_file(roms + "/psp/Dump/PSP/GAME/ABCD00001/EBOOT.PBP", "x");
+    mkdirs(roms + "/psp/Both");
+    write_file(roms + "/psp/Both/EBOOT.PBP", "x");
+    write_file(roms + "/psp/Both.iso", "x");
+    write_file(roms + "/psp/Loose UMD.iso", "x");
+
     fd::Library lib;
     check(lib.open(root), "open");
 
@@ -118,8 +130,9 @@ int main()
     auto sys = lib.systems_with_games();
     check(sys_count(sys, "gba") == 3, "gba present count is 3 (dedupe + media skip)");
     check(sys_count(sys, "psx") == 2, "psx present count is 2 (m3u one entry + standalone chd)");
+    check(sys_count(sys, "psp") == 4, "psp present count is 4 (folder + nested eboot + file wins over folder + loose iso)");
     check(sys_count(sys, "ngpc") == 0, "ngpc ignored (unconfigured folder)");
-    check(total == 5, "total present games is 5");
+    check(total == 9, "total present games is 9");
 
     auto gba = lib.games("gba");
     const fd::Game* arch = find_game(gba, "Homebrew Demo");
@@ -153,9 +166,24 @@ int main()
             synth_id = g->id;
     }
 
+    {
+        auto psp = lib.games("psp");
+        const fd::Game* folder = find_game(psp, "Folder Game");
+        check(folder != nullptr && folder->present, "psp folder game named by its directory");
+        check(folder && folder->rompath_abs.size() >= 10 &&
+                  folder->rompath_abs.substr(folder->rompath_abs.size() - 10) == "/EBOOT.PBP",
+              "psp folder game rompath points at EBOOT.PBP");
+        check(find_game(psp, "Inner") != nullptr, "nested eboot named by its immediate parent dir");
+        check(find_game(psp, "ABCD00001") == nullptr, "eboot under PSP/GAME/ skipped");
+        const fd::Game* both = find_game(psp, "Both");
+        check(both != nullptr && both->rompath_abs.substr(both->rompath_abs.size() - 4) == ".iso",
+              "a rom file beats a folder of the same base name");
+        check(find_game(psp, "Loose UMD") != nullptr, "loose psp iso is its own entry");
+    }
+
     check(remove((roms + "/gba/Synth Game (USA).gba").c_str()) == 0, "remove a rom file");
     int total2 = lib.scan();
-    check(total2 == 4, "total drops to 4 after removal");
+    check(total2 == 8, "total drops to 8 after removal");
     {
         auto gba2 = lib.games("gba");
         const fd::Game* g = find_game(gba2, "Synth Game (USA)");
@@ -168,7 +196,7 @@ int main()
 
     write_file(roms + "/gba/Synth Game (USA).gba", "x");
     int total3 = lib.scan();
-    check(total3 == 5, "total back to 5 after re-adding");
+    check(total3 == 9, "total back to 9 after re-adding");
     {
         auto gba3 = lib.games("gba");
         const fd::Game* g = find_game(gba3, "Synth Game (USA)");

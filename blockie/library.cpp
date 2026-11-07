@@ -102,6 +102,43 @@ std::set<std::string> m3u_discs(const std::string& m3u_path)
     return out;
 }
 
+void collect_eboot(const std::string& dir, const std::string& parent_name, int depth,
+                   std::vector<std::pair<std::string, std::string>>& out)
+{
+    if (depth > 8)
+        return;
+    DIR* d = opendir(dir.c_str());
+    if (!d)
+        return;
+    std::vector<std::string> subdirs;
+    bool has_eboot = false;
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        std::string nm = e->d_name;
+        if (nm == "." || nm == "..")
+            continue;
+        std::string full = dir + "/" + nm;
+        struct stat sb;
+        if (lstat(full.c_str(), &sb) != 0)
+            continue;
+        if (S_ISDIR(sb.st_mode)) {
+            if (nm != "media")
+                subdirs.push_back(nm);
+        } else if (S_ISREG(sb.st_mode) && nm == "EBOOT.PBP") {
+            has_eboot = true;
+        }
+    }
+    closedir(d);
+    if (has_eboot && !parent_name.empty()) {
+        std::string eboot = dir + "/EBOOT.PBP";
+        if (eboot.find("/PSP/GAME/") == std::string::npos)
+            out.emplace_back(parent_name, eboot);
+    }
+    std::sort(subdirs.begin(), subdirs.end());
+    for (const std::string& sub : subdirs)
+        collect_eboot(dir + "/" + sub, sub, depth + 1, out);
+}
+
 }
 
 Library::~Library()
@@ -289,6 +326,14 @@ int Library::scan_system(const SystemCfg& sys)
         } else if (!it->second.is_m3u && it->second.is_archive && !arch) {
             it->second = Cand{full, arch, false};
         }
+    }
+
+    if (sys.id == "psp") {
+        std::vector<std::pair<std::string, std::string>> eboots;
+        collect_eboot(dir, std::string(), 0, eboots);
+        for (const auto& ng : eboots)
+            if (!byname.count(ng.first))
+                byname[ng.first] = Cand{ng.second, false, false};
     }
 
     for (const auto& kv : byname) {
