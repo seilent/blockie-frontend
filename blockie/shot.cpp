@@ -100,8 +100,7 @@ int main(int argc, char** argv)
 
     SelectorModel model;
     model.systems = {
-        {"Game Boy", 28}, {"Game Boy Color", 19}, {"NES", 63},
-        {"SNES", 47},     {"Genesis", 35},        {"Game Boy Advance", 52},
+        {"GB", 28}, {"GBC", 19}, {"NES", 63}, {"SNES", 47}, {"Genesis", 35}, {"GBA", 52},
     };
     model.focus = sys_focus < 0 ? 0 : (sys_focus >= (int)model.systems.size() ? 0 : sys_focus);
 

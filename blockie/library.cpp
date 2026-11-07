@@ -27,16 +27,16 @@ struct SysSeed {
 };
 
 constexpr SysSeed kSystems[] = {
-    {"gb", "Game Boy", "Nintendo - Game Boy", "gambatte", ".gb .zip .7z"},
-    {"gbc", "Game Boy Color", "Nintendo - Game Boy Color", "gambatte", ".gbc .zip .7z"},
+    {"gb", "GB", "Nintendo - Game Boy", "gambatte", ".gb .zip .7z"},
+    {"gbc", "GBC", "Nintendo - Game Boy Color", "gambatte", ".gbc .zip .7z"},
     {"nes", "NES", "Nintendo - Nintendo Entertainment System", "nestopia", ".nes .zip .7z"},
     {"snes", "SNES", "Nintendo - Super Nintendo Entertainment System", "snes9x", ".sfc .smc .zip .7z"},
     {"genesis", "Genesis", "Sega - Mega Drive - Genesis", "genesis_plus_gx", ".md .gen .bin .zip .7z"},
-    {"gba", "Game Boy Advance", "Nintendo - Game Boy Advance", "mgba", ".gba .zip .7z"},
-    {"psx", "PlayStation", "Sony - PlayStation", "pcsx_rearmed", ".cue .chd .m3u"},
-    {"n64", "Nintendo 64", "Nintendo - Nintendo 64", "mupen64plus_next", ".z64 .n64"},
+    {"gba", "GBA", "Nintendo - Game Boy Advance", "mgba", ".gba .zip .7z"},
+    {"psx", "PS1", "Sony - PlayStation", "pcsx_rearmed", ".cue .chd .m3u"},
+    {"n64", "N64", "Nintendo - Nintendo 64", "mupen64plus_next", ".z64 .n64"},
     {"psp", "PSP", "Sony - PlayStation Portable", "ppsspp", ".iso .cso"},
-    {"dc", "Dreamcast", "Sega - Dreamcast", "flycast", ".chd .gdi .m3u"},
+    {"dc", "DC", "Sega - Dreamcast", "flycast", ".chd .gdi .m3u"},
 };
 
 std::string lower(const std::string& s)
