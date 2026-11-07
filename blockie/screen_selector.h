@@ -25,6 +25,6 @@ struct SelectorModel {
 };
 
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane,
-                   ArtFit fit = ArtFit::Cover);
+                   ArtFit fit = ArtFit::Cover, bool scatter = true);
 
 }

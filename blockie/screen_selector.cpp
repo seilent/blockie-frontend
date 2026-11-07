@@ -1,6 +1,7 @@
 #include "screen_selector.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 
 #include "../ui/roles.h"
@@ -33,7 +34,35 @@ constexpr int kTileFirstTop = 80;
 constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
+constexpr int kScatterGrid = 4;
+constexpr int kScatterDot = 3;
+constexpr int kScatterAlphaLo = 6;
+constexpr int kScatterAlphaHi = 22;
+constexpr int kScatterPerThousand = 55;
+constexpr uint32_t kScatterSeed = 0x9e3779b9u;
+
 int x64(int px) { return px * 64; }
+
+uint32_t scatter_next(uint32_t& s)
+{
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return s;
+}
+
+void draw_scatter_dots(Canvas& c)
+{
+    Rect sr = c.surface().rect();
+    uint32_t s = kScatterSeed;
+    for (int y = sr.y0; y + kScatterDot <= sr.y1; y += kScatterGrid)
+        for (int x = sr.x0; x + kScatterDot <= sr.x1; x += kScatterGrid) {
+            if (scatter_next(s) % 1000 >= (uint32_t)kScatterPerThousand)
+                continue;
+            int a = kScatterAlphaLo + (int)(scatter_next(s) % (kScatterAlphaHi - kScatterAlphaLo + 1));
+            c.blend({x, y, x + kScatterDot, y + kScatterDot}, kWhite, a);
+        }
+}
 
 void count_line(char* out, size_t n, int games) { snprintf(out, n, games == 1 ? "%d game" : "%d games", games); }
 
@@ -53,11 +82,13 @@ Rect fit_rect(int sw, int sh, int tx, int ty, int side, ArtFit fit)
 
 }
 
-void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit)
+void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit, bool scatter)
 {
     bool on = focus_pane == Pane::Selector;
 
     c.fill(c.surface().rect(), tok::color_bg);
+    if (scatter)
+        draw_scatter_dots(c);
 
     fx pane = on ? tok::motion_quickplayAlpha : tok::alpha_full;
     int tile_alpha = alpha256(pane);
