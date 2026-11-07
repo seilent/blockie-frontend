@@ -70,32 +70,6 @@ bool under_data_root(const std::string& data_root, const std::string& path)
     return true;
 }
 
-LaunchExit classify(int status)
-{
-    if (WIFSIGNALED(status))
-        return LaunchExit::Quit;
-    if (!WIFEXITED(status))
-        return LaunchExit::Crash;
-    switch (WEXITSTATUS(status)) {
-    case 0:
-        return LaunchExit::Quit;
-    case 75:
-        return LaunchExit::Busy;
-    case 64:
-        return LaunchExit::ConfigError;
-    case 69:
-        return LaunchExit::CoreAbsent;
-    case 71:
-        return LaunchExit::AudioGate;
-    case 129:
-    case 130:
-    case 143:
-        return LaunchExit::Quit;
-    default:
-        return LaunchExit::Crash;
-    }
-}
-
 }
 
 Launcher::Launcher(std::string data_root, std::string libretro_dir, std::string wrapper)
@@ -128,6 +102,85 @@ std::string Launcher::emit_config(const std::vector<std::pair<std::string, std::
         out += "\"\n";
     }
     return out;
+}
+
+LaunchExit Launcher::classify(int status)
+{
+    if (WIFSIGNALED(status))
+        return LaunchExit::Quit;
+    if (!WIFEXITED(status))
+        return LaunchExit::Crash;
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return LaunchExit::Quit;
+    case 75:
+        return LaunchExit::Busy;
+    case 64:
+        return LaunchExit::ConfigError;
+    case 69:
+        return LaunchExit::CoreAbsent;
+    case 71:
+        return LaunchExit::AudioGate;
+    case 129:
+    case 130:
+    case 143:
+        return LaunchExit::Quit;
+    default:
+        return LaunchExit::Crash;
+    }
+}
+
+Launcher::Child Launcher::spawn(const LaunchSpec& spec)
+{
+    if (!under_data_root(data_root_, spec.rompath_abs))
+        return {};
+
+    std::string cfg = emit_config(spec.overrides);
+    std::string cfg_path;
+    if (!cfg.empty()) {
+        std::string cache = data_root_ + "/cache";
+        mkdir(cache.c_str(), 0755);
+        cfg_path = cache + "/launch-" + std::to_string((long)getpid()) + ".cfg";
+        FILE* f = std::fopen(cfg_path.c_str(), "wb");
+        if (!f)
+            return {};
+        bool ok = std::fwrite(cfg.data(), 1, cfg.size(), f) == cfg.size();
+        std::fclose(f);
+        if (!ok) {
+            unlink(cfg_path.c_str());
+            return {};
+        }
+    }
+
+    std::vector<std::string> args;
+    args.push_back(wrapper_);
+    args.push_back(spec.system);
+    args.push_back(spec.rompath_abs);
+    if (!spec.core.empty()) {
+        args.push_back("--core");
+        args.push_back(spec.core);
+    }
+    if (!cfg_path.empty()) {
+        args.push_back("--config");
+        args.push_back(cfg_path);
+    }
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (std::string& a : args)
+        argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execv(wrapper_.c_str(), argv.data());
+        _exit(127);
+    }
+    if (pid < 0) {
+        if (!cfg_path.empty())
+            unlink(cfg_path.c_str());
+        return {};
+    }
+    return {pid, cfg_path};
 }
 
 LaunchExit Launcher::run(const LaunchSpec& spec, const std::function<void()>& on_handoff,

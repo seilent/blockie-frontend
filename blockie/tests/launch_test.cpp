@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -6,6 +7,7 @@
 
 #include <ftw.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "../launch.h"
@@ -189,6 +191,43 @@ int main()
         fd::LaunchExit got = l.run(spec, [&] { handoff = true; }, [&] { ret = true; });
         check(got == c.want, c.what);
         check(handoff && ret, "run calls on_handoff and on_return");
+    }
+
+    {
+        fd::LaunchSpec spec;
+        spec.system = "0";
+        spec.rompath_abs = rom;
+        spec.core = "mgba";
+        fd::Launcher::Child ch = l.spawn(spec);
+        check(ch.pid > 0, "spawn returns a live child");
+        int status = 0;
+        while (waitpid(ch.pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        check(fd::Launcher::classify(status) == fd::LaunchExit::Quit, "spawn + classify exit 0 -> Quit");
+        if (!ch.cfg_path.empty())
+            unlink(ch.cfg_path.c_str());
+    }
+    {
+        fd::LaunchSpec spec;
+        spec.system = "75";
+        spec.rompath_abs = rom;
+        spec.core = "mgba";
+        fd::Launcher::Child ch = l.spawn(spec);
+        check(ch.pid > 0, "spawn returns a live child for the busy case");
+        int status = 0;
+        while (waitpid(ch.pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        check(fd::Launcher::classify(status) == fd::LaunchExit::Busy, "spawn + classify exit 75 -> Busy");
+        if (!ch.cfg_path.empty())
+            unlink(ch.cfg_path.c_str());
+    }
+    {
+        fd::LaunchSpec spec;
+        spec.system = "0";
+        spec.rompath_abs = "roms/gba/Anguna.gba";
+        spec.core = "mgba";
+        fd::Launcher::Child ch = l.spawn(spec);
+        check(ch.pid < 0, "spawn rejects a relative rompath without forking");
     }
 
     {
