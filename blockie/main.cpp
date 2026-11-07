@@ -3,11 +3,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <string>
+#include <vector>
 
 #include <poll.h>
 #include <signal.h>
 #include <sys/signalfd.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <wayland-client.h>
 
@@ -20,6 +23,7 @@
 #include "../gfx/pixel.h"
 #include "image.h"
 #include "input_pad.h"
+#include "launch.h"
 #include "library.h"
 #include "present_wl.h"
 #include "screen_selector.h"
@@ -79,12 +83,14 @@ static int run()
     Library lib;
     SelectorModel model;
     model.focus = 0;
+    std::vector<Game> recent;
     if (lib.open("")) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
         for (const auto& sw : lib.systems_with_games())
             model.systems.push_back({sw.first.name, sw.second});
-        for (const auto& g : lib.recent_games(8)) {
+        recent = lib.recent_games(8);
+        for (const auto& g : recent) {
             Image img;
             for (const auto& m : lib.media(g.id))
                 if (m.type == "covers") {
@@ -97,9 +103,21 @@ static int run()
         }
     }
 
+    const char* denv = std::getenv("BLOCKIE_DATA");
+    std::string data_root = denv && *denv ? denv : "/var/lib/blockie/data";
+    while (data_root.size() > 1 && data_root.back() == '/')
+        data_root.pop_back();
+    Launcher launcher(data_root);
+
+    PadReader pad;
+    bool pad_ok = pad.open();
+    std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
+
     bool need_redraw = false;
     Pane pane = Pane::Selector;
     int tile_focus = 0;
+    Launcher::Child child;
+    int64_t child_game_id = -1;
     auto redraw = [&]() {
         int64_t tt = now_ms();
         p.begin_frame(tt, p.show_at(tt));
@@ -112,6 +130,61 @@ static int run()
         p.flip();
     };
     redraw();
+
+    auto try_launch = [&]() {
+        if (child.pid > 0)
+            return;
+        if (tile_focus < 0 || tile_focus >= (int)recent.size())
+            return;
+        const Game& g = recent[tile_focus];
+        std::string core;
+        for (const auto& s : lib.config())
+            if (s.id == g.system_id) {
+                core = s.core;
+                break;
+            }
+        if (!launcher.core_installed(core)) {
+            std::fprintf(stderr, "blockie-frontend: core %s absent for %s\n", core.c_str(), g.system_id.c_str());
+            return;
+        }
+        LaunchSpec spec;
+        spec.system = g.system_id;
+        spec.rompath_abs = g.rompath_abs;
+        spec.core = core;
+        Launcher::Child ch = launcher.spawn(spec);
+        if (ch.pid < 0) {
+            std::fprintf(stderr, "blockie-frontend: spawn failed for %s\n", g.system_id.c_str());
+            return;
+        }
+        child = ch;
+        child_game_id = g.id;
+        std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", g.system_id.c_str(), (int)ch.pid);
+    };
+
+    auto reap_children = [&]() {
+        int status = 0;
+        pid_t r;
+        while ((r = waitpid(-1, &status, WNOHANG)) > 0) {
+            if (child.pid <= 0 || r != child.pid)
+                continue;
+            LaunchExit ex = Launcher::classify(status);
+            bool ran = ex != LaunchExit::ConfigError && ex != LaunchExit::CoreAbsent &&
+                       ex != LaunchExit::AudioGate && ex != LaunchExit::Busy;
+            if (ran && child_game_id >= 0)
+                lib.mark_played(child_game_id, (int64_t)time(nullptr));
+            if (!child.cfg_path.empty())
+                unlink(child.cfg_path.c_str());
+            std::fprintf(stderr, "blockie-frontend: game exited (%s)\n", ran ? "ran" : "not launched");
+            child = {};
+            child_game_id = -1;
+            if (pad_ok) {
+                pad.poll();
+                if (!pad.is_open())
+                    pad_ok = false;
+            }
+            need_redraw = true;
+        }
+    };
 
     const int kCols = 2;
     auto apply = [&](PadAction a) {
@@ -146,6 +219,8 @@ static int run()
             else
                 pane = Pane::Selector;
             need_redraw = true;
+        } else if (a == PadAction::Accept) {
+            try_launch();
         } else if (a == PadAction::Back) {
             pane = Pane::Selector;
             need_redraw = true;
@@ -180,15 +255,12 @@ static int run()
         apply(a);
     });
 
-    PadReader pad;
-    bool pad_ok = pad.open();
-    std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
-
     int sfd = -1;
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGCHLD);
     if (sigprocmask(SIG_BLOCK, &mask, nullptr) == 0) {
         sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
         if (sfd < 0)
@@ -234,8 +306,18 @@ static int run()
         if (wl_display_dispatch_pending(d) < 0)
             break;
 
-        if (fds[1].revents & POLLIN)
-            break;
+        if (fds[1].revents & POLLIN) {
+            bool quit = false;
+            struct signalfd_siginfo si;
+            while (read(sfd, &si, sizeof si) == (ssize_t)sizeof si) {
+                if (si.ssi_signo == SIGCHLD)
+                    reap_children();
+                else
+                    quit = true;
+            }
+            if (quit)
+                break;
+        }
 
         if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
             for (PadAction a : pad.poll()) {
@@ -254,6 +336,8 @@ static int run()
             need_redraw = false;
         }
     }
+    if (child.pid > 0)
+        kill(child.pid, SIGTERM);
     if (sfd >= 0)
         close(sfd);
     p.stop();

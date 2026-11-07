@@ -176,6 +176,7 @@ int main()
         {"69", fd::LaunchExit::CoreAbsent, "run exit 69 -> CoreAbsent"},
         {"71", fd::LaunchExit::AudioGate, "run exit 71 -> AudioGate"},
         {"70", fd::LaunchExit::Crash, "run exit 70 -> Crash"},
+        {"127", fd::LaunchExit::ConfigError, "run exit 127 -> ConfigError"},
         {"1", fd::LaunchExit::Crash, "run exit 1 -> Crash"},
         {"143", fd::LaunchExit::Quit, "run exit 143 -> Quit"},
         {"sig", fd::LaunchExit::Quit, "run killed by signal -> Quit"},

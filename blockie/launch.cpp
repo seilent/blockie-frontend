@@ -6,6 +6,7 @@
 #include <string>
 #include <utility>
 
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -70,6 +71,13 @@ bool under_data_root(const std::string& data_root, const std::string& path)
     return true;
 }
 
+void reset_child_signals()
+{
+    sigset_t empty;
+    sigemptyset(&empty);
+    sigprocmask(SIG_SETMASK, &empty, nullptr);
+}
+
 }
 
 Launcher::Launcher(std::string data_root, std::string libretro_dir, std::string wrapper)
@@ -121,6 +129,8 @@ LaunchExit Launcher::classify(int status)
         return LaunchExit::CoreAbsent;
     case 71:
         return LaunchExit::AudioGate;
+    case 127:
+        return LaunchExit::ConfigError;
     case 129:
     case 130:
     case 143:
@@ -172,6 +182,7 @@ Launcher::Child Launcher::spawn(const LaunchSpec& spec)
 
     pid_t pid = fork();
     if (pid == 0) {
+        reset_child_signals();
         execv(wrapper_.c_str(), argv.data());
         _exit(127);
     }
@@ -230,6 +241,7 @@ LaunchExit Launcher::run(const LaunchSpec& spec, const std::function<void()>& on
     LaunchExit result = LaunchExit::Crash;
     pid_t pid = fork();
     if (pid == 0) {
+        reset_child_signals();
         execv(wrapper_.c_str(), argv.data());
         _exit(127);
     } else if (pid > 0) {
