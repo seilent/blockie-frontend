@@ -23,8 +23,8 @@ for a in "$@"; do
     case $a in
         DESTDIR=*) destdir=${a#DESTDIR=} ;;
         PREFIX=*) prefix=${a#PREFIX=} ;;
-        all | generic | app | scan | test | scraper | install) target=$a ;;
-        *) echo "build.sh: arg $a, want a target (all generic app scan test scraper install) or DESTDIR=/PREFIX=" >&2
+        all | generic | app | scan | test | scraper | install | shot) target=$a ;;
+        *) echo "build.sh: arg $a, want a target (all generic app scan test scraper install shot) or DESTDIR=/PREFIX=" >&2
             exit 2 ;;
     esac
 done
@@ -53,6 +53,8 @@ sqlite_ver=3540100
 sqlite_year=2026
 sqlite_url=https://www.sqlite.org/$sqlite_year/sqlite-amalgamation-$sqlite_ver.zip
 sqlite_sha=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
+font_url=https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip
+font_sha=3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423
 
 spng_dir=$cache/src/libspng-$spng_ver
 zlib_dir=$cache/src/zlib-$zlib_ver
@@ -68,6 +70,8 @@ scanobj=$out/scan/obj
 scraperobj=$out/scraper/obj
 launchobj=$out/launch/obj
 testobj=$out/test/obj
+shotobj=$out/shot/obj
+fonts_dir=$out/fonts
 
 fetch() {
     local url=$1 dst=$2 sha=$3
@@ -136,6 +140,13 @@ deps_sqlite() {
         unzip -q -j "$cache/sqlite-amalgamation-$sqlite_ver.zip" -d "$sqlite_dir.part"
         mv "$sqlite_dir.part" "$sqlite_dir"
     fi
+}
+
+deps_fonts() {
+    command -v unzip > /dev/null || { echo "build.sh: unzip not found" >&2; exit 1; }
+    mkdir -p "$fonts_dir"
+    fetch "$font_url" "$cache/Selawik_Release.zip" "$font_sha"
+    unzip -o -q -j "$cache/Selawik_Release.zip" selawkl.ttf selawk.ttf selawkb.ttf selawksl.ttf -d "$fonts_dir"
 }
 
 gen_tokens() {
@@ -416,6 +427,30 @@ build_launch_test() {
     "$out/launch/blockie-launch-test"
 }
 
+build_shot() {
+    deps_fonts
+    toolver=$("$cxx" --version | head -n 1)
+    local s extra
+    local -a gobjs=()
+    while IFS= read -r s; do
+        extra=$(cpp_extra "$s")
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
+        gobjs+=("$genobj/${s//\//_}.o")
+    done < <(generic_srcs)
+    pool "$shotobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/shot"
+    local -a dobjs=()
+    mapfile -t dobjs < <(dep_objs)
+    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/shot.o" "${dobjs[@]}" $appldflags -lpthread -lm \
+        -o "$out/shot/blockie-shot.tmp"
+    mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
+    echo "build.sh: $out/shot/blockie-shot"
+    echo "build.sh: fonts $fonts_dir"
+}
+
 build_install() {
     [[ -x $out/app/blockie-frontend ]] || { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
     install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
@@ -426,9 +461,9 @@ build_install() {
 }
 
 fail=0
-mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj"
+mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj" "$shotobj"
 case $target in
-    all | generic | app)
+    all | generic | app | shot)
         deps
         gen_tokens
         build_deps_obj
@@ -441,4 +476,5 @@ esac
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
 [[ $target == test ]] && { build_test && build_scraper_test && build_launch_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
+[[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0
