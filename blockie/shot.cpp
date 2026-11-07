@@ -57,7 +57,7 @@ int main(int argc, char** argv)
     int sys_focus = 0;
     Pane focus = Pane::Selector;
     ArtFit fit = ArtFit::Cover;
-    bool scatter = true;
+    bool scatter = false;
     if (const char* env = getenv("BLOCKIE_FONTS"))
         font_dir = env;
     for (int i = 1; i < argc; i++) {
@@ -76,8 +76,8 @@ int main(int argc, char** argv)
             tile_focus = atoi(argv[++i]);
         else if (a == "--sysfocus" && i + 1 < argc)
             sys_focus = atoi(argv[++i]);
-        else if (a == "--no-scatter")
-            scatter = false;
+        else if (a == "--scatter")
+            scatter = true;
         else if (out.empty())
             out = a;
         else {
@@ -88,7 +88,7 @@ int main(int argc, char** argv)
     if (out.empty()) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
-                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--no-scatter]\n");
+                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--scatter]\n");
         return 2;
     }
     if (font_dir.empty())
