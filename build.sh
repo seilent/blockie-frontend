@@ -19,8 +19,8 @@ fi
 target=${1:-all}
 
 case $target in
-    all | generic | app) ;;
-    *) echo "build.sh: target $target, want all, generic or app" >&2; exit 2 ;;
+    all | generic | app | scan | test) ;;
+    *) echo "build.sh: target $target, want all, generic, app, scan or test" >&2; exit 2 ;;
 esac
 
 stb_url=https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h
@@ -43,16 +43,23 @@ hb_url=https://github.com/harfbuzz/harfbuzz/releases/download/${hb_ver}/harfbuzz
 hb_sha=16070d77cfc4ba1f1e7327e83bf9b3f55898081cabdb94e56a33e04fc8874eae
 xdg_url=https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/1.41/stable/xdg-shell/xdg-shell.xml
 xdg_sha=f241ab95c262eb45af6507bf0178b8dcd88d5e1cc8fc6ec4a9944d9e5b15ac98
+sqlite_ver=3540100
+sqlite_year=2026
+sqlite_url=https://www.sqlite.org/$sqlite_year/sqlite-amalgamation-$sqlite_ver.zip
+sqlite_sha=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
 
 spng_dir=$cache/src/libspng-$spng_ver
 zlib_dir=$cache/src/zlib-$zlib_ver
 qr_dir=$cache/src/qrcodegen-${qr_rev:0:8}
 fb_dir=$cache/src/fribidi-$fb_ver
 hb_dir=$cache/src/harfbuzz-$hb_ver
+sqlite_dir=$cache/src/sqlite-amalgamation-$sqlite_ver
 gen=$out/gen
 depobj=$out/deps/obj
 genobj=$out/generic/obj
 appobj=$out/app/obj
+scanobj=$out/scan/obj
+testobj=$out/test/obj
 
 fetch() {
     local url=$1 dst=$2 sha=$3
@@ -108,6 +115,18 @@ deps() {
         tar -C "$hb_dir.part" --strip-components=1 -xJf "$cache/harfbuzz-$hb_ver.tar.xz" "harfbuzz-$hb_ver/COPYING" \
             "harfbuzz-$hb_ver/src"
         mv "$hb_dir.part" "$hb_dir"
+    fi
+}
+
+deps_sqlite() {
+    command -v unzip > /dev/null || { echo "build.sh: unzip not found" >&2; exit 1; }
+    mkdir -p "$cache/src"
+    fetch "$sqlite_url" "$cache/sqlite-amalgamation-$sqlite_ver.zip" "$sqlite_sha"
+    if [[ ! -d $sqlite_dir ]]; then
+        rm -rf "$sqlite_dir.part"
+        mkdir -p "$sqlite_dir.part"
+        unzip -q -j "$cache/sqlite-amalgamation-$sqlite_ver.zip" -d "$sqlite_dir.part"
+        mv "$sqlite_dir.part" "$sqlite_dir"
     fi
 }
 
@@ -313,12 +332,59 @@ build_app() {
     echo "build.sh: $out/app/blockie-frontend"
 }
 
+sqlite_defs=(-DSQLITE_OMIT_LOAD_EXTENSION)
+scanflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -I"$sqlite_dir")
+
+build_sqlite_obj() {
+    deps_sqlite
+    toolver=$("$cc" --version | head -n 1)
+    pool "$depobj/sqlite3.o" "$cc" -O2 -w "${sqlite_defs[@]}" $dep_harden "$sqlite_dir/sqlite3.c"
+    drain
+    ((fail)) && return 1
+    return 0
+}
+
+build_scan() {
+    build_sqlite_obj || return 1
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$scanobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$scanobj/scan_main.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/scan_main.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/scan"
+    "$cxx" "$scanobj/library.o" "$scanobj/scan_main.o" "$depobj/sqlite3.o" $appldflags -lpthread -lm \
+        -o "$out/scan/blockie-scan.tmp"
+    mv "$out/scan/blockie-scan.tmp" "$out/scan/blockie-scan"
+    echo "build.sh: $out/scan/blockie-scan"
+}
+
+build_test() {
+    build_sqlite_obj || return 1
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$scanobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$testobj/library_test.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/tests/library_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/test"
+    "$cxx" "$scanobj/library.o" "$testobj/library_test.o" "$depobj/sqlite3.o" $appldflags -lpthread -lm \
+        -o "$out/test/blockie-test.tmp"
+    mv "$out/test/blockie-test.tmp" "$out/test/blockie-test"
+    echo "build.sh: $out/test/blockie-test"
+    "$out/test/blockie-test"
+}
+
 fail=0
-mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj"
-deps
-gen_tokens
-build_deps_obj
-((fail)) && { echo "build.sh: dependency objects failed" >&2; exit 1; }
+mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$testobj"
+case $target in
+    all | generic | app)
+        deps
+        gen_tokens
+        build_deps_obj
+        ((fail)) && { echo "build.sh: dependency objects failed" >&2; exit 1; }
+        ;;
+esac
 [[ $target == generic || $target == all ]] && { build_generic || { echo "build.sh: generic profile failed" >&2; exit 1; }; }
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
+[[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 exit 0
