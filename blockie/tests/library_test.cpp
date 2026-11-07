@@ -1,3 +1,4 @@
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -218,6 +219,23 @@ int main()
     }
 
     check(lib.config().size() == 10, "config exposes all 10 configured systems");
+
+    {
+        static const char* const kWrapperSystems[] = {"gb",  "gbc", "nes", "snes", "genesis",
+                                                       "gba", "ps1", "n64", "psp",  "dc"};
+        for (const auto& s : lib.config()) {
+            std::string low = s.name;
+            for (char& ch : low)
+                ch = (char)tolower((unsigned char)ch);
+            bool known = false;
+            for (const char* w : kWrapperSystems)
+                if (low == w) {
+                    known = true;
+                    break;
+                }
+            check(known, ("launch name for " + s.id + " is a blockie-game system").c_str());
+        }
+    }
 
     rm_rf(root);
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
