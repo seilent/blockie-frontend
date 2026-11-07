@@ -1,4 +1,5 @@
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -167,18 +168,21 @@ static int run()
         if (tile_focus < 0 || tile_focus >= (int)recent.size())
             return;
         const Game& g = recent[tile_focus];
-        std::string core;
+        std::string core, sysname;
         for (const auto& s : lib.config())
             if (s.id == g.system_id) {
                 core = s.core;
+                sysname = s.name;
                 break;
             }
+        for (char& ch : sysname)
+            ch = (char)std::tolower((unsigned char)ch);
         if (!launcher.core_installed(core)) {
             std::fprintf(stderr, "blockie-frontend: core %s absent for %s\n", core.c_str(), g.system_id.c_str());
             return;
         }
         LaunchSpec spec;
-        spec.system = g.system_id;
+        spec.system = sysname;
         spec.rompath_abs = g.rompath_abs;
         spec.core = core;
         Launcher::Child ch = launcher.spawn(spec);
@@ -188,7 +192,7 @@ static int run()
         }
         child = ch;
         child_game_id = g.id;
-        std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", g.system_id.c_str(), (int)ch.pid);
+        std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
     };
 
     auto reap_children = [&]() {
@@ -300,6 +304,7 @@ static int run()
     std::mutex art_mutex;
     std::vector<ArtDrop> art_drops;
     std::atomic<bool> scrape_stop{false};
+    std::fprintf(stderr, "blockie-frontend: scrape worklist %zu\n", jobs.size());
     int art_evfd = jobs.empty() ? -1 : eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     std::thread scrape_thread;
     if (!jobs.empty() && art_evfd < 0)
@@ -308,13 +313,18 @@ static int run()
         scrape_thread = std::thread([data_root, jobs = std::move(jobs), art_evfd, &art_mutex, &art_drops,
                                      &scrape_stop]() {
             Library wlib;
-            if (!wlib.open(data_root))
+            if (!wlib.open(data_root)) {
+                std::fprintf(stderr, "blockie-frontend: scrape db open failed\n");
                 return;
+            }
             Scraper sc(wlib, data_root);
             for (const ScrapeJob& j : jobs) {
                 if (scrape_stop.load())
                     break;
                 ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, j.game.name, ArtType::Covers);
+                const char* r = o.cached ? "ok" : o.not_found ? "404" : o.transient ? "err" : "miss";
+                std::fprintf(stderr, "blockie-frontend: scrape %s \"%s\" %s %s\n", j.game.system_id.c_str(),
+                             j.game.name.c_str(), r, o.path.c_str());
                 if (o.cached && !o.path.empty()) {
                     {
                         std::lock_guard<std::mutex> lk(art_mutex);
@@ -325,6 +335,7 @@ static int run()
                     (void)w;
                 }
             }
+            std::fprintf(stderr, "blockie-frontend: scrape done\n");
         });
     }
 
