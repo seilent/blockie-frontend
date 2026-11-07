@@ -103,7 +103,10 @@ int main()
     push(p[1], EV_MSC, MSC_SCAN, 42);
     check(eq(pad.poll(), {}), "unmapped button and misc events yield nothing");
 
+    check(pad.is_open(), "reader open before writer close");
     close(p[1]);
+    check(eq(pad.poll(), {}), "poll after writer eof yields no actions");
+    check(!pad.is_open(), "reader closes its fd on eof instead of spinning");
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

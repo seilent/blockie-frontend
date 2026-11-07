@@ -357,6 +357,7 @@ build_app() {
     done < <(generic_srcs)
     pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
         "$root/blockie/present_wl.cpp"
     pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
@@ -365,7 +366,8 @@ build_app() {
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/present_wl.o" "$appobj/main.o" \
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/input_pad.o" \
+        "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs -lpthread -lm \
         -o "$out/app/blockie-frontend.tmp"
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"

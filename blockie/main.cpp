@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 
+#include <poll.h>
 #include <wayland-client.h>
 
 #ifdef BLOCKIE_HAVE_XKB
@@ -15,6 +16,7 @@
 #endif
 
 #include "../gfx/pixel.h"
+#include "input_pad.h"
 #include "library.h"
 #include "present_wl.h"
 #include "screen_selector.h"
@@ -31,6 +33,19 @@ int64_t now_ms()
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+const char* action_name(PadAction a)
+{
+    switch (a) {
+    case PadAction::Up: return "up";
+    case PadAction::Down: return "down";
+    case PadAction::Left: return "left";
+    case PadAction::Right: return "right";
+    case PadAction::Accept: return "accept";
+    case PadAction::Back: return "back";
+    }
+    return "?";
 }
 
 }
@@ -72,6 +87,7 @@ static int run()
             model.systems.push_back({sw.first.name, sw.second});
     }
 
+    bool need_redraw = false;
     auto redraw = [&]() {
         int64_t tt = now_ms();
         p.begin_frame(tt, p.show_at(tt));
@@ -84,40 +100,98 @@ static int run()
     };
     redraw();
 
-    bool need_redraw = false;
-    p.set_key_handler([&](uint32_t sym, bool pressed) {
-        if (!pressed)
-            return;
+    auto apply = [&](PadAction a) {
         int cnt = (int)model.systems.size();
-        if (cnt == 0)
-            return;
-#ifdef BLOCKIE_HAVE_XKB
-        bool up = sym == XKB_KEY_Up;
-        bool down = sym == XKB_KEY_Down;
-#else
-        bool up = sym == KEY_UP;
-        bool down = sym == KEY_DOWN;
-#endif
-        if (up && model.focus > 0) {
+        if (a == PadAction::Up && model.focus > 0) {
             model.focus--;
             need_redraw = true;
-        } else if (down && model.focus < cnt - 1) {
+        } else if (a == PadAction::Down && cnt > 0 && model.focus < cnt - 1) {
             model.focus++;
             need_redraw = true;
         }
+    };
+
+    p.set_key_handler([&](uint32_t sym, bool pressed) {
+        if (!pressed)
+            return;
+        bool have = true;
+        PadAction a = PadAction::Up;
+#ifdef BLOCKIE_HAVE_XKB
+        if (sym == XKB_KEY_Up) a = PadAction::Up;
+        else if (sym == XKB_KEY_Down) a = PadAction::Down;
+        else if (sym == XKB_KEY_Left) a = PadAction::Left;
+        else if (sym == XKB_KEY_Right) a = PadAction::Right;
+        else if (sym == XKB_KEY_Return) a = PadAction::Accept;
+        else if (sym == XKB_KEY_Escape) a = PadAction::Back;
+        else have = false;
+#else
+        if (sym == KEY_UP) a = PadAction::Up;
+        else if (sym == KEY_DOWN) a = PadAction::Down;
+        else if (sym == KEY_LEFT) a = PadAction::Left;
+        else if (sym == KEY_RIGHT) a = PadAction::Right;
+        else if (sym == KEY_ENTER) a = PadAction::Accept;
+        else if (sym == KEY_ESC) a = PadAction::Back;
+        else have = false;
+#endif
+        if (!have)
+            return;
+        std::fprintf(stderr, "blockie-frontend: key %s\n", action_name(a));
+        apply(a);
     });
+
+    PadReader pad;
+    bool pad_ok = pad.open();
+    std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
 
     std::signal(SIGTERM, on_signal);
     std::signal(SIGINT, on_signal);
 
     wl_display* d = p.display();
+    int wl_fd = p.event_fd();
     while (p.ready() && !g_quit) {
-        p.flush();
-        if (wl_display_dispatch(d) < 0) {
+        while (wl_display_prepare_read(d) != 0)
+            wl_display_dispatch_pending(d);
+        wl_display_flush(d);
+
+        struct pollfd fds[2];
+        int nfds = 1;
+        fds[0].fd = wl_fd;
+        fds[0].events = POLLIN;
+        fds[0].revents = 0;
+        if (pad_ok) {
+            fds[1].fd = pad.fd();
+            fds[1].events = POLLIN;
+            fds[1].revents = 0;
+            nfds = 2;
+        }
+        int pr = poll(fds, nfds, -1);
+        if (pr < 0) {
+            wl_display_cancel_read(d);
             if (errno == EINTR)
                 continue;
             break;
         }
+        if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+            if (wl_display_read_events(d) < 0)
+                break;
+        } else {
+            wl_display_cancel_read(d);
+        }
+        if (wl_display_dispatch_pending(d) < 0)
+            break;
+
+        if (pad_ok && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+            for (PadAction a : pad.poll()) {
+                std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(a));
+                if (p.activated())
+                    apply(a);
+            }
+            if (!pad.is_open()) {
+                pad_ok = false;
+                std::fprintf(stderr, "blockie-frontend: pad disconnected\n");
+            }
+        }
+
         if (need_redraw) {
             redraw();
             need_redraw = false;

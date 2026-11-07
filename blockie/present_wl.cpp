@@ -75,7 +75,18 @@ void WaylandPresenter::surf_configure(void* data, xdg_surface* surf, uint32_t se
     static_cast<WaylandPresenter*>(data)->configured_ = true;
 }
 
-void WaylandPresenter::top_configure(void*, xdg_toplevel*, int32_t, int32_t, wl_array*) {}
+void WaylandPresenter::top_configure(void* data, xdg_toplevel*, int32_t, int32_t, wl_array* states)
+{
+    auto* self = static_cast<WaylandPresenter*>(data);
+    bool act = false;
+    if (states && states->data) {
+        const uint32_t* s = static_cast<const uint32_t*>(states->data);
+        for (size_t i = 0; i < states->size / sizeof(uint32_t); i++)
+            if (s[i] == XDG_TOPLEVEL_STATE_ACTIVATED)
+                act = true;
+    }
+    self->activated_ = act;
+}
 
 void WaylandPresenter::top_close(void* data, xdg_toplevel*)
 {

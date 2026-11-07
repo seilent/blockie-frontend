@@ -58,6 +58,7 @@ public:
     int period_ms() { return inner_.period_ms(); }
     int64_t next_tick(int64_t now, int64_t fallback);
     wl_display* display() const { return dpy_; }
+    bool activated() const { return activated_; }
     void set_key_handler(std::function<void(uint32_t keysym, bool pressed)> f) { key_cb_ = std::move(f); }
 
 private:
@@ -124,6 +125,7 @@ private:
     bool full_ = false;
     bool configured_ = false;
     bool closed_ = false;
+    bool activated_ = false;
 };
 
 }

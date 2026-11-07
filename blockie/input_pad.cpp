@@ -1,5 +1,6 @@
 #include "input_pad.h"
 
+#include <cerrno>
 #include <cstring>
 
 #include <dirent.h>
@@ -92,8 +93,14 @@ std::vector<PadAction> PadReader::poll()
     input_event ev;
     for (;;) {
         ssize_t n = read(fd_, &ev, sizeof ev);
-        if (n != (ssize_t)sizeof ev)
+        if (n != (ssize_t)sizeof ev) {
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+                break;
+            close();
             break;
+        }
         if (ev.type == EV_KEY && ev.value == 1) {
             switch (ev.code) {
             case BTN_EAST: out.push_back(PadAction::Accept); break;
