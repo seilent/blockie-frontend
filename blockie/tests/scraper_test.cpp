@@ -1,0 +1,211 @@
+#include <cstdio>
+#include <functional>
+#include <string>
+#include <vector>
+
+#include <ftw.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "../library.h"
+#include "../scraper.h"
+
+namespace {
+
+int g_fail = 0;
+int g_total = 0;
+
+void check(bool ok, const char* what)
+{
+    g_total++;
+    if (ok) {
+        std::printf("PASS %s\n", what);
+    } else {
+        std::printf("FAIL %s\n", what);
+        g_fail++;
+    }
+}
+
+void mkdirs(const std::string& p)
+{
+    std::string cur;
+    for (size_t i = 0; i < p.size(); i++) {
+        cur += p[i];
+        if (p[i] == '/' || i + 1 == p.size())
+            mkdir(cur.c_str(), 0755);
+    }
+}
+
+void write_file(const std::string& path, const std::string& body)
+{
+    size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos)
+        mkdirs(path.substr(0, slash));
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (f) {
+        std::fwrite(body.data(), 1, body.size(), f);
+        std::fclose(f);
+    }
+}
+
+std::string read_file(const std::string& path)
+{
+    std::string out;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return out;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+        out.append(buf, n);
+    std::fclose(f);
+    return out;
+}
+
+int rm_cb(const char* path, const struct stat*, int, struct FTW*)
+{
+    remove(path);
+    return 0;
+}
+
+void rm_rf(const std::string& p) { nftw(p.c_str(), rm_cb, 16, FTW_DEPTH | FTW_PHYS); }
+
+bool has_media(const std::vector<fd::MediaRef>& v, const std::string& type, const std::string& source,
+               const std::string& path)
+{
+    for (const auto& m : v)
+        if (m.type == type && m.source == source && m.path == path)
+            return true;
+    return false;
+}
+
+const char* kGba = "Nintendo - Game Boy Advance";
+
+}
+
+int main()
+{
+    check(fd::Scraper::url_for(kGba, "Synth Game (USA, Europe)", fd::ArtType::Covers) ==
+              "https://thumbnails.libretro.com/Nintendo%20-%20Game%20Boy%20Advance/Named_Boxarts/"
+              "Synth%20Game%20%28USA%2C%20Europe%29.png",
+          "url_for covers encodes folder+name (space %20, comma %2C, parens %28 %29)");
+    check(fd::Scraper::url_for(kGba, "Anguna", fd::ArtType::Snaps) ==
+              "https://thumbnails.libretro.com/Nintendo%20-%20Game%20Boy%20Advance/Named_Snaps/Anguna.png",
+          "url_for snaps maps to Named_Snaps");
+    check(fd::Scraper::url_for(kGba, "Anguna", fd::ArtType::Titles) ==
+              "https://thumbnails.libretro.com/Nintendo%20-%20Game%20Boy%20Advance/Named_Titles/Anguna.png",
+          "url_for titles maps to Named_Titles");
+
+    check(fd::Scraper::local_path("/data", "gba", "Anguna", fd::ArtType::Covers) == "/data/media/gba/covers/Anguna.png",
+          "local_path covers layout");
+    check(fd::Scraper::local_path("/data/", "gba", "Anguna", fd::ArtType::Snaps) == "/data/media/gba/snaps/Anguna.png",
+          "local_path strips trailing slash, snaps dir");
+    check(fd::Scraper::local_path("/data", "gba", "Anguna", fd::ArtType::Titles) == "/data/media/gba/titles/Anguna.png",
+          "local_path titles dir");
+
+    char tmpl[] = "/tmp/blockie-scraper-test.XXXXXX";
+    char* root_c = mkdtemp(tmpl);
+    if (!root_c) {
+        std::fprintf(stderr, "mkdtemp failed\n");
+        return 1;
+    }
+    std::string root = root_c;
+
+    fd::Library lib;
+    check(lib.open(root), "library open");
+
+    int calls = 0;
+    std::string last_url;
+    std::function<fd::HttpResult(const std::string&)> responder = [](const std::string&) {
+        return fd::HttpResult{0, std::string(), true};
+    };
+    fd::Fetcher fetch = [&](const std::string& url) {
+        calls++;
+        last_url = url;
+        return responder(url);
+    };
+
+    fd::Scraper scr(lib, root, fetch);
+
+    {
+        std::string local = fd::Scraper::local_path(root, "gba", "Local Hit", fd::ArtType::Covers);
+        write_file(local, "localbytes");
+        int before = calls;
+        fd::ArtOutcome o = scr.art(1, "gba", kGba, "Local Hit", fd::ArtType::Covers);
+        check(o.cached && !o.not_found && !o.transient && o.path == local, "local hit returns cached local path");
+        check(calls == before, "local hit does not call the fetcher");
+        std::vector<fd::MediaRef> md = lib.media(1);
+        check(has_media(md, "covers", "local", local), "local hit records media source=local");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{200, "pngbytes", false}; };
+        int before = calls;
+        fd::ArtOutcome o = scr.art(2, "gba", kGba, "Fetch Ok", fd::ArtType::Snaps);
+        std::string expect = fd::Scraper::local_path(root, "gba", "Fetch Ok", fd::ArtType::Snaps);
+        check(o.cached && !o.not_found && !o.transient && o.path == expect, "200 returns cached written path");
+        check(calls == before + 1, "200 called the fetcher once");
+        check(read_file(expect) == "pngbytes", "200 wrote the body to the local path");
+        std::vector<fd::MediaRef> md = lib.media(2);
+        check(has_media(md, "snaps", "libretro", expect), "200 records media source=libretro");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{404, std::string(), false}; };
+        fd::ArtOutcome o = scr.art(3, "gba", kGba, "Missing Art", fd::ArtType::Titles);
+        check(!o.cached && o.not_found && !o.transient, "404 returns not_found");
+        check(lib.media(3).empty(), "404 records nothing");
+        std::string p = fd::Scraper::local_path(root, "gba", "Missing Art", fd::ArtType::Titles);
+        check(access(p.c_str(), F_OK) != 0, "404 writes no file");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{0, std::string(), true}; };
+        fd::ArtOutcome o = scr.art(4, "gba", kGba, "Net Down", fd::ArtType::Covers);
+        check(!o.cached && !o.not_found && o.transient, "transport_error returns transient");
+        check(lib.media(4).empty(), "transient records nothing");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{503, std::string(), false}; };
+        fd::ArtOutcome o = scr.art(8, "gba", kGba, "Server Err", fd::ArtType::Covers);
+        check(!o.cached && !o.not_found && o.transient, "5xx returns transient");
+        check(lib.media(8).empty(), "5xx records nothing");
+    }
+
+    {
+        responder = [](const std::string&) { return fd::HttpResult{0, std::string(), true}; };
+        fd::ArtOutcome o1 = scr.art(5, "gba", kGba, "Flaky Art", fd::ArtType::Snaps);
+        check(o1.transient && lib.media(5).empty(), "first attempt transient, no negative mark");
+        int c1 = calls;
+        responder = [](const std::string&) { return fd::HttpResult{200, "later", false}; };
+        fd::ArtOutcome o2 = scr.art(5, "gba", kGba, "Flaky Art", fd::ArtType::Snaps);
+        check(calls == c1 + 1, "transient game is re-fetched (no negative cache)");
+        check(o2.cached, "retry after transient caches");
+        std::string expect = fd::Scraper::local_path(root, "gba", "Flaky Art", fd::ArtType::Snaps);
+        check(has_media(lib.media(5), "snaps", "libretro", expect), "retry records media source=libretro");
+    }
+
+    {
+        responder = [](const std::string& url) -> fd::HttpResult {
+            if (url.find("Named_Boxarts") != std::string::npos)
+                return {200, "box", false};
+            return {404, std::string(), false};
+        };
+        fd::Game g;
+        g.id = 7;
+        g.system_id = "gba";
+        g.name = "Anguna";
+        g.is_multidisc = false;
+        g.present = true;
+        scr.scrape_game(g, kGba);
+        std::vector<fd::MediaRef> md = lib.media(7);
+        std::string cover = fd::Scraper::local_path(root, "gba", "Anguna", fd::ArtType::Covers);
+        check(md.size() == 1 && has_media(md, "covers", "libretro", cover),
+              "scrape_game fills only the type that exists (per-type 404 for the rest)");
+    }
+
+    rm_rf(root);
+    std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
+    return g_fail == 0 ? 0 : 1;
+}

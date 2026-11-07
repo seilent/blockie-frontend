@@ -19,8 +19,8 @@ fi
 target=${1:-all}
 
 case $target in
-    all | generic | app | scan | test) ;;
-    *) echo "build.sh: target $target, want all, generic, app, scan or test" >&2; exit 2 ;;
+    all | generic | app | scan | test | scraper) ;;
+    *) echo "build.sh: target $target, want all, generic, app, scan, test or scraper" >&2; exit 2 ;;
 esac
 
 stb_url=https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h
@@ -59,6 +59,7 @@ depobj=$out/deps/obj
 genobj=$out/generic/obj
 appobj=$out/app/obj
 scanobj=$out/scan/obj
+scraperobj=$out/scraper/obj
 testobj=$out/test/obj
 
 fetch() {
@@ -373,8 +374,28 @@ build_test() {
     "$out/test/blockie-test"
 }
 
+build_scraper_test() {
+    build_sqlite_obj || return 1
+    pkg-config --exists libcurl || { echo "build.sh: libcurl not found" >&2; return 1; }
+    local curl_cflags curl_libs
+    curl_cflags=$(pkg-config --cflags libcurl)
+    curl_libs=$(pkg-config --libs libcurl)
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$scanobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$scraperobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
+    pool "$testobj/scraper_test.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/tests/scraper_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/scraper"
+    "$cxx" "$scanobj/library.o" "$scraperobj/scraper.o" "$testobj/scraper_test.o" "$depobj/sqlite3.o" \
+        $appldflags $curl_libs -lpthread -lm -o "$out/scraper/blockie-scraper-test.tmp"
+    mv "$out/scraper/blockie-scraper-test.tmp" "$out/scraper/blockie-scraper-test"
+    echo "build.sh: $out/scraper/blockie-scraper-test"
+    "$out/scraper/blockie-scraper-test"
+}
+
 fail=0
-mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$testobj"
+mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$testobj"
 case $target in
     all | generic | app)
         deps
@@ -386,5 +407,6 @@ esac
 [[ $target == generic || $target == all ]] && { build_generic || { echo "build.sh: generic profile failed" >&2; exit 1; }; }
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 exit 0
