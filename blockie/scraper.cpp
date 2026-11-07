@@ -17,6 +17,97 @@ namespace {
 constexpr const char* kDbPin = "c4e17d41ec1bb744fb064f7cefeb61b878fc5d64";
 const std::string kDbEpoch(kDbPin, 7);
 constexpr int64_t kNegTtl = 30LL * 24 * 3600;
+constexpr size_t kMaxFetch = 32u * 1024 * 1024;
+
+std::string dat_sha(const std::string& system_id)
+{
+    if (system_id == "gb")
+        return "2dc0e5dd0ec696b60a4fc1987b1f84814a08cebc31138551f2e7ef9f11e10f74";
+    if (system_id == "gbc")
+        return "63cd203e8bc36273f13129be0b039c023f8475e5c82e69776bf659534041fb5a";
+    if (system_id == "gba")
+        return "0b8bd3a414276e9c31137b0a245fcdaf917d34fd035e02499c965a290ac8fce4";
+    if (system_id == "nes")
+        return "f8afe5fd148ba547287b1c5ddd1a92bb7fc3a42351205c466fe380da18aec34b";
+    if (system_id == "snes")
+        return "76bb6fc95243d03c0842b0600c34c9a0e6e711be0027d7d4fe90330658ae20ec";
+    if (system_id == "genesis")
+        return "2785056d877edd519a31bcc9e042f1aa8821e3ce2520edcc744dd7ecd56e6a4a";
+    if (system_id == "n64")
+        return "17c3a83994717859cca16a89f5b84952dcd8e55d45fe0cf42b1245f565683e49";
+    return "";
+}
+
+std::string sha256_hex(const std::string& data)
+{
+    static const uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+    std::string msg = data;
+    uint64_t bitlen = (uint64_t)msg.size() * 8;
+    msg += (char)0x80;
+    while (msg.size() % 64 != 56)
+        msg += (char)0x00;
+    for (int i = 7; i >= 0; i--)
+        msg += (char)((bitlen >> (i * 8)) & 0xff);
+
+    auto rotr = [](uint32_t x, int n) -> uint32_t { return (x >> n) | (x << (32 - n)); };
+    for (size_t off = 0; off < msg.size(); off += 64) {
+        const unsigned char* p = reinterpret_cast<const unsigned char*>(msg.data()) + off;
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++)
+            w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) | ((uint32_t)p[i * 4 + 2] << 8) |
+                   (uint32_t)p[i * 4 + 3];
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            uint32_t ch = (e & f) ^ (~e & g);
+            uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+            uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t t2 = S0 + maj;
+            hh = g;
+            g = f;
+            f = e;
+            e = d + t1;
+            d = c;
+            c = b;
+            b = a;
+            a = t1 + t2;
+        }
+        h[0] += a;
+        h[1] += b;
+        h[2] += c;
+        h[3] += d;
+        h[4] += e;
+        h[5] += f;
+        h[6] += g;
+        h[7] += hh;
+    }
+    static const char* hx = "0123456789abcdef";
+    std::string out;
+    out.reserve(64);
+    for (int i = 0; i < 8; i++)
+        for (int j = 3; j >= 0; j--) {
+            unsigned char byte = (h[i] >> (j * 8)) & 0xff;
+            out += hx[byte >> 4];
+            out += hx[byte & 0xf];
+        }
+    return out;
+}
 
 std::string pct(const std::string& s)
 {
@@ -362,8 +453,11 @@ void parse_dat(const std::string& body, std::unordered_map<uint32_t, std::string
 size_t curl_write(char* ptr, size_t size, size_t nmemb, void* userdata)
 {
     std::string* body = static_cast<std::string*>(userdata);
-    body->append(ptr, size * nmemb);
-    return size * nmemb;
+    size_t want = size * nmemb;
+    if (body->size() + want > kMaxFetch)
+        return 0;
+    body->append(ptr, want);
+    return want;
 }
 
 int curl_xfer(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
@@ -397,6 +491,7 @@ HttpResult curl_fetch(const std::string& url, const std::atomic<bool>* abort)
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &r.body);
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(h, CURLOPT_MAXFILESIZE_LARGE, (curl_off_t)kMaxFetch);
     curl_easy_setopt(h, CURLOPT_USERAGENT, "blockie-frontend");
     curl_easy_setopt(h, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
@@ -458,6 +553,11 @@ std::optional<uint32_t> Scraper::rom_crc(const std::string& path, const std::vec
     return crc32_rom(path, exts);
 }
 
+std::string Scraper::sha256_hex(const std::string& data)
+{
+    return fd::sha256_hex(data);
+}
+
 const std::unordered_map<uint32_t, std::string>* Scraper::dat_index(const std::string& system_id,
                                                                     const std::string& basename)
 {
@@ -478,6 +578,8 @@ const std::unordered_map<uint32_t, std::string>* Scraper::dat_index(const std::s
 
     HttpResult r = fetch_(dat_url(basename));
     if (r.transport_error || r.status != 200 || r.body.empty() || r.body.compare(0, 12, "clrmamepro (") != 0)
+        return nullptr;
+    if (sha256_hex(r.body) != dat_sha(system_id))
         return nullptr;
     write_atomic(path, r.body);
     auto& m = dat_cache_[system_id];

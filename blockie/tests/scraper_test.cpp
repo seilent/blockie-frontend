@@ -405,6 +405,34 @@ int main()
         check(o2.cached && calls == c1 + 1, "a negative row under a different dat epoch does not suppress the lookup");
     }
 
+    {
+        check(fd::Scraper::sha256_hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+              "sha256 abc KAT");
+        check(fd::Scraper::sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+                  "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+              "sha256 two-block KAT");
+
+        std::string gbrom = root + "/synth.gb";
+        std::string gbbody(200, '\0');
+        for (size_t i = 0; i < gbbody.size(); i++)
+            gbbody[i] = (char)(i * 11 + 1);
+        write_file(gbrom, gbbody);
+        std::optional<uint32_t> rc = fd::Scraper::rom_crc(gbrom, {".gb", ".zip"});
+        uint32_t crc = rc ? *rc : 0;
+        std::string dat = "clrmamepro (\n\tname \"Nintendo - Game Boy\"\n)\n"
+                          "game (\n\tname \"Should Not Resolve\"\n"
+                          "\trom ( name \"x.gb\" size 200 crc " +
+                          hex8(crc) + " )\n)\n";
+        responder = [dat](const std::string& url) -> fd::HttpResult {
+            if (url.find("metadat/no-intro") != std::string::npos)
+                return {200, dat, false};
+            return {404, std::string(), false};
+        };
+        fd::Scraper rs4(lib, root, fetch);
+        check(rs4.resolve_name("gb", gbrom).empty(),
+              "a fetched dat whose sha256 does not match the pin is rejected, not parsed");
+    }
+
     rm_rf(root);
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

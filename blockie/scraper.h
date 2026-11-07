@@ -42,6 +42,7 @@ public:
     static std::string local_path(const std::string& data_root, const std::string& system_id,
                                   const std::string& name, ArtType type);
     static std::optional<uint32_t> rom_crc(const std::string& path, const std::vector<std::string>& exts);
+    static std::string sha256_hex(const std::string& data);
 
 private:
     const std::unordered_map<uint32_t, std::string>* dat_index(const std::string& system_id,
