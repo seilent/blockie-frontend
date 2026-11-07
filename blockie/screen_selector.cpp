@@ -8,16 +8,6 @@ namespace fd {
 
 namespace {
 
-struct System {
-    const char* name;
-    int games;
-};
-
-constexpr System kSystems[] = {
-    {"Game Boy", 28},       {"Game Boy Color", 19}, {"NES", 63},
-    {"SNES", 47},           {"Genesis", 35},        {"Game Boy Advance", 52},
-};
-
 constexpr int kLabelX = 512;
 constexpr int kFirstBaseline = 96;
 constexpr int kPitch = 96;
@@ -47,9 +37,9 @@ void count_line(char* out, size_t n, int games) { snprintf(out, n, games == 1 ? 
 
 }
 
-void draw_selector(Canvas& c, Fonts& fonts, Pane focus)
+void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane)
 {
-    bool on = focus == Pane::Selector;
+    bool on = focus_pane == Pane::Selector;
 
     c.fill(c.surface().rect(), tok::color_bg);
 
@@ -64,14 +54,15 @@ void draw_selector(Canvas& c, Fonts& fonts, Pane focus)
             c.blend({x, y, x + kTileSide, y + kTileSide}, tok::color_tile, tile_alpha);
         }
 
-    int focus_item = on ? 0 : -1;
-    for (int i = 0; i < (int)(sizeof kSystems / sizeof kSystems[0]); i++) {
+    int focus_item = on ? model.focus : -1;
+    for (int i = 0; i < (int)model.systems.size(); i++) {
         int baseline = kFirstBaseline + i * kPitch;
         int label_alpha = alpha256(i == focus_item ? role::homeItem.alpha : tok::type_homeItem_alphaDim);
-        fonts.draw(c, role::homeItem.style(), kSystems[i].name, x64(kLabelX), baseline, kWhite, label_alpha);
+        fonts.draw(c, role::homeItem.style(), model.systems[i].name.c_str(), x64(kLabelX), baseline, kWhite,
+                   label_alpha);
 
         char sub[32];
-        count_line(sub, sizeof sub, kSystems[i].games);
+        count_line(sub, sizeof sub, model.systems[i].games);
         fonts.draw(c, role::homeSubtitle.style(), sub, x64(kSubtitleX), baseline + kSubtitleDrop, kWhite,
                    alpha256(role::homeSubtitle.alpha));
 

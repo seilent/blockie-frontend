@@ -320,13 +320,23 @@ build_generic() {
 build_app() {
     command -v wayland-scanner > /dev/null || { echo "build.sh: wayland-scanner not found" >&2; exit 1; }
     pkg-config --exists wayland-client || { echo "build.sh: wayland-client not found" >&2; exit 1; }
+    build_sqlite_obj || return 1
     mkdir -p "$gen"
     fetch "$xdg_url" "$cache/xdg-shell-1.41.xml" "$xdg_sha"
     wayland-scanner client-header "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-client-protocol.h"
     wayland-scanner private-code "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-protocol.c"
-    local wl_cflags wl_libs
+    local wl_cflags wl_libs xkb_cflags xkb_libs
     wl_cflags=$(pkg-config --cflags wayland-client)
     wl_libs=$(pkg-config --libs wayland-client)
+    xkb_cflags=
+    xkb_libs=
+    if pkg-config --exists xkbcommon; then
+        xkb_cflags="-DBLOCKIE_HAVE_XKB $(pkg-config --cflags xkbcommon)"
+        xkb_libs=$(pkg-config --libs xkbcommon)
+        echo "build.sh: keyboard via xkbcommon"
+    else
+        echo "build.sh: keyboard via raw evdev keycodes (xkbcommon not found)"
+    fi
     toolver=$("$cc" --version | head -n 1)
     pool "$appobj/xdg-shell-protocol.o" "$cc" -O2 -w $wl_cflags $appcflags "$gen/xdg-shell-protocol.c"
     drain
@@ -338,15 +348,19 @@ build_app() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $appcflags -I"$gen" "$root/blockie/present_wl.cpp"
-    pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
+    pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
+        "$root/blockie/present_wl.cpp"
+    pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/present_wl.o" "$appobj/main.o" "$appobj/xdg-shell-protocol.o" \
-        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/app/blockie-frontend.tmp"
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/present_wl.o" "$appobj/main.o" \
+        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs -lpthread -lm \
+        -o "$out/app/blockie-frontend.tmp"
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
 }
@@ -453,10 +467,15 @@ build_shot() {
 
 build_install() {
     [[ -x $out/app/blockie-frontend ]] || { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
+    deps_fonts
     install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
     install -Dm644 "$root/dist/blockie-frontend.service" "$destdir$prefix/lib/systemd/user/blockie-frontend.service" ||
         return 1
     install -Dm644 "$root/LICENSE" "$destdir$prefix/share/licenses/blockie-frontend/LICENSE" || return 1
+    local f
+    for f in selawkl.ttf selawk.ttf selawkb.ttf selawksl.ttf; do
+        install -Dm644 "$fonts_dir/$f" "$destdir$prefix/share/blockie/fonts/$f" || return 1
+    done
     echo "build.sh: installed to $destdir$prefix"
 }
 

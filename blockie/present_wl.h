@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include "../gfx/present.h"
@@ -14,9 +15,16 @@ struct wl_shm_pool;
 struct wl_region;
 struct wl_callback;
 struct wl_array;
+struct wl_seat;
+struct wl_keyboard;
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
+#ifdef BLOCKIE_HAVE_XKB
+struct xkb_context;
+struct xkb_keymap;
+struct xkb_state;
+#endif
 
 namespace fd {
 
@@ -50,6 +58,7 @@ public:
     int period_ms() { return inner_.period_ms(); }
     int64_t next_tick(int64_t now, int64_t fallback);
     wl_display* display() const { return dpy_; }
+    void set_key_handler(std::function<void(uint32_t keysym, bool pressed)> f) { key_cb_ = std::move(f); }
 
 private:
     struct Buf {
@@ -63,6 +72,11 @@ private:
     int pick_buf();
     void copy_rows(Buf& b, Rect r);
 
+    void on_seat_caps(uint32_t caps);
+    void on_keymap(uint32_t format, int fd, uint32_t size);
+    void on_key(uint32_t key, uint32_t state);
+    void on_modifiers(uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group);
+
     static void reg_global(void* data, wl_registry* reg, uint32_t name, const char* iface, uint32_t version);
     static void reg_remove(void* data, wl_registry* reg, uint32_t name);
     static void wm_ping(void* data, xdg_wm_base* base, uint32_t serial);
@@ -70,6 +84,15 @@ private:
     static void top_configure(void* data, xdg_toplevel* top, int32_t w, int32_t h, wl_array* states);
     static void top_close(void* data, xdg_toplevel* top);
     static void buf_release(void* data, wl_buffer* wl);
+    static void seat_caps(void* data, wl_seat* seat, uint32_t caps);
+    static void seat_name(void* data, wl_seat* seat, const char* name);
+    static void kb_keymap(void* data, wl_keyboard* kb, uint32_t format, int fd, uint32_t size);
+    static void kb_enter(void* data, wl_keyboard* kb, uint32_t serial, wl_surface* surf, wl_array* keys);
+    static void kb_leave(void* data, wl_keyboard* kb, uint32_t serial, wl_surface* surf);
+    static void kb_key(void* data, wl_keyboard* kb, uint32_t serial, uint32_t time, uint32_t key, uint32_t state);
+    static void kb_modifiers(void* data, wl_keyboard* kb, uint32_t serial, uint32_t depressed, uint32_t latched,
+                             uint32_t locked, uint32_t group);
+    static void kb_repeat(void* data, wl_keyboard* kb, int32_t rate, int32_t delay);
 
     PresenterT<X888, Rows> inner_;
     wl_display* dpy_ = nullptr;
@@ -80,6 +103,14 @@ private:
     xdg_wm_base* wm_ = nullptr;
     xdg_surface* xsurf_ = nullptr;
     xdg_toplevel* top_ = nullptr;
+    wl_seat* seat_ = nullptr;
+    wl_keyboard* kbd_ = nullptr;
+    std::function<void(uint32_t, bool)> key_cb_;
+#ifdef BLOCKIE_HAVE_XKB
+    xkb_context* xkb_ctx_ = nullptr;
+    xkb_keymap* xkb_map_ = nullptr;
+    xkb_state* xkb_state_ = nullptr;
+#endif
     wl_shm_pool* pool_ = nullptr;
     void* map_ = nullptr;
     size_t map_len_ = 0;

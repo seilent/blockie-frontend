@@ -44,9 +44,16 @@ int main(int argc, char** argv)
     }
     fonts.begin_frame(-1);
 
+    SelectorModel model;
+    model.systems = {
+        {"Game Boy", 28}, {"Game Boy Color", 19}, {"NES", 63},
+        {"SNES", 47},     {"Genesis", 35},        {"Game Boy Advance", 52},
+    };
+    model.focus = 0;
+
     Buffer buf;
     Canvas c(buf.surface());
-    draw_selector(c, fonts, focus);
+    draw_selector(c, fonts, model, focus);
 
     if (!write_png(out, buf.surface())) {
         fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
