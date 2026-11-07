@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <poll.h>
@@ -156,10 +157,14 @@ static int run()
     int sys_focus = 0;
     int sys_scroll = 0;
     std::string sys_name;
+    std::unordered_map<int64_t, Image> cover_cache;
     Launcher::Child child;
     int64_t child_game_id = -1;
 
     auto load_cover = [&](const Game& g) -> Image {
+        auto it = cover_cache.find(g.id);
+        if (it != cover_cache.end())
+            return it->second;
         Image img;
         for (const auto& m : lib.media(g.id))
             if (m.type == "covers") {
@@ -168,6 +173,8 @@ static int run()
                     img = Image::from_portrait(d.rgb.data(), d.w, d.h);
                 break;
             }
+        if (img.w > 0)
+            cover_cache[g.id] = img;
         return img;
     };
     auto redraw = [&]() {
@@ -260,7 +267,10 @@ static int run()
         system_view = false;
         model.tiles.swap(recent_hold);
         recent_hold.clear();
+        cover_cache.clear();
         model.section_label.clear();
+        model.game_system.clear();
+        model.game_title.clear();
         pane = Pane::Selector;
         need_redraw = true;
     };

@@ -35,6 +35,7 @@ constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
 constexpr int kDetailX = 512;
+constexpr int kDetailRight = 928;
 constexpr int kDetailSystemBaseline = 120;
 constexpr int kDetailTitleBaseline = 232;
 
@@ -131,10 +132,14 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
     }
 
     if (detail) {
+        Rect prev = c.clip();
+        Rect sr = c.surface().rect();
+        c.set_clip({kDetailX, sr.y0, kDetailRight, sr.y1});
         fonts.draw(c, role::npArtist.style(), model.game_system.c_str(), x64(kDetailX), kDetailSystemBaseline, kWhite,
                    alpha256(role::npArtist.alpha));
         fonts.draw(c, role::npTitle.style(), model.game_title.c_str(), x64(kDetailX), kDetailTitleBaseline, kWhite,
                    alpha256(role::npTitle.alpha));
+        c.set_clip(prev);
         return;
     }
 
