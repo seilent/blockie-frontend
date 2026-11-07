@@ -83,10 +83,11 @@ int main()
     push(p[1], EV_ABS, ABS_HAT0X, -1);
     check(eq(pad.poll(), {PadAction::Right, PadAction::Left}), "hat0x right then release then left");
 
-    push(p[1], EV_KEY, BTN_SOUTH, 1);
-    push(p[1], EV_KEY, BTN_SOUTH, 0);
     push(p[1], EV_KEY, BTN_EAST, 1);
-    check(eq(pad.poll(), {PadAction::Accept, PadAction::Back}), "south accept, release ignored, east back");
+    push(p[1], EV_KEY, BTN_EAST, 0);
+    push(p[1], EV_KEY, BTN_SOUTH, 1);
+    check(eq(pad.poll(), {PadAction::Accept, PadAction::Back}),
+          "east accept, release ignored, south back (nintendo placement)");
 
     push(p[1], EV_KEY, BTN_DPAD_UP, 1);
     push(p[1], EV_KEY, BTN_DPAD_DOWN, 1);
