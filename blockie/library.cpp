@@ -118,12 +118,15 @@ bool Library::init_schema()
         "CREATE TABLE IF NOT EXISTS system(id TEXT PRIMARY KEY, name TEXT, folder TEXT, exts TEXT,"
         " libretro_folder TEXT, core TEXT);"
         "CREATE TABLE IF NOT EXISTS game(id INTEGER PRIMARY KEY, system_id TEXT, name TEXT, rompath_abs TEXT,"
-        " is_multidisc INTEGER, m3u_path TEXT, added_at INTEGER, present INTEGER);"
+        " is_multidisc INTEGER, m3u_path TEXT, added_at INTEGER, present INTEGER, last_played INTEGER);"
         "CREATE UNIQUE INDEX IF NOT EXISTS game_sys_name ON game(system_id, name);"
         "CREATE TABLE IF NOT EXISTS media(game_id INTEGER, type TEXT, path TEXT, source TEXT,"
         " UNIQUE(game_id, type));"
         "CREATE TABLE IF NOT EXISTS meta(game_id INTEGER, field TEXT, value TEXT, UNIQUE(game_id, field));";
-    return sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+    if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_exec(db_, "ALTER TABLE game ADD COLUMN last_played INTEGER;", nullptr, nullptr, nullptr);
+    return true;
 }
 
 void Library::seed_systems()
@@ -357,6 +360,44 @@ std::vector<Game> Library::games(const std::string& system_id)
     }
     sqlite3_finalize(st);
     return out;
+}
+
+std::vector<Game> Library::recent_games(int limit)
+{
+    std::vector<Game> out;
+    if (limit <= 0)
+        return out;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_,
+                       "SELECT id, system_id, name, rompath_abs, is_multidisc, m3u_path, present"
+                       " FROM game WHERE present=1"
+                       " ORDER BY last_played IS NULL, last_played DESC, added_at DESC, id DESC LIMIT ?;",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, limit);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        Game g;
+        g.id = sqlite3_column_int64(st, 0);
+        g.system_id = (const char*)sqlite3_column_text(st, 1);
+        g.name = (const char*)sqlite3_column_text(st, 2);
+        g.rompath_abs = (const char*)sqlite3_column_text(st, 3);
+        g.is_multidisc = sqlite3_column_int(st, 4) != 0;
+        const unsigned char* m3u = sqlite3_column_text(st, 5);
+        g.m3u_path = m3u ? (const char*)m3u : "";
+        g.present = sqlite3_column_int(st, 6) != 0;
+        out.push_back(std::move(g));
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+void Library::mark_played(int64_t game_id, int64_t when)
+{
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_, "UPDATE game SET last_played=? WHERE id=?;", -1, &st, nullptr);
+    sqlite3_bind_int64(st, 1, when);
+    sqlite3_bind_int64(st, 2, game_id);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
 }
 
 std::vector<MediaRef> Library::media(int64_t game_id)

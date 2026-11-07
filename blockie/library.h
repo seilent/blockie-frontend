@@ -40,6 +40,8 @@ public:
     int scan();
     std::vector<std::pair<SystemCfg, int>> systems_with_games();
     std::vector<Game> games(const std::string& system_id);
+    std::vector<Game> recent_games(int limit);
+    void mark_played(int64_t game_id, int64_t when);
     std::vector<MediaRef> media(int64_t game_id);
     std::vector<MetaField> meta(int64_t game_id);
     void set_media(int64_t game_id, const std::string& type, const std::string& path, const std::string& source);
