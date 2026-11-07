@@ -30,6 +30,7 @@ constexpr int kGridRows = 4;
 constexpr int kGridRowPitch = 158;
 constexpr int kSectionBaseline = 70;
 constexpr int kTileFirstTop = 80;
+constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
 int x64(int px) { return px * 64; }
@@ -60,7 +61,8 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
 
     fx pane = on ? tok::motion_quickplayAlpha : tok::alpha_full;
     int tile_alpha = alpha256(pane);
-    fonts.draw(c, role::quickplayHeader.style(), kSectionLabel, x64(kGridX), kSectionBaseline, kWhite,
+    const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
+    fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, kWhite,
                alpha256(fx_mul(role::quickplayHeader.alpha, pane)));
     for (int r = 0; r < kGridRows; r++)
         for (int col = 0; col < kGridCols; col++) {
@@ -82,6 +84,15 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
                 c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
             }
         }
+
+    if (!on && model.tile_focus >= 0 && model.tile_focus < kGridRows * kGridCols) {
+        int col = model.tile_focus % kGridCols;
+        int r = model.tile_focus / kGridCols;
+        int x = kGridX + col * (kTileSide + kGridGutter);
+        int y = kTileFirstTop + r * kGridRowPitch;
+        Rect tr{x, y, x + kTileSide, y + kTileSide};
+        c.frame_aa(Rect64::of(tr.grow(kTileFocusBorder), Zoom{}), Rect64::of(tr, Zoom{}), kWhite, 256);
+    }
 
     int focus_item = on ? model.focus : -1;
     for (int i = 0; i < (int)model.systems.size(); i++) {

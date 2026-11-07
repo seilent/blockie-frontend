@@ -52,6 +52,9 @@ int main(int argc, char** argv)
     std::string out;
     std::string font_dir;
     std::string tiles_dir;
+    std::string header;
+    int tile_focus = -1;
+    int sys_focus = 0;
     Pane focus = Pane::Selector;
     ArtFit fit = ArtFit::Cover;
     if (const char* env = getenv("BLOCKIE_FONTS"))
@@ -66,6 +69,12 @@ int main(int argc, char** argv)
             tiles_dir = argv[++i];
         else if (a == "--fit" && i + 1 < argc)
             fit = std::string(argv[++i]) == "cover" ? ArtFit::Cover : ArtFit::Contain;
+        else if (a == "--header" && i + 1 < argc)
+            header = argv[++i];
+        else if (a == "--tilefocus" && i + 1 < argc)
+            tile_focus = atoi(argv[++i]);
+        else if (a == "--sysfocus" && i + 1 < argc)
+            sys_focus = atoi(argv[++i]);
         else if (out.empty())
             out = a;
         else {
@@ -75,7 +84,8 @@ int main(int argc, char** argv)
     }
     if (out.empty()) {
         fprintf(stderr,
-                "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]\n");
+                "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
+                " [--header TEXT] [--tilefocus N] [--sysfocus N]\n");
         return 2;
     }
     if (font_dir.empty())
@@ -93,7 +103,7 @@ int main(int argc, char** argv)
         {"Game Boy", 28}, {"Game Boy Color", 19}, {"NES", 63},
         {"SNES", 47},     {"Genesis", 35},        {"Game Boy Advance", 52},
     };
-    model.focus = 0;
+    model.focus = sys_focus < 0 ? 0 : (sys_focus >= (int)model.systems.size() ? 0 : sys_focus);
 
     if (!tiles_dir.empty()) {
         for (const std::string& p : pngs_in(tiles_dir)) {
@@ -106,6 +116,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "blockie-shot: skip %s\n", p.c_str());
         }
     }
+
+    model.section_label = header;
+    if (focus == Pane::Details && tile_focus < 0)
+        tile_focus = 0;
+    model.tile_focus = tile_focus;
 
     Buffer buf;
     Canvas c(buf.surface());

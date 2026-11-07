@@ -20,6 +20,8 @@ struct SelectorModel {
     std::vector<SelectorItem> systems;
     int focus = 0;
     std::vector<Image> tiles;
+    std::string section_label;
+    int tile_focus = -1;
 };
 
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane,
