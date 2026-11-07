@@ -1,12 +1,14 @@
 #include <cerrno>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 #include <poll.h>
+#include <signal.h>
+#include <sys/signalfd.h>
+#include <unistd.h>
 #include <wayland-client.h>
 
 #ifdef BLOCKIE_HAVE_XKB
@@ -24,10 +26,6 @@
 namespace fd {
 
 namespace {
-
-volatile sig_atomic_t g_quit = 0;
-
-void on_signal(int) { g_quit = 1; }
 
 int64_t now_ms()
 {
@@ -143,26 +141,39 @@ static int run()
     bool pad_ok = pad.open();
     std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
 
-    std::signal(SIGTERM, on_signal);
-    std::signal(SIGINT, on_signal);
+    int sfd = -1;
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGTERM);
+    sigaddset(&mask, SIGINT);
+    if (sigprocmask(SIG_BLOCK, &mask, nullptr) == 0) {
+        sfd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+        if (sfd < 0)
+            sigprocmask(SIG_UNBLOCK, &mask, nullptr);
+    }
 
     wl_display* d = p.display();
     int wl_fd = p.event_fd();
-    while (p.ready() && !g_quit) {
+    while (p.ready()) {
         while (wl_display_prepare_read(d) != 0)
             wl_display_dispatch_pending(d);
         wl_display_flush(d);
 
-        struct pollfd fds[2];
-        int nfds = 1;
+        struct pollfd fds[3];
         fds[0].fd = wl_fd;
         fds[0].events = POLLIN;
         fds[0].revents = 0;
+        fds[1].fd = sfd;
+        fds[1].events = POLLIN;
+        fds[1].revents = 0;
+        int nfds = 2;
+        int pi = -1;
         if (pad_ok) {
-            fds[1].fd = pad.fd();
-            fds[1].events = POLLIN;
-            fds[1].revents = 0;
-            nfds = 2;
+            pi = nfds;
+            fds[pi].fd = pad.fd();
+            fds[pi].events = POLLIN;
+            fds[pi].revents = 0;
+            nfds++;
         }
         int pr = poll(fds, nfds, -1);
         if (pr < 0) {
@@ -180,7 +191,10 @@ static int run()
         if (wl_display_dispatch_pending(d) < 0)
             break;
 
-        if (pad_ok && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+        if (fds[1].revents & POLLIN)
+            break;
+
+        if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
             for (PadAction a : pad.poll()) {
                 std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(a));
                 if (p.activated())
@@ -197,6 +211,8 @@ static int run()
             need_redraw = false;
         }
     }
+    if (sfd >= 0)
+        close(sfd);
     p.stop();
     std::fprintf(stderr, "blockie-frontend: exiting\n");
     return 0;
