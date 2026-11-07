@@ -34,11 +34,11 @@ constexpr int kTileFirstTop = 80;
 constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
-constexpr int kScatterGrid = 4;
-constexpr int kScatterDot = 3;
-constexpr int kScatterAlphaLo = 6;
-constexpr int kScatterAlphaHi = 22;
-constexpr int kScatterPerThousand = 55;
+constexpr int kScatterGrid = 6;
+constexpr int kScatterDot = 6;
+constexpr int kScatterAlphaLo = 7;
+constexpr int kScatterAlphaHi = 27;
+constexpr int kScatterPerThousand = 70;
 constexpr uint32_t kScatterSeed = 0x9e3779b9u;
 
 int x64(int px) { return px * 64; }
