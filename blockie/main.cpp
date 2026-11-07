@@ -1,5 +1,5 @@
 #include <chrono>
-#include <poll.h>
+#include <cstdio>
 #include <wayland-client.h>
 
 #include "present_wl.h"
@@ -14,9 +14,12 @@ static int64_t now_ms()
 
 static int run()
 {
+    std::fprintf(stderr, "blockie-frontend: started\n");
     WaylandPresenter p;
-    if (!p.open("", true))
+    if (!p.open("", true)) {
+        std::fprintf(stderr, "blockie-frontend: no wayland display, exiting\n");
         return 1;
+    }
 
     int64_t t = now_ms();
     p.begin_frame(t, p.show_at(t));
@@ -28,15 +31,13 @@ static int run()
     p.flip();
 
     wl_display* d = p.display();
-    for (int i = 0; i < 60 && p.ready(); i++) {
-        if (wl_display_dispatch_pending(d) < 0)
-            break;
+    while (p.ready()) {
         p.flush();
-        pollfd pfd{p.event_fd(), POLLIN, 0};
-        if (poll(&pfd, 1, p.period_ms()) > 0 && wl_display_dispatch(d) < 0)
+        if (wl_display_dispatch(d) < 0)
             break;
     }
     p.stop();
+    std::fprintf(stderr, "blockie-frontend: exiting\n");
     return 0;
 }
 
