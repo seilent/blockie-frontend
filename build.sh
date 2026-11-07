@@ -484,14 +484,15 @@ build_shot() {
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
     pool "$shotobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/shot"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/shot.o" "${dobjs[@]}" $appldflags -lpthread -lm \
-        -o "$out/shot/blockie-shot.tmp"
+    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/image.o" "$shotobj/shot.o" "${dobjs[@]}" $appldflags \
+        -lpthread -lm -o "$out/shot/blockie-shot.tmp"
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
     echo "build.sh: fonts $fonts_dir"

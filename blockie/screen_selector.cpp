@@ -1,5 +1,6 @@
 #include "screen_selector.h"
 
+#include <algorithm>
 #include <cstdio>
 
 #include "../ui/roles.h"
@@ -35,9 +36,23 @@ int x64(int px) { return px * 64; }
 
 void count_line(char* out, size_t n, int games) { snprintf(out, n, games == 1 ? "%d game" : "%d games", games); }
 
+Rect fit_rect(int sw, int sh, int tx, int ty, int side, ArtFit fit)
+{
+    if (sw <= 0 || sh <= 0)
+        return {tx, ty, tx + side, ty + side};
+    double s = (double)side / sw;
+    double sy = (double)side / sh;
+    s = fit == ArtFit::Cover ? std::max(s, sy) : std::min(s, sy);
+    int w = (int)(sw * s + 0.5);
+    int h = (int)(sh * s + 0.5);
+    int x = tx + (side - w) / 2;
+    int y = ty + (side - h) / 2;
+    return {x, y, x + w, y + h};
 }
 
-void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane)
+}
+
+void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit)
 {
     bool on = focus_pane == Pane::Selector;
 
@@ -51,7 +66,21 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         for (int col = 0; col < kGridCols; col++) {
             int x = kGridX + col * (kTileSide + kGridGutter);
             int y = kTileFirstTop + r * kGridRowPitch;
-            c.blend({x, y, x + kTileSide, y + kTileSide}, tok::color_tile, tile_alpha);
+            Rect tr{x, y, x + kTileSide, y + kTileSide};
+            c.blend(tr, tok::color_tile, tile_alpha);
+            int k = r * kGridCols + col;
+            if (k >= (int)model.tiles.size() || model.tiles[k].w <= 0 || model.tiles[k].h <= 0)
+                continue;
+            const Image& art = model.tiles[k];
+            Rect fr = fit_rect(art.w, art.h, x, y, kTileSide, fit);
+            if (fit == ArtFit::Cover) {
+                Rect prev = c.clip();
+                c.set_clip(tr);
+                c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
+                c.set_clip(prev);
+            } else {
+                c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
+            }
         }
 
     int focus_item = on ? model.focus : -1;
