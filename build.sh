@@ -66,6 +66,7 @@ genobj=$out/generic/obj
 appobj=$out/app/obj
 scanobj=$out/scan/obj
 scraperobj=$out/scraper/obj
+launchobj=$out/launch/obj
 testobj=$out/test/obj
 
 fetch() {
@@ -400,6 +401,21 @@ build_scraper_test() {
     "$out/scraper/blockie-scraper-test"
 }
 
+launchflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers)
+
+build_launch_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$launchobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
+    pool "$testobj/launch_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/launch_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/launch"
+    "$cxx" "$launchobj/launch.o" "$testobj/launch_test.o" $appldflags -o "$out/launch/blockie-launch-test.tmp"
+    mv "$out/launch/blockie-launch-test.tmp" "$out/launch/blockie-launch-test"
+    echo "build.sh: $out/launch/blockie-launch-test"
+    "$out/launch/blockie-launch-test"
+}
+
 build_install() {
     [[ -x $out/app/blockie-frontend ]] || { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
     install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
@@ -410,7 +426,7 @@ build_install() {
 }
 
 fail=0
-mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$testobj"
+mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj"
 case $target in
     all | generic | app)
         deps
@@ -423,6 +439,6 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 exit 0
