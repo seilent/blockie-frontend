@@ -7,6 +7,15 @@ out=${BLOCKIE_FE_OUT:-$cache/out}
 jobs=${BLOCKIE_FE_JOBS:-$(nproc)}
 cc=${CC:-cc}
 cxx=${CXX:-g++}
+appcflags=${BLOCKIE_FE_CFLAGS:-}
+appldflags=${BLOCKIE_FE_LDFLAGS:-}
+if [[ -n ${BLOCKIE_FE_DEP_HARDEN+x} ]]; then
+    dep_harden=$BLOCKIE_FE_DEP_HARDEN
+elif [[ -n $appcflags ]]; then
+    dep_harden="-fPIE -D_FORTIFY_SOURCE=3 -fstack-protector-strong"
+else
+    dep_harden=
+fi
 target=${1:-all}
 
 case $target in
@@ -215,18 +224,18 @@ build_deps_obj() {
     toolver=$("$cc" --version | head -n 1)
     local c m
     for c in "${zlib_c[@]}"; do
-        pool "$depobj/zlib_$c.o" "$cc" "${cflags[@]}" "$zlib_dir/$c.c"
+        pool "$depobj/zlib_$c.o" "$cc" "${cflags[@]}" $dep_harden "$zlib_dir/$c.c"
     done
-    pool "$depobj/spng.o" "$cc" "${cflags[@]}" "$spng_dir/spng/spng.c"
-    pool "$depobj/qrcodegen.o" "$cc" "${cflags[@]}" "$qr_dir/qrcodegen.c"
+    pool "$depobj/spng.o" "$cc" "${cflags[@]}" $dep_harden "$spng_dir/spng/spng.c"
+    pool "$depobj/qrcodegen.o" "$cc" "${cflags[@]}" $dep_harden "$qr_dir/qrcodegen.c"
     for c in "$fb_dir"/lib/*.c; do
         m=$(basename "${c%.c}")
-        pool "$depobj/fb_$m.o" "$cc" -O2 -w -ffunction-sections -fdata-sections "${fbflags[@]}" "$c"
+        pool "$depobj/fb_$m.o" "$cc" -O2 -w -ffunction-sections -fdata-sections "${fbflags[@]}" $dep_harden "$c"
     done
     drain
     toolver=$("$cxx" --version | head -n 1)
     pool "$depobj/harfbuzz.o" "$cxx" -DHB_TINY -Os -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections \
-        "$hb_dir/src/harfbuzz.cc"
+        $dep_harden "$hb_dir/src/harfbuzz.cc"
     drain
 }
 
@@ -255,17 +264,17 @@ build_generic() {
     local -a gobjs=()
     while IFS= read -r s; do
         extra=$(cpp_extra "$s")
-        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra "$root/$s"
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    pool "$genobj/tools_generic.cpp.o" "$cxx" "${gflags[@]}" "$root/tools/generic.cpp"
+    pool "$genobj/tools_generic.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/tools/generic.cpp"
     gobjs+=("$genobj/tools_generic.cpp.o")
     drain
     ((fail)) && return 1
     mkdir -p "$out/generic"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "${dobjs[@]}" -lpthread -lm -o "$out/generic/blockie-generic.tmp"
+    "$cxx" "${gobjs[@]}" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/generic/blockie-generic.tmp"
     mv "$out/generic/blockie-generic.tmp" "$out/generic/blockie-generic"
     echo "build.sh: $out/generic/blockie-generic"
 }
@@ -281,25 +290,25 @@ build_app() {
     wl_cflags=$(pkg-config --cflags wayland-client)
     wl_libs=$(pkg-config --libs wayland-client)
     toolver=$("$cc" --version | head -n 1)
-    pool "$appobj/xdg-shell-protocol.o" "$cc" -O2 -w $wl_cflags "$gen/xdg-shell-protocol.c"
+    pool "$appobj/xdg-shell-protocol.o" "$cc" -O2 -w $wl_cflags $appcflags "$gen/xdg-shell-protocol.c"
     drain
     toolver=$("$cxx" --version | head -n 1)
     local s extra
     local -a gobjs=()
     while IFS= read -r s; do
         extra=$(cpp_extra "$s")
-        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra "$root/$s"
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags -I"$gen" "$root/blockie/present_wl.cpp"
-    pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags -I"$gen" "$root/blockie/main.cpp"
+    pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $appcflags -I"$gen" "$root/blockie/present_wl.cpp"
+    pool "$appobj/main.o" "$cxx" "${gflags[@]}" $wl_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$appobj/present_wl.o" "$appobj/main.o" "$appobj/xdg-shell-protocol.o" \
-        "${dobjs[@]}" $wl_libs -lpthread -lm -o "$out/app/blockie-frontend.tmp"
+        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/app/blockie-frontend.tmp"
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
 }
