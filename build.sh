@@ -319,7 +319,7 @@ build_generic() {
     mkdir -p "$out/generic"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/generic/blockie-generic.tmp"
+    "$cxx" "${gobjs[@]}" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/generic/blockie-generic.tmp" || return 1
     mv "$out/generic/blockie-generic.tmp" "$out/generic/blockie-generic"
     echo "build.sh: $out/generic/blockie-generic"
 }
@@ -357,6 +357,7 @@ build_app() {
     done < <(generic_srcs)
     pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
         "$root/blockie/present_wl.cpp"
@@ -366,10 +367,10 @@ build_app() {
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/input_pad.o" \
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/image.o" "$appobj/input_pad.o" \
         "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs -lpthread -lm \
-        -o "$out/app/blockie-frontend.tmp"
+        -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
 }
@@ -395,7 +396,7 @@ build_scan() {
     ((fail)) && return 1
     mkdir -p "$out/scan"
     "$cxx" "$scanobj/library.o" "$scanobj/scan_main.o" "$depobj/sqlite3.o" $appldflags -lpthread -lm \
-        -o "$out/scan/blockie-scan.tmp"
+        -o "$out/scan/blockie-scan.tmp" || return 1
     mv "$out/scan/blockie-scan.tmp" "$out/scan/blockie-scan"
     echo "build.sh: $out/scan/blockie-scan"
 }
@@ -409,7 +410,7 @@ build_test() {
     ((fail)) && return 1
     mkdir -p "$out/test"
     "$cxx" "$scanobj/library.o" "$testobj/library_test.o" "$depobj/sqlite3.o" $appldflags -lpthread -lm \
-        -o "$out/test/blockie-test.tmp"
+        -o "$out/test/blockie-test.tmp" || return 1
     mv "$out/test/blockie-test.tmp" "$out/test/blockie-test"
     echo "build.sh: $out/test/blockie-test"
     "$out/test/blockie-test"
@@ -429,7 +430,7 @@ build_scraper_test() {
     ((fail)) && return 1
     mkdir -p "$out/scraper"
     "$cxx" "$scanobj/library.o" "$scraperobj/scraper.o" "$testobj/scraper_test.o" "$depobj/sqlite3.o" \
-        $appldflags $curl_libs -lpthread -lm -o "$out/scraper/blockie-scraper-test.tmp"
+        $appldflags $curl_libs -lpthread -lm -o "$out/scraper/blockie-scraper-test.tmp" || return 1
     mv "$out/scraper/blockie-scraper-test.tmp" "$out/scraper/blockie-scraper-test"
     echo "build.sh: $out/scraper/blockie-scraper-test"
     "$out/scraper/blockie-scraper-test"
@@ -444,7 +445,7 @@ build_launch_test() {
     drain
     ((fail)) && return 1
     mkdir -p "$out/launch"
-    "$cxx" "$launchobj/launch.o" "$testobj/launch_test.o" $appldflags -o "$out/launch/blockie-launch-test.tmp"
+    "$cxx" "$launchobj/launch.o" "$testobj/launch_test.o" $appldflags -o "$out/launch/blockie-launch-test.tmp" || return 1
     mv "$out/launch/blockie-launch-test.tmp" "$out/launch/blockie-launch-test"
     echo "build.sh: $out/launch/blockie-launch-test"
     "$out/launch/blockie-launch-test"
@@ -457,7 +458,7 @@ build_pad_test() {
     drain
     ((fail)) && return 1
     mkdir -p "$out/launch"
-    "$cxx" "$launchobj/input_pad.o" "$testobj/pad_test.o" $appldflags -o "$out/launch/blockie-pad-test.tmp"
+    "$cxx" "$launchobj/input_pad.o" "$testobj/pad_test.o" $appldflags -o "$out/launch/blockie-pad-test.tmp" || return 1
     mv "$out/launch/blockie-pad-test.tmp" "$out/launch/blockie-pad-test"
     echo "build.sh: $out/launch/blockie-pad-test"
     "$out/launch/blockie-pad-test"
@@ -482,7 +483,7 @@ build_image_test() {
     ((fail)) && return 1
     mkdir -p "$out/image"
     "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$depobj/spng.o" "$depobj"/zlib_*.o $appldflags -lpthread -lm \
-        -o "$out/image/blockie-image-test.tmp"
+        -o "$out/image/blockie-image-test.tmp" || return 1
     mv "$out/image/blockie-image-test.tmp" "$out/image/blockie-image-test"
     echo "build.sh: $out/image/blockie-image-test"
     "$out/image/blockie-image-test"
@@ -507,7 +508,7 @@ build_shot() {
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/image.o" "$shotobj/shot.o" "${dobjs[@]}" $appldflags \
-        -lpthread -lm -o "$out/shot/blockie-shot.tmp"
+        -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
     echo "build.sh: fonts $fonts_dir"

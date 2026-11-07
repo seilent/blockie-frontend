@@ -18,6 +18,7 @@
 #endif
 
 #include "../gfx/pixel.h"
+#include "image.h"
 #include "input_pad.h"
 #include "library.h"
 #include "present_wl.h"
@@ -83,28 +84,70 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
         for (const auto& sw : lib.systems_with_games())
             model.systems.push_back({sw.first.name, sw.second});
+        for (const auto& g : lib.recent_games(8)) {
+            Image img;
+            for (const auto& m : lib.media(g.id))
+                if (m.type == "covers") {
+                    DecodedImage d;
+                    if (load_png(m.path, d) && d.ok())
+                        img = Image::from_portrait(d.rgb.data(), d.w, d.h);
+                    break;
+                }
+            model.tiles.push_back(std::move(img));
+        }
     }
 
     bool need_redraw = false;
+    Pane pane = Pane::Selector;
+    int tile_focus = 0;
     auto redraw = [&]() {
         int64_t tt = now_ms();
         p.begin_frame(tt, p.show_at(tt));
         p.begin_full();
         Canvas c(p.draw_target());
         fonts.begin_frame(-1);
-        draw_selector(c, fonts, model, Pane::Selector);
+        model.tile_focus = pane == Pane::Details ? tile_focus : -1;
+        draw_selector(c, fonts, model, pane);
         p.present(kScreen);
         p.flip();
     };
     redraw();
 
+    const int kCols = 2;
     auto apply = [&](PadAction a) {
         int cnt = (int)model.systems.size();
-        if (a == PadAction::Up && model.focus > 0) {
-            model.focus--;
+        int tiles = (int)model.tiles.size();
+        if (pane == Pane::Selector) {
+            if (a == PadAction::Up && model.focus > 0) {
+                model.focus--;
+                need_redraw = true;
+            } else if (a == PadAction::Down && cnt > 0 && model.focus < cnt - 1) {
+                model.focus++;
+                need_redraw = true;
+            } else if (a == PadAction::Left && tiles > 0) {
+                pane = Pane::Details;
+                tile_focus = 0;
+                need_redraw = true;
+            }
+            return;
+        }
+        if (a == PadAction::Up && tile_focus - kCols >= 0) {
+            tile_focus -= kCols;
             need_redraw = true;
-        } else if (a == PadAction::Down && cnt > 0 && model.focus < cnt - 1) {
-            model.focus++;
+        } else if (a == PadAction::Down && tile_focus + kCols < tiles) {
+            tile_focus += kCols;
+            need_redraw = true;
+        } else if (a == PadAction::Right && tile_focus % kCols < kCols - 1 && tile_focus + 1 < tiles) {
+            tile_focus++;
+            need_redraw = true;
+        } else if (a == PadAction::Left) {
+            if (tile_focus % kCols > 0)
+                tile_focus--;
+            else
+                pane = Pane::Selector;
+            need_redraw = true;
+        } else if (a == PadAction::Back) {
+            pane = Pane::Selector;
             need_redraw = true;
         }
     };
