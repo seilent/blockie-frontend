@@ -103,8 +103,8 @@ std::vector<PadAction> PadReader::poll()
         }
         if (ev.type == EV_KEY && ev.value == 1) {
             switch (ev.code) {
-            case BTN_SOUTH: out.push_back(PadAction::Accept); break;
-            case BTN_EAST: out.push_back(PadAction::Back); break;
+            case BTN_EAST: out.push_back(PadAction::Accept); break;
+            case BTN_SOUTH: out.push_back(PadAction::Back); break;
             case BTN_DPAD_UP: out.push_back(PadAction::Up); break;
             case BTN_DPAD_DOWN: out.push_back(PadAction::Down); break;
             case BTN_DPAD_LEFT: out.push_back(PadAction::Left); break;

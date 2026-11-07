@@ -86,8 +86,8 @@ int main()
     push(p[1], EV_KEY, BTN_EAST, 1);
     push(p[1], EV_KEY, BTN_EAST, 0);
     push(p[1], EV_KEY, BTN_SOUTH, 1);
-    check(eq(pad.poll(), {PadAction::Back, PadAction::Accept}),
-          "east back, release ignored, south accept");
+    check(eq(pad.poll(), {PadAction::Accept, PadAction::Back}),
+          "east accept, release ignored, south back");
 
     push(p[1], EV_KEY, BTN_DPAD_UP, 1);
     push(p[1], EV_KEY, BTN_DPAD_DOWN, 1);
