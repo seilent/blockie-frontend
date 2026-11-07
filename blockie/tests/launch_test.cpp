@@ -112,6 +112,23 @@ int main()
         std::string cfg = fd::Launcher::emit_config(ov);
         check(!has_key(cfg, "video_shader"), "emit_config drops video_shader outside the shaders dir");
     }
+    {
+        Ov ov = {{"video_shader", "/usr/share/libretro/shaders/crt.png"}};
+        check(!has_key(fd::Launcher::emit_config(ov), "video_shader"),
+              "emit_config drops video_shader with a non-glsl extension");
+    }
+    {
+        check(has_line(fd::Launcher::emit_config({{"aspect_ratio_index", "22"}}), "aspect_ratio_index = \"22\""),
+              "emit_config keeps aspect_ratio_index 22");
+        check(has_line(fd::Launcher::emit_config({{"aspect_ratio_index", "24"}}), "aspect_ratio_index = \"24\""),
+              "emit_config keeps aspect_ratio_index 24");
+        check(!has_key(fd::Launcher::emit_config({{"aspect_ratio_index", "23"}}), "aspect_ratio_index"),
+              "emit_config drops aspect_ratio_index 23 (custom viewport)");
+        check(!has_key(fd::Launcher::emit_config({{"aspect_ratio_index", "25"}}), "aspect_ratio_index"),
+              "emit_config drops aspect_ratio_index out of range");
+        check(!has_key(fd::Launcher::emit_config({{"aspect_ratio_index", "x"}}), "aspect_ratio_index"),
+              "emit_config drops aspect_ratio_index non-numeric");
+    }
 
     {
         check(has_line(fd::Launcher::emit_config({{"video_smooth", "true"}}), "video_smooth = \"true\""),

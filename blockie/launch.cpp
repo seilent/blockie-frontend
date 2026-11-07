@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 
@@ -19,6 +20,11 @@ bool starts_with(const std::string& s, const std::string& prefix)
     return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
 }
 
+bool ends_with(const std::string& s, const std::string& suffix)
+{
+    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 bool allowed_key(const std::string& key, const std::string& value)
 {
     static const char* const kKeys[] = {"aspect_ratio_index",  "video_scale_integer", "video_shader_enable",
@@ -34,9 +40,14 @@ bool allowed_key(const std::string& key, const std::string& value)
     if (!known)
         return false;
     if (key == "video_shader")
-        return starts_with(value, "/usr/share/libretro/shaders");
+        return starts_with(value, "/usr/share/libretro/shaders/") && (ends_with(value, ".glsl") || ends_with(value, ".glslp"));
     if (key == "video_smooth")
         return value == "true" || value == "false";
+    if (key == "aspect_ratio_index") {
+        char* end = nullptr;
+        long v = std::strtol(value.c_str(), &end, 10);
+        return end != value.c_str() && *end == '\0' && ((v >= 0 && v <= 22) || v == 24);
+    }
     return true;
 }
 
