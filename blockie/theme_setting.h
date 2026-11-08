@@ -1,38 +1,30 @@
 #pragma once
 #include <cstdint>
 #include <functional>
-#include <string>
 
 #include "bus.h"
-
-struct DBusMessage;
+#include "setd_key.h"
 
 namespace fd {
 
 class ThemeSetting {
 public:
     static constexpr const char* kKey = "frontend.theme";
-    static constexpr int kTimeoutMs = 5000;
 
     std::function<void(bool light)> on_value;
     std::function<void()> on_fail;
 
-    void attach(Bus& bus);
-    void fetch(int64_t now);
-    void set(bool light, int64_t now);
-    bool answered() const { return answered_; }
+    ThemeSetting();
+    ThemeSetting(const ThemeSetting&) = delete;
+    ThemeSetting& operator=(const ThemeSetting&) = delete;
 
-    static bool parse_value(DBusMessage* m, std::string& out);
-    static bool parse_changed(DBusMessage* m, std::string& key, std::string& value);
+    void attach(Bus& bus) { key_.attach(bus); }
+    void fetch(int64_t now) { key_.fetch(now); }
+    void set(bool light, int64_t now) { key_.set(light ? "light" : "dark", now); }
+    bool answered() const { return key_.answered(); }
 
 private:
-    bool on_signal(DBusMessage* m);
-    void apply(const std::string& v);
-
-    Bus* bus_ = nullptr;
-    bool answered_ = false;
-    bool getting_ = false;
-    bool again_ = false;
+    SetdKey key_{kKey};
 };
 
 }

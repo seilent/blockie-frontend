@@ -55,9 +55,11 @@
 #include "scraper.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
+#include "setd_key.h"
 #include "theme.h"
 #include "theme_setting.h"
 #include "tile_grid.h"
+#include "zones.h"
 
 namespace fd {
 
@@ -68,6 +70,7 @@ using Art = std::shared_ptr<const Image>;
 constexpr int kFrameWatchdogMs = 100;
 constexpr int kThemeWaitMs = 300;
 constexpr int kCoverWaitMs = 300;
+constexpr const char* kZoneKey = "system.timezone";
 
 void copy_surface(const Surface& src, const Surface& dst)
 {
@@ -136,6 +139,8 @@ static int run()
     ThemeSetting theme_set;
     theme_set.on_value = [](bool light) { set_theme_light(light); };
     theme_set.attach(bus);
+    SetdKey zone_key(kZoneKey);
+    zone_key.attach(bus);
     int64_t t = now_ms();
     if (bus.open(t)) {
         int64_t until = t + kThemeWaitMs;
@@ -214,7 +219,16 @@ static int run()
     HomeState& home = flow.home;
     Repeat repeat;
     SettingsPage settings_page;
+    settings_page.set_sheet_rows(value_sheet_rows(fonts));
     settings_page.reset(theme().light);
+    auto sync_zone = [&]() {
+        if (zone_key.has_value())
+            settings_page.set_zone(zone_key.value());
+        else
+            settings_page.set_zone_missing(now_ms());
+    };
+    sync_zone();
+    bool zones_loaded = false;
     InkLayer ink;
     int64_t frame_req_at = -1;
     bool drop_budget = false;
@@ -535,8 +549,16 @@ static int run()
     };
     flow.draw_page = [&](Canvas& c, Screen sc, int64_t now) { render_page(c, sc, now); };
     flow.page_open = [&](Screen sc, int64_t now) {
-        if (sc == Screen::Settings)
+        if (sc == Screen::Settings) {
+            if (!zones_loaded) {
+                settings_page.set_zones(load_zones(kZoneTab));
+                zones_loaded = true;
+            }
             settings_page.reset(theme().light);
+            sync_zone();
+            if (!zone_key.has_value())
+                zone_key.fetch(now);
+        }
         if (sc == Screen::Bluetooth) {
             btp.open(now);
             bt.set_page_open(true, now);
@@ -590,6 +612,22 @@ static int run()
         need_redraw = true;
     };
     settings_page.on_theme = [&](bool light) { theme_set.set(light, now_ms()); };
+    zone_key.on_value = [&](const std::string& v) {
+        settings_page.set_zone(v);
+        if (nav.top() == Screen::Settings)
+            need_redraw = true;
+    };
+    zone_key.on_fail = [&]() {
+        sync_zone();
+        if (nav.top() == Screen::Settings)
+            need_redraw = true;
+    };
+    zone_key.on_missing = [&]() {
+        settings_page.set_zone_missing(now_ms());
+        if (nav.top() == Screen::Settings)
+            need_redraw = true;
+    };
+    settings_page.on_zone = [&](const std::string& id) { zone_key.set(id, now_ms()); };
     auto press = [&](PadAction a, uint8_t src, int64_t now) {
         apply(a, false);
         if (is_direction(a) && child.pid <= 0)

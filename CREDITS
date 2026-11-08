@@ -37,6 +37,18 @@ Page and menu motion reuse:
 - funeOS c319d2ef2, docs/DESIGN.md input during motion: a back reverses a running push or expand from where it is,
   every leg running back over the time it has run.
 
+Settings value sheet:
+
+- MicroDAP cb78c74, player/qml/MicroDap/components/Sheet.qml and screens/SettingsScreen.qml: the level push and pop
+  that rise the sheet again, the whole row window, wrap on a fresh press and none on a repeat, focus on the live value
+  at open, settings rows that stop at the ends.
+- MicroDAP cb78c74, player/qml/MicroDap/Main.qml:689 and screens/NowPlaying.qml:299: a second level that keeps the
+  title; screens/NowPlaying.qml:285-305: one item pushes, the others act and close.
+- funeOS c319d2ef2, docs/DESIGN.md value sheet VS1 and PE1: the live value marked with the accent off, focus moves that
+  apply nothing.
+- funeOS c319d2ef2, player/ui/settings.cpp:485-493 and player/ui/app.cpp:7164-7170, :7182-7199: a row that goes moves
+  the focus off it at once, and its open sheet closes with no action.
+
 Cover tiles:
 
 - funeOS d58193469, taps and bilinear in player/gfx/canvas.cpp: the tile size cover scale in blockie/image.cpp.

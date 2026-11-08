@@ -4,15 +4,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include <dirent.h>
+#include <unistd.h>
 
+#include "../core/curves.h"
 #include "../gfx/canvas.h"
 #include "../gfx/font.h"
 #include "../gfx/glyph.h"
@@ -33,6 +37,7 @@
 #include "screen_settings.h"
 #include "theme.h"
 #include "tile_grid.h"
+#include "zones.h"
 
 using namespace fd;
 
@@ -213,7 +218,7 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         Step st;
         st.key = tok.substr(0, a);
         PadAction pa;
-        if (st.key != "ret" && st.key != "theme" && !action_of(st.key, pa))
+        if (st.key != "ret" && st.key != "theme" && st.key != "fail" && st.key != "missing" && !action_of(st.key, pa))
             return false;
         std::string ud = tok.substr(a + 1, b - a - 1);
         if (ud != "d" && ud != "u")
@@ -227,6 +232,73 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         out.push_back(st);
     }
     return true;
+}
+
+struct PageOpts {
+    std::string zone;
+    bool zone_set = false;
+    bool zone_missing = false;
+    std::string zonetab;
+    int rows = 0;
+    int focus = 0;
+    bool sheet = false;
+    std::string sheet_arg;
+    int sheet_focus = -1;
+};
+
+void page_base(SettingsPage& sp, Fonts& fonts, const PageOpts& o, const Zones& z)
+{
+    int fit = value_sheet_rows(fonts);
+    sp.set_sheet_rows(o.rows > 0 ? std::min(o.rows, fit) : fit);
+    sp.set_zones(z);
+    sp.reset(theme().light);
+    if (o.zone_set && !o.zone_missing)
+        sp.set_zone(o.zone);
+    else
+        sp.set_zone_missing(0);
+}
+
+bool page_pose(SettingsPage& sp, const PageOpts& o, const Zones& z)
+{
+    auto press = [&](PadAction a) {
+        sp.action(a, false, 0);
+        sp.land();
+    };
+    auto step_to = [&](int want) {
+        int n = sp.view(0).sheet.count;
+        if (want < 0 || want >= n) {
+            fprintf(stderr, "blockie-shot: --sheetfocus %d is outside the %d rows\n", want, n);
+            return false;
+        }
+        while (sp.view(0).sheet.focus != want)
+            press(sp.view(0).sheet.focus < want ? PadAction::Down : PadAction::Up);
+        return true;
+    };
+    bool tz = !o.sheet_arg.empty();
+    for (int i = 0; i < (tz ? 1 : o.focus); i++)
+        press(PadAction::Down);
+    if (tz && !sp.view(0).zone_row) {
+        fprintf(stderr, "blockie-shot: --sheet %s needs --zone\n", o.sheet_arg.c_str());
+        return false;
+    }
+    if (!o.sheet)
+        return true;
+    press(PadAction::Accept);
+    if (o.sheet_arg.size() > 3) {
+        std::string name = o.sheet_arg.substr(3);
+        int r = -1;
+        for (size_t k = 0; k < z.regions.size(); k++)
+            if (z.regions[k].words == name || z.regions[k].name == name)
+                r = (int)k;
+        if (r < 0) {
+            fprintf(stderr, "blockie-shot: no region %s in the zone.tab\n", name.c_str());
+            return false;
+        }
+        if (!step_to(r))
+            return false;
+        press(PadAction::Accept);
+    }
+    return o.sheet_focus < 0 || step_to(o.sheet_focus);
 }
 
 struct DriveOpts {
@@ -253,6 +325,7 @@ struct DriveOpts {
     int tail = 0;
     double cadence = 0;
     bool repeat_covers = false;
+    PageOpts page;
 };
 
 constexpr const char* kNames[] = {"GB", "GBC", "NES", "SNES", "Genesis", "GBA", "PS1", "N64", "PSP", "DC"};
@@ -296,6 +369,7 @@ public:
     Drive(Fonts& fonts, const DriveOpts& o) : flow(fonts, flow_opts(o)), fonts_(fonts), o_(o) {}
 
     HomeFlow flow;
+    SettingsPage page;
     std::vector<std::vector<HomeGame>> games;
     std::vector<HomeGame> recent_games;
     std::vector<Art> sys_covers;
@@ -317,11 +391,15 @@ public:
             flow.land_all(now_, "child");
             return true;
         };
-        flow.draw_page = [this](Canvas& c, Screen, int64_t) {
-            SettingsView sv;
-            sv.light = theme().light;
-            sv.sheet_focus = theme().light ? 1 : 0;
-            draw_settings(c, fonts_, ink_, sv, theme());
+        flow.draw_page = [this](Canvas& c, Screen, int64_t now) {
+            draw_settings(c, fonts_, ink_, page.view(now), theme());
+        };
+        flow.page_open = [this](Screen s, int64_t) {
+            if (s == Screen::Settings)
+                page.reset(theme().light);
+        };
+        flow.page_input = [this](Screen s, PadAction a, bool rep) {
+            return s == Screen::Settings ? page.action(a, rep, now_) : a == PadAction::Back && !rep;
         };
         flow.rearm = [this](int64_t now) { repeat_.rearm(now); };
         flow.last_frame = [this](const Surface& s) { copy_surface(last_.surface(), s); };
@@ -375,11 +453,13 @@ public:
             bool was_details = ctl.details();
             FoldKind was_kind = ctl.kind();
             bool step_in = flow.take_step_in();
-            bool motion = was_moving || flow.animating(tf);
+            bool motion =
+                was_moving || flow.animating(tf) || (flow.nav.top() == Screen::Settings && page.animating(tf));
             Rect art_r = flow.take_art_rect();
             copy_surface(last_.surface(), prev_.surface());
             in_frame_ = true;
             bool more = flow.frame(tf, last_.surface());
+            more = more || (flow.nav.top() == Screen::Settings && page.animating(tf));
             in_frame_ = false;
             was_moving = more;
             int step = 0, ok = input_ok_;
@@ -519,8 +599,19 @@ private:
         if (st.key == "theme") {
             if (st.down) {
                 set_theme_light(!theme().light);
+                page.set_light(theme().light);
                 flow.theme_changed();
             }
+            return;
+        }
+        if (st.key == "fail") {
+            if (st.down && o_.page.zone_set && !o_.page.zone_missing)
+                page.set_zone(o_.page.zone);
+            return;
+        }
+        if (st.key == "missing") {
+            if (st.down)
+                page.set_zone_missing(now_);
             return;
         }
         PadAction a;
@@ -588,9 +679,10 @@ private:
 
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
               int systems, bool items, const std::string& bt_sub, int sys_focus, const std::string& tiles_dir,
-              const std::string& recent_dir)
+              const std::string& recent_dir, const Zones& zones)
 {
     auto d = std::make_unique<Drive>(fonts, o);
+    page_base(d->page, fonts, o.page, zones);
     if (!o.noart && !load_tiles(tiles_dir, d->sys_covers, kCoverCap, o.big ? kBigTileSide : kTileSide))
         return 1;
     std::vector<std::string> titles, rtitles;
@@ -654,6 +746,334 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
     return d->run(out, frames_dir);
 }
 
+struct PageEvent {
+    std::string key;
+    int64_t t = 0;
+    bool idle = false;
+    SettingsView before;
+    SettingsView after;
+};
+
+fx bar_glide(fx from, int to, int64_t e)
+{
+    int d = fx_round(tok::motion_focusCursor);
+    if (e >= d || e < 0)
+        return fx_int(to);
+    return from + fx_mul(fx_int(to) - from, curve(Curve::Sine, (fx)(e * kOne / d)));
+}
+
+fx t12(int64_t e, bool open)
+{
+    int d = fx_round(tok::motion_sheet);
+    fx p = curve(Curve::Decel, e >= d || e < 0 ? kOne : (fx)(e * kOne / d));
+    return open ? p : kOne - p;
+}
+
+bool starts_t12(const PageEvent& e, bool& open)
+{
+    const SheetView& b = e.before.sheet;
+    const SheetView& a = e.after.sheet;
+    if (a.open && (!b.open || a.level != b.level)) {
+        open = true;
+        return true;
+    }
+    if (b.open && !a.open) {
+        open = false;
+        return true;
+    }
+    return false;
+}
+
+bool band_equal(const Surface& a, int ya, const Surface& b, int yb, int h, int x0)
+{
+    for (int y = 0; y < h; y++)
+        if (!std::equal(a.row(ya + y) + x0, a.row(ya + y) + a.w, b.row(yb + y) + x0))
+            return false;
+    return true;
+}
+
+bool shifted_by_a_row(Fonts& fonts, const Surface& was, const Surface& now, const SheetView& b, const SheetView& a)
+{
+    SheetGeom g = sheet_geom(fonts, a, now.rect());
+    if (!band_equal(now, 0, was, 0, g.rows_top, 0))
+        return false;
+    int lo = std::max(a.first, b.first), hi = std::min(a.first, b.first) + g.shown;
+    for (int k = lo; k < hi; k++) {
+        if (k == b.focus || k == a.focus)
+            continue;
+        if (!band_equal(now, g.rows_top + (k - a.first) * g.pitch, was, g.rows_top + (k - b.first) * g.pitch, g.pitch,
+                        px(tok::edge)))
+            return false;
+    }
+    int end = g.rows_top + g.shown * g.pitch;
+    return band_equal(now, end, was, end, now.h - end, 0);
+}
+
+bool same_view(const SettingsView& x, const SettingsView& y)
+{
+    const SheetView& p = x.sheet;
+    const SheetView& q = y.sheet;
+    return x.focus == y.focus && x.bar == y.bar && x.light == y.light && x.zone_row == y.zone_row && x.zone == y.zone &&
+           std::strcmp(p.title, q.title) == 0 && p.items == q.items && p.count == q.count && p.focus == q.focus &&
+           p.bar == q.bar && p.progress == q.progress && p.first == q.first && p.mark == q.mark && p.rows == q.rows &&
+           p.open == q.open && p.level == q.level;
+}
+
+bool panel_probe(Fonts& fonts, const SettingsView& v, fx p, const Surface& frame)
+{
+    Buffer page;
+    Canvas pc(page.surface());
+    InkLayer ink;
+    SettingsView bare = v;
+    bare.sheet.progress = 0;
+    draw_settings(pc, fonts, ink, bare, theme());
+    SheetView s = v.sheet;
+    s.progress = p;
+    Rect sr = frame.rect();
+    SheetGeom g = sheet_geom(fonts, s, sr);
+    int a = alpha256(p);
+    const Theme& th = theme();
+    auto row = [&](int y, bool panel) {
+        if (y < sr.y0 || y >= sr.y1)
+            return true;
+        Rect r{sr.x0, y, sr.x1, y + 1};
+        pc.blend(r, th.scrim_sheet, th.scrim_sheet_a256 * a >> 8);
+        if (panel)
+            pc.blend(r, th.bg_elevated, a);
+        return band_equal(frame, y, page.surface(), y, 1, 0);
+    };
+    return row(g.top - 1, false) && row(g.top, true);
+}
+
+std::string designed(Fonts& fonts, const PageEvent& e, const SettingsView& v, int64_t tf, const Surface& was,
+                     const Surface& now, const std::string& confirmed, bool& held)
+{
+    const SheetView& b = e.before.sheet;
+    const SheetView& a = e.after.sheet;
+    int64_t el = tf - e.t;
+    bool open = false;
+    bool t12_start = starts_t12(e, open);
+    if (e.key == "fail" || e.key == "theme") {
+        if (!e.idle)
+            return "";
+        SettingsView w = e.before;
+        if (e.key == "fail") {
+            w.zone = v.zone;
+            w.sheet.mark = v.sheet.mark;
+            held = same_view(w, v) && v.zone_row && v.zone == confirmed;
+            return "a failed Set: the row reads the confirmed zone, nothing else moves";
+        }
+        w.light = v.light;
+        held = same_view(w, v) && v.light != e.before.light && v.light == theme().light;
+        return "a theme switch, nothing else moves";
+    }
+    if (e.key == "missing") {
+        bool closes = b.open && b.level != 0;
+        held = !v.zone_row && v.focus == 0 && v.bar == fx_int(0) &&
+               (!closes || (!v.sheet.open && v.sheet.progress == t12(el, false) &&
+                            panel_probe(fonts, v, t12(el, false), now)));
+        return closes ? "the zone key goes: row 1 goes, the bar lands on row 0, the sheet closes from 1"
+                      : "the zone key goes: row 1 goes, the bar lands on row 0";
+    }
+    if (b.progress > 0 && b.progress < kOne) {
+        fx want = t12_start ? t12(el, open) : a.progress;
+        if (t12_start)
+            held = a.progress == (open ? 0 : kOne) && (!open || v.sheet.level == a.level);
+        else
+            held = a.progress == (b.open ? kOne : 0);
+        held = held && v.sheet.progress == want && v.sheet.first == a.first && v.sheet.focus == a.focus &&
+               panel_probe(fonts, v, want, now);
+        std::string c = b.open ? "an input lands a running rise" : "an input lands a running close";
+        return t12_start ? c + (open ? ", then the sheet rises from 0" : ", then the sheet closes from 1") : c;
+    }
+    if (t12_start) {
+        bool level = b.open && a.open && a.level != b.level;
+        held = v.sheet.progress == t12(el, open) && v.sheet.open == open && (!open || v.sheet.level == a.level) &&
+               panel_probe(fonts, v, t12(el, open), now);
+        if (level)
+            return a.level > b.level ? "a level push: the new level rises from 0" : "a level pop: level 1 rises from 0";
+        return open ? "the sheet rises from 0" : "the sheet closes from 1";
+    }
+    bool still = b.open && a.open && b.level == a.level && b.progress == kOne && v.sheet.progress == kOne;
+    int d = a.first - b.first;
+    if (still && (d == 1 || d == -1) && a.focus - b.focus == d) {
+        held = v.sheet.first == a.first && shifted_by_a_row(fonts, was, now, b, v.sheet);
+        return "a whole row window step";
+    }
+    int n = a.count;
+    bool down_wrap = e.key == "down" && b.focus == n - 1 && a.focus == 0;
+    bool up_wrap = e.key == "up" && b.focus == 0 && a.focus == n - 1;
+    if (still && n > 1 && a.first != b.first && (down_wrap || up_wrap)) {
+        int shown = sheet_geom(fonts, v.sheet, now.rect()).shown;
+        held = v.sheet.first == (a.focus == 0 ? 0 : n - shown) &&
+               v.sheet.bar == bar_glide(fx_int(b.focus - b.first + a.first), a.focus, el);
+        return "a fresh press past the end wraps, the window jumps to the other end, the bar leaves the old slot";
+    }
+    return "";
+}
+
+int run_page_frames(SettingsPage& sp, Fonts& fonts, const DriveOpts& o, const Zones& zones,
+                    const std::string& frames_dir, const std::string& out)
+{
+    std::vector<Step> steps;
+    if (!parse_script(o.script, steps)) {
+        fprintf(stderr, "blockie-shot: bad --script %s\n", o.script.c_str());
+        return 2;
+    }
+    for (size_t i = 0; i < steps.size(); i++) {
+        if (steps[i].pct >= 0) {
+            fprintf(stderr, "blockie-shot: the settings frames take MS steps, not %d%%\n", steps[i].pct);
+            return 2;
+        }
+        if (i > 0)
+            steps[i].ms = std::max(steps[i].ms, steps[i - 1].ms);
+    }
+    FILE* side = fopen((frames_dir + "/frames.txt").c_str(), "w");
+    if (!side) {
+        fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    FILE* bars = fopen((frames_dir + "/bars.txt").c_str(), "w");
+    if (!bars) {
+        fprintf(stderr, "blockie-shot: cannot write %s/bars.txt\n", frames_dir.c_str());
+        fclose(side);
+        return 1;
+    }
+    auto shut = [&]() {
+        fclose(side);
+        fclose(bars);
+    };
+    std::string confirmed = zone_words(zones, o.page.zone);
+    Repeat rep;
+    InkLayer ink;
+    Buffer buf;
+    Buffer was;
+    size_t next = 0;
+    int written = 0;
+    int tail = o.tail;
+    bool was_moving = false;
+    int64_t t12_at = -1;
+    bool t12_open = false;
+    for (int n = 0;; n++) {
+        int64_t tf = frame_ms(n);
+        std::vector<PageEvent> evs;
+        auto act = [&](const std::string& key, int64_t t, const std::function<void()>& f) {
+            PageEvent e;
+            e.key = key;
+            e.t = t;
+            e.idle = !sp.animating(t);
+            e.before = sp.view(t);
+            f();
+            e.after = sp.view(t);
+            evs.push_back(std::move(e));
+        };
+        for (;;) {
+            int64_t te = next < steps.size() ? steps[next].ms : kNever;
+            int64_t tr = rep.active() ? rep.deadline() : kNever;
+            int64_t t = std::min(te, tr);
+            if (t > tf || t == kNever)
+                break;
+            if (te > tr) {
+                PadAction a = PadAction::Up;
+                if (rep.due(t, a))
+                    act("repeat", t, [&]() { sp.action(a, true, t); });
+                continue;
+            }
+            const Step& st = steps[next++];
+            PadAction a = PadAction::Up;
+            if (st.key == "fail") {
+                if (st.down && o.page.zone_set && !o.page.zone_missing)
+                    act("fail", t, [&]() { sp.set_zone(o.page.zone); });
+            } else if (st.key == "missing") {
+                if (st.down)
+                    act("missing", t, [&]() { sp.set_zone_missing(t); });
+            } else if (st.key == "theme") {
+                if (st.down)
+                    act("theme", t, [&]() {
+                        set_theme_light(!theme().light);
+                        sp.set_light(theme().light);
+                    });
+            } else if (action_of(st.key, a)) {
+                if (st.down) {
+                    act(st.key, t, [&]() { sp.action(a, false, t); });
+                    if (is_direction(a))
+                        rep.press(a, kFromKeys, t);
+                } else if (is_direction(a)) {
+                    rep.release(a, kFromKeys, t);
+                }
+            }
+        }
+        SettingsView v = sp.view(tf);
+        bool moving = sp.animating(tf);
+        copy_surface(buf.surface(), was.surface());
+        Canvas c(buf.surface());
+        draw_settings(c, fonts, ink, v, theme());
+        std::string cause;
+        bool held = true;
+        bool open = false;
+        if (n > 0 && evs.size() == 1)
+            cause = designed(fonts, evs[0], v, tf, was.surface(), buf.surface(), confirmed, held);
+        else if (n > 0 && evs.empty() && t12_at >= 0) {
+            fx want = t12(tf - t12_at, t12_open);
+            held = v.sheet.progress == want && panel_probe(fonts, v, want, buf.surface());
+            cause = t12_open ? "the first T12 rise frame after the input" : "the first T12 close frame after the input";
+        }
+        t12_at = -1;
+        if (evs.size() == 1 && starts_t12(evs[0], open)) {
+            t12_at = evs[0].t;
+            t12_open = open;
+        }
+        bool motion = was_moving || moving || !evs.empty();
+        was_moving = moving;
+        if (tf >= o.from) {
+            if (!write_png(frame_path(frames_dir, written), buf.surface())) {
+                fprintf(stderr, "blockie-shot: cannot write %s\n", frame_path(frames_dir, written).c_str());
+                shut();
+                return 1;
+            }
+            if (fprintf(side, "%d %lld %d %d %d %d 0 0 0 0%s%s\n", written, (long long)tf, kPaneSplit, motion ? 1 : 0,
+                        cause.empty() ? 0 : 1, held ? 1 : 0, cause.empty() ? "" : " ", cause.c_str()) < 0) {
+                fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+                shut();
+                return 1;
+            }
+            SheetGeom g = sheet_geom(fonts, v.sheet, buf.surface().rect());
+            int vis = alpha256(v.sheet.progress) > 0, rest = v.sheet.progress == kOne;
+            int bar_rest = v.sheet.bar == fx_int(v.sheet.focus), page_rest = v.bar == fx_int(v.focus);
+            if (fprintf(bars, "%d %d %d %d %d %d %d %d %d %d %d %d %d\n", written, vis, rest, v.sheet.focus,
+                        v.sheet.first, g.rows_top, g.pitch, bar_rest, v.focus, settings_row_y(0),
+                        settings_row_y(1) - settings_row_y(0), page_rest, evs.empty() ? 0 : 1) < 0) {
+                fprintf(stderr, "blockie-shot: cannot write %s/bars.txt\n", frames_dir.c_str());
+                shut();
+                return 1;
+            }
+            written++;
+        }
+        if (tf > kDriveCapMs) {
+            fprintf(stderr, "blockie-shot: the settings frames passed the %lld ms cap\n", (long long)kDriveCapMs);
+            shut();
+            return 1;
+        }
+        if (next >= steps.size() && !rep.active() && !moving) {
+            if (tail-- > 0)
+                continue;
+            break;
+        }
+    }
+    bool closed = fclose(side) == 0;
+    closed = fclose(bars) == 0 && closed;
+    if (!closed) {
+        fprintf(stderr, "blockie-shot: cannot close %s/frames.txt or bars.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    if (!out.empty() && !write_png(out, buf.surface())) {
+        fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    fprintf(stderr, "blockie-shot: settings %d frames\n", written);
+    return 0;
+}
+
 bool load_frame(const std::string& dir, int n, DecodedImage& out)
 {
     std::string p = frame_path(dir, n);
@@ -668,14 +1088,21 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
     std::vector<PopRow> rows;
     {
         std::ifstream in(dir + "/frames.txt");
-        PopRow r;
-        long long t = 0;
-        int motion = 0, step = 0, ok = 1;
-        while (in >> r.n >> t >> r.b >> motion >> step >> ok >> r.art.x0 >> r.art.y0 >> r.art.x1 >> r.art.y1) {
+        std::string text;
+        while (std::getline(in, text)) {
+            if (text.empty())
+                continue;
+            std::istringstream ls(text);
+            PopRow r;
+            long long t = 0;
+            int motion = 0, step = 0, ok = 1;
+            if (!(ls >> r.n >> t >> r.b >> motion >> step >> ok >> r.art.x0 >> r.art.y0 >> r.art.x1 >> r.art.y1))
+                break;
             r.t = t;
             r.motion = motion != 0;
             r.step = step != 0;
             r.ok = ok != 0;
+            std::getline(ls >> std::ws, r.cause);
             rows.push_back(r);
         }
     }
@@ -709,6 +1136,40 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
     }
     std::vector<std::string> lines;
     int fails = pop_judge(rows, diffs, lead, lines);
+    std::ifstream bin(dir + "/bars.txt");
+    if (bin) {
+        int sx = px(tok::edge - tok::focus_barOffset), pxb = px(tok::hubEdge - tok::focus_barOffset);
+        int bw = px(tok::focus_barWidth);
+        std::vector<BarRow> bars;
+        std::string text;
+        while (std::getline(bin, text)) {
+            if (text.empty())
+                continue;
+            std::istringstream ls(text);
+            BarRow b;
+            int sv = 0, sr = 0, br = 0, pr = 0, ev = 0;
+            if (!(ls >> b.n >> sv >> sr >> b.focus >> b.first >> b.rows_top >> b.pitch >> br >> b.page_focus >>
+                  b.page_top >> b.page_pitch >> pr >> ev))
+                break;
+            b.sheet_vis = sv != 0;
+            b.sheet_rest = sr != 0;
+            b.bar_rest = br != 0;
+            b.page_rest = pr != 0;
+            b.event = ev != 0;
+            DecodedImage f;
+            if (!load_frame(dir, b.n, f))
+                return 1;
+            b.sheet_runs = bar_runs(f.rgb.data(), f.w, f.h, sx, bw, 0);
+            b.page_runs = bar_runs(f.rgb.data(), f.w, f.h, pxb, bw, 0);
+            bars.push_back(std::move(b));
+        }
+        std::vector<std::string> track;
+        fails += bar_judge(bars, track);
+        std::string last = lines.back();
+        lines.pop_back();
+        lines.insert(lines.end(), track.begin(), track.end());
+        lines.push_back(last);
+    }
     for (const std::string& l : lines)
         printf("%s\n", l.c_str());
     if (!summary.empty()) {
@@ -718,7 +1179,8 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
             return 1;
         }
         for (const std::string& l : lines)
-            if (l.find("FAIL") != std::string::npos || &l == &lines.back())
+            if (l.find("FAIL") != std::string::npos || &l == &lines.back() ||
+                l.rfind("PASS the bar track", 0) == 0)
                 fprintf(fs, "%s: %s\n", name.c_str(), l.c_str());
         if (fclose(fs) != 0) {
             printf("FAIL cannot write %s\n", summary.c_str());
@@ -746,10 +1208,9 @@ int main(int argc, char** argv)
     int sys_focus = 0;
     int systems = 6;
     int menu_top = 0;
-    int sheet_focus = -1;
     bool items = false;
-    bool sheet = false;
     bool light = false;
+    PageOpts page_opts;
     Pane focus = Pane::Selector;
     bool scatter = false;
     bool detail = false;
@@ -796,10 +1257,30 @@ int main(int argc, char** argv)
             light = true;
         else if (a == "--page" && i + 1 < argc)
             page = argv[++i];
-        else if (a == "--sheet")
-            sheet = true;
+        else if (a == "--sheet") {
+            page_opts.sheet = true;
+            if (i + 1 < argc && (std::string(argv[i + 1]) == "tz" || std::string(argv[i + 1]).rfind("tz:", 0) == 0))
+                page_opts.sheet_arg = argv[++i];
+        }
         else if (a == "--sheetfocus" && i + 1 < argc)
-            sheet_focus = atoi(argv[++i]);
+            page_opts.sheet_focus = atoi(argv[++i]);
+        else if (a == "--sheetrows" && i + 1 < argc) {
+            page_opts.rows = atoi(argv[++i]);
+            if (page_opts.rows != 6 && page_opts.rows != 7) {
+                fprintf(stderr, "blockie-shot: --sheetrows takes 6 or 7\n");
+                return 2;
+            }
+        }
+        else if (a == "--pagefocus" && i + 1 < argc)
+            page_opts.focus = std::max(0, atoi(argv[++i]));
+        else if (a == "--zone" && i + 1 < argc) {
+            page_opts.zone = argv[++i];
+            page_opts.zone_set = true;
+        }
+        else if (a == "--zone-missing")
+            page_opts.zone_missing = true;
+        else if (a == "--zonetab" && i + 1 < argc)
+            page_opts.zonetab = argv[++i];
         else if (a == "--pageflip" && i + 1 < argc)
             page_flip = argv[++i];
         else if (a == "--frames" && i + 1 < argc)
@@ -890,13 +1371,18 @@ int main(int argc, char** argv)
     }
     bool sequence = !page_flip.empty();
     bool driven = drive.on && (!out.empty() || !frames_dir.empty());
-    if (!driven && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
+    bool page_frames = !drive.on && !sequence && page == "settings" && !frames_dir.empty();
+    if (!driven && !page_frames && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
-                " [--light] [--page settings] [--sheet] [--sheetfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]"
-                " [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
+                " [--light] [--page settings] [--pagefocus N] [--sheet [tz|tz:REGION]] [--sheetfocus N]"
+                " [--sheetrows 6|7] [--zone ID] [--zone-missing] [--zonetab PATH] [--scatter]"
+                " [--gamedetail SYSTEM|TITLE] [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
                 "       blockie-shot --pageflip push|pop --frames DIR [same options]\n"
+                "       blockie-shot --page settings --frames DIR [--script KEY|fail|missing:d|u:MS,...] [--from MS]"
+                " [--tail N]"
+                " [same options]\n"
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY:d|u:MS|PCT%%,...] [--at MS] [--from MS]"
                 " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
                 " [--recentsys NAME] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3] [--t9clip pane|edge]"
@@ -917,8 +1403,13 @@ int main(int argc, char** argv)
     fonts.begin_frame(-1);
     if (!bt_state.empty())
         return shot_bt(out, bt_state, fonts);
+    if (!page_opts.zonetab.empty() && access(page_opts.zonetab.c_str(), R_OK) != 0)
+        fprintf(stderr, "blockie-shot: cannot read %s, the sheet lists only utc\n", page_opts.zonetab.c_str());
+    Zones zones = page_opts.zonetab.empty() ? Zones() : load_zones(page_opts.zonetab);
+    drive.page = page_opts;
     if (drive.on)
-        return run_drive(fonts, drive, out, frames_dir, systems, items, bt_sub, sys_focus, tiles_dir, recent_dir);
+        return run_drive(fonts, drive, out, frames_dir, systems, items, bt_sub, sys_focus, tiles_dir, recent_dir,
+                         zones);
 
     SelectorModel model;
     systems = std::max(1, std::min(systems, 10));
@@ -943,10 +1434,13 @@ int main(int argc, char** argv)
     model.game_title = game_title;
 
     InkLayer ink;
-    SettingsView sv;
-    sv.light = light;
-    sv.sheet = sheet ? kOne : 0;
-    sv.sheet_focus = sheet_focus >= 0 ? sheet_focus : (light ? 1 : 0);
+    SettingsPage sp;
+    page_base(sp, fonts, page_opts, zones);
+    if (!page_pose(sp, page_opts, zones))
+        return 2;
+    if (page_frames)
+        return run_page_frames(sp, fonts, drive, zones, frames_dir, out);
+    SettingsView sv = sp.view(0);
 
     if (!page_flip.empty()) {
         bool push = page_flip == "push";

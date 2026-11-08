@@ -68,6 +68,7 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
               std::vector<std::string>& lines)
 {
     int fails = 0;
+    int designed = 0;
     size_t n = rows.size();
     if (n == 0 || diffs.size() != n) {
         lines.push_back("FAIL no frames");
@@ -88,9 +89,14 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
         line += r.art.empty() ? "-" : "a";
         for (int g = 0; g < 3; g++)
             line += " " + pad(df.d[g], 7);
+        if (r.step && !r.cause.empty()) {
+            line += "  s " + r.cause;
+            designed += r.ok;
+        }
         if (!r.ok) {
-            line += r.step ? "  FAIL the step frame is not the frame before with the step alone applied"
-                           : "  FAIL the end check: the composite at T is not the landed frame";
+            line += !r.cause.empty() ? "  FAIL the designed frame does not hold its assertion"
+                    : r.step         ? "  FAIL the step frame is not the frame before with the step alone applied"
+                                     : "  FAIL the end check: the composite at T is not the landed frame";
             fails++;
         }
         if (!r.art.empty() && !r.motion && (df.d[0] || df.d[1] || df.d[2])) {
@@ -154,7 +160,80 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
     } else {
         lines.push_back("PASS " + num((long long)trail) + " identical still frames after landing");
     }
-    lines.push_back(fails ? "FAIL " + num(fails) + " findings" : std::string("PASS no pops"));
+    std::string tail = designed ? ", designed frames " + num(designed) : std::string();
+    lines.push_back(fails ? "FAIL " + num(fails) + " findings" + tail : "PASS no pops" + tail);
+    return fails;
+}
+
+BarRuns bar_runs(const uint32_t* px, int w, int h, int x0, int bw, int xref)
+{
+    BarRuns runs;
+    int start = -1;
+    for (int y = 0; y <= h; y++) {
+        bool on = y < h;
+        for (int x = x0; on && x < x0 + bw; x++)
+            on = px[(size_t)y * w + x] != px[(size_t)y * w + xref];
+        if (on && start < 0)
+            start = y;
+        if (!on && start >= 0) {
+            runs.push_back({start, y});
+            start = -1;
+        }
+    }
+    return runs;
+}
+
+int bar_judge(const std::vector<BarRow>& rows, std::vector<std::string>& lines)
+{
+    int fails = 0, checked = 0;
+    bool have = false;
+    bool prev_sheet = false;
+    int prev_y = 0, prev_target = 0;
+    for (const BarRow& r : rows) {
+        bool sheet = r.sheet_rest;
+        if (!sheet && r.sheet_vis) {
+            have = false;
+            continue;
+        }
+        const BarRuns& runs = sheet ? r.sheet_runs : r.page_runs;
+        int pitch = sheet ? r.pitch : r.page_pitch;
+        int target = sheet ? r.rows_top + (r.focus - r.first) * r.pitch : r.page_top + r.page_focus * r.page_pitch;
+        bool rest = sheet ? r.bar_rest : r.page_rest;
+        const char* which = sheet ? "the sheet bar" : "the page bar";
+        checked++;
+        if (runs.size() != 1) {
+            lines.push_back("FAIL bar frame " + num(r.n) + ": " + which + " has " + num((long long)runs.size()) +
+                            " segments, want 1");
+            fails++;
+            have = false;
+            continue;
+        }
+        int y = runs[0].first;
+        if (runs[0].second - y != pitch) {
+            lines.push_back("FAIL bar frame " + num(r.n) + ": " + which + " is " + num(runs[0].second - y) +
+                            " px tall, a row is " + num(pitch));
+            fails++;
+        }
+        if (rest && y != target) {
+            lines.push_back("FAIL bar frame " + num(r.n) + ": " + which + " rests at y " + num(y) +
+                            ", the focus row is at y " + num(target));
+            fails++;
+        }
+        if (!rest && !r.event && have && prev_sheet == sheet && prev_target == target) {
+            int d = y - target, dp = prev_y - target;
+            if ((d < 0 ? -d : d) > (dp < 0 ? -dp : dp) || (d != 0 && dp != 0 && (d > 0) != (dp > 0))) {
+                lines.push_back("FAIL bar frame " + num(r.n) + ": " + which + " moves away from the focus row, y " +
+                                num(prev_y) + " to " + num(y) + ", the focus row at y " + num(target));
+                fails++;
+            }
+        }
+        have = true;
+        prev_sheet = sheet;
+        prev_y = y;
+        prev_target = target;
+    }
+    lines.push_back(fails ? "FAIL the bar track: " + num(fails) + " findings on " + num(checked) + " frames"
+                          : "PASS the bar track holds on " + num(checked) + " frames");
     return fails;
 }
 

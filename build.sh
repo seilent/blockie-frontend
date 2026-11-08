@@ -371,6 +371,8 @@ build_app() {
     pool "$appobj/pagemove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/pagemove.cpp"
     pool "$appobj/bus.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bus.cpp"
     pool "$appobj/theme_setting.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/theme_setting.cpp"
+    pool "$appobj/setd_key.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/setd_key.cpp"
+    pool "$appobj/zones.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/zones.cpp"
     pool "$appobj/bt.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bt.cpp"
     pool "$appobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$appobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
@@ -395,7 +397,7 @@ build_app() {
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/vtext.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
-        "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
+        "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
@@ -616,14 +618,22 @@ build_test_dbus() {
     pool "$testobj/bt.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bt.cpp"
     pool "$testobj/bus.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bus.cpp"
     pool "$testobj/bt_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/tests/bt_dbus_test.cpp"
+    pool "$testobj/setd_key.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/setd_key.cpp"
+    pool "$testobj/theme_setting.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/theme_setting.cpp"
+    pool "$testobj/setd_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags \
+        "$root/blockie/tests/setd_dbus_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/btdbus"
     "$cxx" "$testobj/bt_model.o" "$testobj/bt.o" "$testobj/bus.o" "$testobj/bt_dbus_test.o" $appldflags $dbus_libs \
         -o "$out/btdbus/blockie-bt-dbus-test.tmp" || return 1
     mv "$out/btdbus/blockie-bt-dbus-test.tmp" "$out/btdbus/blockie-bt-dbus-test"
-    echo "build.sh: $out/btdbus/blockie-bt-dbus-test"
-    python3 "$root/blockie/tests/fake_bluez.py" "$out/btdbus/blockie-bt-dbus-test"
+    "$cxx" "$testobj/setd_key.o" "$testobj/theme_setting.o" "$testobj/bus.o" "$testobj/setd_dbus_test.o" $appldflags \
+        $dbus_libs -o "$out/btdbus/blockie-setd-dbus-test.tmp" || return 1
+    mv "$out/btdbus/blockie-setd-dbus-test.tmp" "$out/btdbus/blockie-setd-dbus-test"
+    echo "build.sh: $out/btdbus/blockie-bt-dbus-test $out/btdbus/blockie-setd-dbus-test"
+    python3 "$root/blockie/tests/fake_bluez.py" "$out/btdbus/blockie-bt-dbus-test" &&
+        python3 "$root/blockie/tests/fake_setd.py" "$out/btdbus/blockie-setd-dbus-test"
 }
 
 build_wrap_test() {
@@ -636,6 +646,19 @@ build_wrap_test() {
     mv "$out/wrap/blockie-wrap-test.tmp" "$out/wrap/blockie-wrap-test"
     echo "build.sh: $out/wrap/blockie-wrap-test"
     "$out/wrap/blockie-wrap-test"
+}
+
+build_zones_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/zones.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/zones.cpp"
+    pool "$testobj/zones_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/zones_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/zones"
+    "$cxx" "$testobj/zones.o" "$testobj/zones_test.o" $appldflags -o "$out/zones/blockie-zones-test.tmp" || return 1
+    mv "$out/zones/blockie-zones-test.tmp" "$out/zones/blockie-zones-test"
+    echo "build.sh: $out/zones/blockie-zones-test"
+    "$out/zones/blockie-zones-test"
 }
 
 build_decodeq_test() {
@@ -665,10 +688,12 @@ build_vtext_test() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    for s in vtext theme t9 screen_selector; do
+    for s in vtext theme t9 screen_selector screen_settings ink; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
+    pool "$testobj/zones_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/zones.cpp"
+    pool "$testobj/settings_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/settings_test.cpp"
     pool "$testobj/vtext_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/vtext_test.cpp"
     pool "$testobj/t9_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/t9_test.cpp"
     pool "$testobj/selector_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/selector_test.cpp"
@@ -688,13 +713,18 @@ build_vtext_test() {
         "$testobj/selector_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-selector-test.tmp" ||
         return 1
     mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
-    echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test"
+    "$cxx" "${gobjs[@]}" "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/theme.o" "$testobj/zones_g.o" \
+        "$testobj/settings_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" ||
+        return 1
+    mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
+    echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test" \
+        "$out/vtext/blockie-settings-test"
     local cjk
     cjk=$(fc-list ':family=Noto Sans CJK JP:style=Light' file 2> /dev/null | head -n 1 | sed 's/: *$//' || true)
     [[ -n $cjk && -f $cjk ]] || cjk=
     echo "build.sh: vtext CJK fallback ${cjk:-none}"
     "$out/vtext/blockie-vtext-test" "$fonts_dir" "$cjk" && "$out/vtext/blockie-t9-test" "$fonts_dir" &&
-        "$out/vtext/blockie-selector-test" "$fonts_dir"
+        "$out/vtext/blockie-selector-test" "$fonts_dir" && "$out/vtext/blockie-settings-test" "$fonts_dir"
 }
 
 build_shot() {
@@ -712,6 +742,7 @@ build_shot() {
     pool "$shotobj/theme.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/theme.cpp"
     pool "$shotobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
     pool "$shotobj/screen_settings.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_settings.cpp"
+    pool "$shotobj/zones.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/zones.cpp"
     pool "$shotobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
@@ -726,7 +757,7 @@ build_shot() {
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/theme.o" "$shotobj/ink.o" \
-        "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
+        "$shotobj/screen_settings.o" "$shotobj/zones.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
         "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/vtext.o" "$shotobj/nav.o" "$shotobj/home.o" \
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
         "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/shot.o" \
@@ -766,7 +797,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }

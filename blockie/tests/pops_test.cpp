@@ -195,6 +195,81 @@ int main()
         check(judge(c, false) == 0 && judge(c, true) > 0, "--no-lead skips only the lead check for a launch motion");
     }
 
+    {
+        Clip c = clean();
+        c.rows[kStill + 2].step = true;
+        c.rows[kStill + 2].cause = "a designed frame";
+        std::vector<std::string> lines;
+        int fails = judge(c, true, lines);
+        bool listed = false;
+        for (const std::string& l : lines)
+            listed = listed || l.find("  s a designed frame") != std::string::npos;
+        check(fails == 0 && listed && lines.back() == "PASS no pops, designed frames 1",
+              "a designed frame is listed with its cause and counted");
+        c.rows[kStill + 2].ok = false;
+        check(names(c, "FAIL the designed frame does not hold its assertion"),
+              "a designed frame whose assertion fails is a FAIL");
+    }
+    {
+        Clip c = clean();
+        for (size_t i = kStill; i < c.frames.size(); i++)
+            fill(c.frames[i], 0, 432, 0x808080);
+        c.rows[kStill].step = true;
+        c.rows[kStill].cause = "a whole pane switch";
+        check(judge(c) == 0, "a designed frame skips the step and flash tests on its own frame");
+        c.rows[kStill].step = false;
+        c.rows[kStill].cause.clear();
+        check(names(c, "FAIL step in x < 432"), "the same frame without the designed mark fails as a step");
+    }
+
+    {
+        Frame f((size_t)kW * kH, kGround);
+        box(f, 16, 20, 10, 50, kBlock);
+        BarRuns runs = bar_runs(f.data(), kW, kH, 16, 4, 0);
+        check(runs.size() == 1 && runs[0].first == 10 && runs[0].second == 50, "bar_runs finds one 40 px bar at y 10");
+        box(f, 16, 18, 60, 70, kBlock);
+        check(bar_runs(f.data(), kW, kH, 16, 4, 0).size() == 1, "a run covers the whole bar width");
+    }
+    {
+        auto at = [](int n, int y, bool rest, bool event) {
+            BarRow r;
+            r.n = n;
+            r.sheet_vis = true;
+            r.sheet_rest = true;
+            r.focus = 2;
+            r.rows_top = 100;
+            r.pitch = 40;
+            r.bar_rest = rest;
+            r.event = event;
+            r.sheet_runs = {{y, y + 40}};
+            return r;
+        };
+        std::vector<std::string> lines;
+        check(bar_judge({at(0, 100, false, true), at(1, 150, false, false), at(2, 180, true, false)}, lines) == 0 &&
+                  lines.back() == "PASS the bar track holds on 3 frames",
+              "a bar gliding toward the focus row and resting on it passes");
+        check(bar_judge({at(0, 150, false, true), at(1, 120, false, false)}, lines) == 1,
+              "a bar that moves away from the focus row fails");
+        check(bar_judge({at(0, 140, true, false)}, lines) == 1, "a bar at rest off the focus row fails");
+        BarRow two = at(0, 180, true, false);
+        two.sheet_runs.push_back({300, 340});
+        check(bar_judge({two}, lines) == 1, "two bar segments fail");
+        BarRow tall = at(0, 180, true, false);
+        tall.sheet_runs = {{180, 230}};
+        check(bar_judge({tall}, lines) == 1, "a bar taller than a row fails");
+        BarRow page;
+        page.page_focus = 1;
+        page.page_top = 196;
+        page.page_pitch = 86;
+        page.page_rest = true;
+        page.page_runs = {{282, 368}};
+        check(bar_judge({page}, lines) == 0, "the page bar at rest on its row passes while no sheet shows");
+        BarRow mid = at(0, 0, false, false);
+        mid.sheet_rest = false;
+        mid.sheet_runs.clear();
+        check(bar_judge({mid}, lines) == 0, "a frame with the sheet partly up is skipped");
+    }
+
     check(judge(path({1, 2, 3, 4, 5, 4, 3, 2, 1, 0})) == 0, "an exact turnaround on the motion path passes");
     check(judge(path({1, 2, 3, 4, 5, 3, 2, 1, 0})) == 0, "a turnaround whose return is off by one step passes");
     check(judge(ramp(-1)) == 0, "a ramp of 7, 8 and 9 levels a frame over 1500 px passes");

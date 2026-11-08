@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../gfx/canvas.h"
@@ -16,6 +17,7 @@ struct PopRow {
     bool step = false;
     bool ok = true;
     Rect art;
+    std::string cause;
 };
 
 struct PopDiff {
@@ -37,5 +39,28 @@ void pop_count(const uint32_t* a, const uint32_t* b, int w, int h, int bx, Rect 
                std::array<int64_t, 3>& energy, bool* same);
 int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs, bool lead,
               std::vector<std::string>& lines);
+
+using BarRuns = std::vector<std::pair<int, int>>;
+
+struct BarRow {
+    int n = 0;
+    bool sheet_vis = false;
+    bool sheet_rest = false;
+    int focus = 0;
+    int first = 0;
+    int rows_top = 0;
+    int pitch = 0;
+    bool bar_rest = false;
+    int page_focus = 0;
+    int page_top = 0;
+    int page_pitch = 0;
+    bool page_rest = false;
+    bool event = false;
+    BarRuns sheet_runs;
+    BarRuns page_runs;
+};
+
+BarRuns bar_runs(const uint32_t* px, int w, int h, int x0, int bw, int xref);
+int bar_judge(const std::vector<BarRow>& rows, std::vector<std::string>& lines);
 
 }
