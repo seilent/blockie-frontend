@@ -17,7 +17,6 @@
 #include "fold.h"
 #include "image.h"
 #include "ink.h"
-#include "pagemove.h"
 #include "screen_bt.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
@@ -54,6 +53,21 @@ std::vector<std::string> pngs_in(const std::string& dir)
     for (std::string& n : names)
         n = dir + "/" + n;
     return names;
+}
+
+std::vector<Image> load_tiles(const std::string& dir)
+{
+    std::vector<Image> tiles;
+    for (const std::string& p : pngs_in(dir)) {
+        if (tiles.size() >= 8)
+            break;
+        Image img;
+        if (load_tile(p, img))
+            tiles.push_back(std::move(img));
+        else
+            fprintf(stderr, "blockie-shot: skip %s\n", p.c_str());
+    }
+    return tiles;
 }
 
 BtDevice shot_device(const char* mac, const char* alias, bool paired, bool connected, const char* uuid)
@@ -129,10 +143,11 @@ int main(int argc, char** argv)
     std::string out;
     std::string font_dir;
     std::string tiles_dir;
+    std::string recent_dir;
     std::string header;
     std::string page;
     std::string fold_dir;
-    std::string turn;
+    std::string page_flip;
     std::string frames_dir;
     std::string bt_sub;
     std::string bt_state;
@@ -160,6 +175,8 @@ int main(int argc, char** argv)
             font_dir = argv[++i];
         else if (a == "--tiles" && i + 1 < argc)
             tiles_dir = argv[++i];
+        else if (a == "--recent" && i + 1 < argc)
+            recent_dir = argv[++i];
         else if (a == "--fit" && i + 1 < argc)
             fit = std::string(argv[++i]) == "cover" ? ArtFit::Cover : ArtFit::Contain;
         else if (a == "--header" && i + 1 < argc)
@@ -188,8 +205,8 @@ int main(int argc, char** argv)
             sheet_focus = atoi(argv[++i]);
         else if (a == "--fold" && i + 1 < argc)
             fold_dir = argv[++i];
-        else if (a == "--turnstile" && i + 1 < argc)
-            turn = argv[++i];
+        else if (a == "--pageflip" && i + 1 < argc)
+            page_flip = argv[++i];
         else if (a == "--frames" && i + 1 < argc)
             frames_dir = argv[++i];
         else if (a == "--scatter")
@@ -209,15 +226,15 @@ int main(int argc, char** argv)
             return 2;
         }
     }
-    bool sequence = !fold_dir.empty() || !turn.empty();
+    bool sequence = !fold_dir.empty() || !page_flip.empty();
     if ((out.empty() && !sequence) || (sequence && frames_dir.empty())) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
                 " [--header TEXT] [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
                 " [--light] [--page settings] [--sheet] [--sheetfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]"
                 " [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
-                "       blockie-shot --fold ab|ba --frames DIR [same options]\n"
-                "       blockie-shot --turnstile push|pop --frames DIR [same options]\n");
+                "       blockie-shot --fold ab|ba --frames DIR [--recent DIR] [same options]\n"
+                "       blockie-shot --pageflip push|pop --frames DIR [same options]\n");
         return 2;
     }
     if (font_dir.empty())
@@ -247,17 +264,8 @@ int main(int argc, char** argv)
     model.focus = sys_focus < 0 || sys_focus >= count ? 0 : sys_focus;
     model.menu_top_px = menu_top * kMenuPitchPx;
 
-    if (!tiles_dir.empty()) {
-        for (const std::string& p : pngs_in(tiles_dir)) {
-            if (model.tiles.size() >= 8)
-                break;
-            Image img;
-            if (load_tile(p, img))
-                model.tiles.push_back(std::move(img));
-            else
-                fprintf(stderr, "blockie-shot: skip %s\n", p.c_str());
-        }
-    }
+    if (!tiles_dir.empty())
+        model.tiles = load_tiles(tiles_dir);
 
     model.section_label = header;
     if (focus == Pane::Details && tile_focus < 0)
@@ -278,6 +286,8 @@ int main(int argc, char** argv)
         menu.game_system.clear();
         menu.game_title.clear();
         menu.tile_focus = -1;
+        if (!recent_dir.empty())
+            menu.tiles = load_tiles(recent_dir);
         Buffer sel;
         Buffer det;
         Canvas sc(sel.surface());
@@ -303,50 +313,28 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    if (!turn.empty()) {
-        bool push = turn == "push";
-        PageMove pm;
-        int rows = std::min(kMenuVisibleRows, count - menu_top);
-        if (push)
-            pm.push(0, model.focus - menu_top, rows);
-        else
-            pm.pop(0, rows);
-        Buffer outb;
+    if (!page_flip.empty()) {
+        bool push = page_flip == "push";
+        Buffer menub;
         Buffer pageb;
+        Canvas mc(menub.surface());
+        draw_selector(mc, fonts, model, Pane::Selector, fit, scatter, false);
+        Canvas pc(pageb.surface());
+        draw_settings(pc, fonts, ink, sv, theme());
+        FoldPlan plan = fold_plan(push ? FoldDir::PagePush : FoldDir::PagePop, model.focus - menu_top, 0);
+        int64_t dur = fold_duration(plan);
+        Buffer outb;
         int n = 0;
         for (int64_t t = 0;; t += kFrameMs) {
-            PagePhase ph = pm.phase(t);
-            Canvas c(outb.surface());
-            if (ph == PagePhase::PageEnter || ph == PagePhase::PageExit) {
-                SettingsView v = sv;
-                v.chrome.header_dy = pm.header_dy(t);
-                v.chrome.header_alpha = (fx)((int64_t)pm.header_a256(t) * kOne / 256);
-                Canvas pc(pageb.surface());
-                draw_settings(pc, fonts, ink, v, theme());
-                c.fill(outb.surface().rect(), theme().bg);
-                draw_turnstile(pageb.surface(), outb.surface(), pm.page_angle(t), pm.page_a256(t), theme().bg);
-            } else {
-                SelectorModel m = model;
-                m.poses.resize(m.systems.size());
-                for (int i = 0; i < (int)m.systems.size(); i++) {
-                    ItemPose ip = pm.item(t, i - menu_top);
-                    m.poses[i] = {ip.dx, ip.dy, ip.a256};
-                }
-                m.grid_a256 = pm.grid_a256(t);
-                m.bar_a256 = pm.bar_a256(t);
-                if (ph == PagePhase::Idle && push) {
-                    SettingsView v = sv;
-                    draw_settings(c, fonts, ink, v, theme());
-                } else {
-                    draw_selector(c, fonts, m, Pane::Selector, fit, scatter, false);
-                }
-            }
+            int64_t tt = std::min(t, dur);
+            fold_compose(push ? menub.surface() : pageb.surface(), push ? pageb.surface() : menub.surface(),
+                         outb.surface(), plan, tt);
             if (!write_png(frame_path(frames_dir, n++), outb.surface()))
                 return 1;
-            if (ph == PagePhase::Idle && t > 0)
+            if (tt >= dur)
                 break;
         }
-        fprintf(stderr, "blockie-shot: turnstile %s %d frames\n", turn.c_str(), n);
+        fprintf(stderr, "blockie-shot: page %s %lld ms %d frames\n", page_flip.c_str(), (long long)dur, n);
         return 0;
     }
 

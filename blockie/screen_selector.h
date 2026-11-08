@@ -21,7 +21,6 @@ struct SelectorItem {
 
 struct MenuPose {
     int dx = 0;
-    int dy = 0;
     int a256 = 256;
 };
 

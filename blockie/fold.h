@@ -6,7 +6,7 @@
 
 namespace fd {
 
-enum class FoldDir { ToDetails, ToSelector };
+enum class FoldDir { ToDetails, ToSelector, PagePush, PagePop };
 enum class FoldEdge { Right, Left, Down, Up };
 
 struct FoldCell {
@@ -16,11 +16,18 @@ struct FoldCell {
     bool inside = false;
 };
 
+struct FoldTile {
+    Rect r;
+    int step = 0;
+};
+
 struct FoldPlan {
     FoldDir dir = FoldDir::ToDetails;
     Rect scope;
     int maxring = 0;
     std::vector<FoldCell> cells;
+    std::vector<FoldTile> tiles;
+    int tile_steps = 0;
 };
 
 FoldPlan fold_plan(FoldDir dir, int v, int title_bottom_px);

@@ -27,17 +27,16 @@ int u64(fx u) { return (to_px(u) + 512) >> 10; }
 
 void draw_page_ground(Canvas& c, const Theme& th) { c.fill(c.surface().rect(), th.bg); }
 
-void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const PageChrome& ch, const Theme& th)
+void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th)
 {
     Rect keep = c.clip();
-    int band = px(kHeaderBand) + ch.header_dy;
-    c.set_clip(Rect{0, ch.header_dy, kPortraitW, band}.intersect(keep));
-    f.draw(c, role::hubHeader.style(), word, u64(tok::hubEdge), px(kHeaderBaseline) + ch.header_dy, th.ink,
-           alpha256(fx_mul(role::hubHeader.alpha, ch.header_alpha)));
+    c.set_clip(Rect{0, 0, kPortraitW, px(kHeaderBand)}.intersect(keep));
+    f.draw(c, role::hubHeader.style(), word, u64(tok::hubEdge), px(kHeaderBaseline), th.ink,
+           alpha256(role::hubHeader.alpha));
     c.set_clip(keep);
     if (pivot && *pivot)
-        f.draw(c, role::pivotActive.style(), pivot, u64(tok::hubEdge), px(kPivotBaseline) + ch.header_dy, th.ink,
-               alpha256(fx_mul(role::pivotActive.alpha, ch.header_alpha)));
+        f.draw(c, role::pivotActive.style(), pivot, u64(tok::hubEdge), px(kPivotBaseline), th.ink,
+               alpha256(role::pivotActive.alpha));
 }
 
 void draw_value_sheet(Canvas& c, Fonts& f, const SheetView& s, const Theme& th)
@@ -83,7 +82,7 @@ void draw_value_sheet(Canvas& c, Fonts& f, const SheetView& s, const Theme& th)
 void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th)
 {
     draw_page_ground(c, th);
-    draw_page_chrome(c, f, kWord, kPivot, v.chrome, th);
+    draw_page_chrome(c, f, kWord, kPivot, th);
 
     int top = px(kRowsTop);
     int pitch = px(tok::settingsPitch);

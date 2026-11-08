@@ -326,7 +326,7 @@ bool BtPage::dirty(int64_t now) const
 
 int64_t BtPage::deadline(int64_t now) const { return bt_tick_at(state_, now); }
 
-void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now, const PageChrome& ch)
+void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now)
 {
     list_.step(now);
     retry_ = false;
@@ -334,7 +334,7 @@ void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now, const PageChrome& ch)
     Rect keep = c.clip();
     c.set_clip(kScreen);
     draw_page_ground(c, t);
-    draw_page_chrome(c, fonts_, "bluetooth", nullptr, ch, t);
+    draw_page_chrome(c, fonts_, "bluetooth", nullptr, t);
     fx dim = visible(dialog_, now) ? dialog_.fade.at(now) : 0;
     Canvas& k = ink.begin(kScreen);
     draw_rows(k, now, kOne - dim);

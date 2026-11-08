@@ -265,13 +265,12 @@ static int run()
     InkLayer ink;
     Buffer from_buf;
     Buffer to_buf;
-    Buffer page_buf;
     Motion motion = Motion::None;
     FoldPlan fold;
     int64_t fold_t0 = 0;
     bool to_dirty = false;
+    bool end_ready = false;
     PageMove pm;
-    Screen moving_page = Screen::Home;
     int64_t frame_req_at = -1;
     bool drop_budget = false;
     int scroll_from = 0;
@@ -353,30 +352,22 @@ static int run()
         model.poses.clear();
         model.grid_a256 = 256;
         model.bar_a256 = 256;
-        if (motion == Motion::Page) {
-            PagePhase ph = pm.phase(now);
-            if (ph == PagePhase::HomeExit || ph == PagePhase::HomeEnter) {
-                model.poses.resize(model.systems.size());
-                for (int i = 0; i < (int)model.systems.size(); i++) {
-                    ItemPose ip = pm.item(now, i - nav.menu_top);
-                    model.poses[i] = {ip.dx, ip.dy, ip.a256};
-                }
-                model.grid_a256 = pm.grid_a256(now);
-                model.bar_a256 = pm.bar_a256(now);
+        if (motion == Motion::Page && pm.running(now)) {
+            model.poses.resize(model.systems.size());
+            for (int i = 0; i < (int)model.systems.size(); i++) {
+                ItemPose ip = pm.item(now, i - nav.menu_top);
+                model.poses[i] = {ip.dx, ip.a256};
             }
+            model.grid_a256 = pm.grid_a256(now);
+            model.bar_a256 = pm.bar_a256(now);
         }
     };
     auto render_home = [&](Canvas& c) { draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view, theme()); };
-    auto render_page = [&](Canvas& c, Screen sc, int64_t now, PageChrome ch) {
-        if (sc == Screen::Bluetooth) {
-            btp.draw(c, ink, now, ch);
-            return;
-        }
-        if (sc == Screen::Settings) {
-            SettingsView v = settings_page.view(now);
-            v.chrome = ch;
-            draw_settings(c, fonts, ink, v, theme());
-        }
+    auto render_page = [&](Canvas& c, Screen sc, int64_t now) {
+        if (sc == Screen::Bluetooth)
+            btp.draw(c, ink, now);
+        else if (sc == Screen::Settings)
+            draw_settings(c, fonts, ink, settings_page.view(now), theme());
     };
     auto animating = [&](int64_t now) {
         if (motion == Motion::Fold && now - fold_t0 < fold_duration(fold))
@@ -400,6 +391,16 @@ static int run()
         frame_req_at = -1;
         need_redraw = true;
     };
+    auto render_end = [&](int64_t now) {
+        sync_model(now);
+        Canvas tc(to_buf.surface());
+        if (nav.top() == Screen::Home)
+            render_home(tc);
+        else
+            render_page(tc, nav.top(), now);
+        to_dirty = false;
+        end_ready = true;
+    };
     auto frame = [&](int64_t now) -> bool {
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
@@ -410,24 +411,17 @@ static int run()
         if (motion == Motion::Fold) {
             if (to_dirty) {
                 Canvas tc(to_buf.surface());
-                render_home(tc);
+                if (nav.top() == Screen::Home)
+                    render_home(tc);
+                else
+                    render_page(tc, nav.top(), now);
                 to_dirty = false;
             }
             fold_compose(from_buf.surface(), to_buf.surface(), dst, fold, now - fold_t0);
-        } else if (motion == Motion::Page && (pm.phase(now) == PagePhase::HomeExit || pm.phase(now) == PagePhase::HomeEnter)) {
-            render_home(c);
-        } else if (motion == Motion::Page && (pm.phase(now) == PagePhase::PageEnter || pm.phase(now) == PagePhase::PageExit)) {
-            PageChrome ch;
-            ch.header_dy = pm.header_dy(now);
-            ch.header_alpha = (fx)((int64_t)pm.header_a256(now) * kOne / 256);
-            Canvas pc(page_buf.surface());
-            render_page(pc, moving_page, now, ch);
-            c.fill(dst.rect(), theme().bg);
-            draw_turnstile(page_buf.surface(), dst, pm.page_angle(now), pm.page_a256(now), theme().bg);
         } else if (nav.top() == Screen::Home) {
             render_home(c);
         } else {
-            render_page(c, nav.top(), now, PageChrome{});
+            render_page(c, nav.top(), now);
         }
         p.present(kScreen);
         bool more = animating(now);
@@ -446,7 +440,8 @@ static int run()
     auto start_fold = [&](FoldDir dir, int title_bottom, int64_t now) {
         if (!can_animate())
             return;
-        copy_surface(p.draw_target(), from_buf.surface());
+        copy_surface(end_ready ? to_buf.surface() : p.draw_target(), from_buf.surface());
+        end_ready = false;
         fold = fold_plan(dir, nav.focus - nav.menu_top, title_bottom);
         fold_t0 = now;
         to_dirty = true;
@@ -455,7 +450,6 @@ static int run()
     if (can_animate()) {
         pm.enter(now_ms(), visible_rows(), fx_round(tok::motion_homeEnterStagger));
         motion = Motion::Page;
-        moving_page = Screen::Home;
     }
     need_redraw = true;
 
@@ -604,20 +598,12 @@ static int run()
             bt.set_page_open(true, now);
         }
         repeat.rearm(now);
-        if (!can_animate())
-            return;
-        pm.push(now, nav.focus - nav.menu_top, visible_rows());
-        motion = Motion::Page;
-        moving_page = sc;
+        start_fold(FoldDir::PagePush, 0, now);
     };
-    host.pop_fn = [&](Screen sc) {
+    host.pop_fn = [&](Screen) {
         int64_t now = now_ms();
         repeat.rearm(now);
-        if (!can_animate())
-            return;
-        pm.pop(now, visible_rows());
-        motion = Motion::Page;
-        moving_page = sc;
+        start_fold(FoldDir::PagePop, 0, now);
     };
     host.page_fn = [&](Screen sc, PadAction a, bool rep) {
         int64_t now = now_ms();
@@ -667,9 +653,13 @@ static int run()
             try_launch(sysgames[i]);
     };
     auto apply = [&](PadAction a, bool rep) {
+        bool cut = motion != Motion::None;
         land("input");
+        if (cut)
+            render_end(now_ms());
         if (nav_apply(nav, host, a, rep))
             need_redraw = true;
+        end_ready = false;
     };
     theme_set.on_value = [&](bool light) {
         settings_page.set_light(light);

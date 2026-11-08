@@ -6,6 +6,7 @@
 
 #include "../ui/roles.h"
 #include "text_wrap.h"
+#include "tile_grid.h"
 
 namespace fd {
 
@@ -24,14 +25,7 @@ constexpr int kWatermarkX = 512;
 constexpr int kWatermarkBaseline = 688;
 constexpr const char* kWatermarkWord = "blockie";
 
-constexpr int kGridX = 120;
-constexpr int kTileSide = 154;
-constexpr int kGridGutter = 4;
-constexpr int kGridCols = 2;
-constexpr int kGridRows = 4;
-constexpr int kGridRowPitch = 158;
 constexpr int kSectionBaseline = 70;
-constexpr int kTileFirstTop = 80;
 constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
@@ -127,33 +121,24 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
     const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
     fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, th.ink,
                alpha256(fx_mul(role::quickplayHeader.alpha, pane)) * model.grid_a256 >> 8);
-    for (int r = 0; r < kGridRows; r++)
-        for (int col = 0; col < kGridCols; col++) {
-            int x = kGridX + col * (kTileSide + kGridGutter);
-            int y = kTileFirstTop + r * kGridRowPitch;
-            Rect tr{x, y, x + kTileSide, y + kTileSide};
-            c.blend(tr, th.tile, tile_alpha);
-            int k = r * kGridCols + col;
-            if (k >= (int)model.tiles.size() || model.tiles[k].w <= 0 || model.tiles[k].h <= 0)
-                continue;
-            const Image& art = model.tiles[k];
-            Rect fr = fit_rect(art.w, art.h, x, y, kTileSide, fit);
-            if (fit == ArtFit::Cover) {
-                Rect prev = c.clip();
-                c.set_clip(tr);
-                c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
-                c.set_clip(prev);
-            } else {
-                c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
-            }
+    for (int k = 0; k < kGridTiles && k < (int)model.tiles.size(); k++) {
+        const Image& art = model.tiles[k];
+        if (art.w <= 0 || art.h <= 0)
+            continue;
+        Rect tr = grid_tile_rect(k);
+        Rect fr = fit_rect(art.w, art.h, tr.x0, tr.y0, kTileSide, fit);
+        if (fit == ArtFit::Cover) {
+            Rect prev = c.clip();
+            c.set_clip(tr);
+            c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
+            c.set_clip(prev);
+        } else {
+            c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
         }
+    }
 
-    if (!on && model.tile_focus >= 0 && model.tile_focus < kGridRows * kGridCols) {
-        int col = model.tile_focus % kGridCols;
-        int r = model.tile_focus / kGridCols;
-        int x = kGridX + col * (kTileSide + kGridGutter);
-        int y = kTileFirstTop + r * kGridRowPitch;
-        Rect tr{x, y, x + kTileSide, y + kTileSide};
+    if (!on && model.tile_focus >= 0 && model.tile_focus < kGridTiles) {
+        Rect tr = grid_tile_rect(model.tile_focus);
         c.frame_aa(Rect64::of(tr.grow(kTileFocusBorder), Zoom{}), Rect64::of(tr, Zoom{}), th.focus,
                    model.grid_a256);
     }
@@ -184,7 +169,7 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         int slot = kFirstBaseline + i * kPitch - model.menu_top_px;
         if (slot <= slot_lo || slot >= slot_hi)
             continue;
-        int baseline = slot + ps.dy;
+        int baseline = slot;
         int label_alpha =
             alpha256(i == focus_item ? role::homeItem.alpha : tok::type_homeItem_alphaDim) * ps.a256 >> 8;
         fonts.draw(c, role::homeItem.style(), model.systems[i].name.c_str(), x64(kLabelX + ps.dx), baseline, th.ink,

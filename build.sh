@@ -536,7 +536,7 @@ build_input_test() {
 build_motion_test() {
     toolver=$("$cxx" --version | head -n 1)
     local s
-    for s in core/curves.cpp gfx/warp.cpp gfx/canvas.cpp; do
+    for s in core/curves.cpp gfx/canvas.cpp; do
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $appcflags "$root/$s"
     done
     pool "$testobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
@@ -550,8 +550,8 @@ build_motion_test() {
     ((fail)) && return 1
     mkdir -p "$out/motion"
     "$cxx" "$testobj/fold.o" "$testobj/fold_test.o" $appldflags -lpthread -lm -o "$out/motion/blockie-fold-test" || return 1
-    "$cxx" "$testobj/pagemove.o" "$testobj/pagemove_test.o" "$genobj/core_curves.cpp.o" "$genobj/gfx_warp.cpp.o" \
-        "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm -o "$out/motion/blockie-pagemove-test" || return 1
+    "$cxx" "$testobj/pagemove.o" "$testobj/pagemove_test.o" "$genobj/core_curves.cpp.o" $appldflags -lpthread -lm \
+        -o "$out/motion/blockie-pagemove-test" || return 1
     "$cxx" "$testobj/ink.o" "$testobj/theme.o" "$testobj/ink_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags \
         -lpthread -lm -o "$out/motion/blockie-ink-test" || return 1
     echo "build.sh: $out/motion"
@@ -620,7 +620,6 @@ build_shot() {
     pool "$shotobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
     pool "$shotobj/screen_settings.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_settings.cpp"
     pool "$shotobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
-    pool "$shotobj/pagemove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/pagemove.cpp"
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
@@ -631,7 +630,7 @@ build_shot() {
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/theme.o" "$shotobj/ink.o" \
-        "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/pagemove.o" "$shotobj/bt_model.o" \
+        "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
         "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"

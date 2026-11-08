@@ -32,7 +32,7 @@ public:
     void set_model(const BtState& s, int64_t now);
     Act action(PadAction a, bool repeat, int64_t now);
     void land(int64_t now);
-    void draw(Canvas& c, InkLayer& ink, int64_t now, const PageChrome& ch = PageChrome{});
+    void draw(Canvas& c, InkLayer& ink, int64_t now);
     bool dirty(int64_t now) const;
     bool animating(int64_t now) const;
     int64_t deadline(int64_t now) const;

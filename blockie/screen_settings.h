@@ -11,13 +11,8 @@
 
 namespace fd {
 
-struct PageChrome {
-    int header_dy = 0;
-    fx header_alpha = kOne;
-};
-
 void draw_page_ground(Canvas& c, const Theme& th);
-void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const PageChrome& ch, const Theme& th);
+void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th);
 
 struct SheetView {
     const char* title = "";
@@ -36,7 +31,6 @@ struct SettingsView {
     fx sheet = 0;
     int sheet_focus = 0;
     fx sheet_bar = -kOne;
-    PageChrome chrome;
 };
 
 void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th);
