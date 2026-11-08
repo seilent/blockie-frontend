@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -444,7 +445,10 @@ void Library::mark_played(int64_t game_id, int64_t when)
     sqlite3_prepare_v2(db_, "UPDATE game SET last_played=? WHERE id=?;", -1, &st, nullptr);
     sqlite3_bind_int64(st, 1, when);
     sqlite3_bind_int64(st, 2, game_id);
-    sqlite3_step(st);
+    int rc = sqlite3_step(st);
+    if (rc != SQLITE_DONE)
+        std::fprintf(stderr, "blockie-library: mark_played %lld step rc %d (%s)\n", (long long)game_id, rc,
+                     sqlite3_errmsg(db_));
     sqlite3_finalize(st);
 }
 
