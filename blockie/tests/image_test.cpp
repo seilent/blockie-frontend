@@ -79,7 +79,7 @@ bool tile_matches_bilinear(int sw, int sh, int a256, int k)
     d.rgb = noise(sw, sh, 0x2545f491u);
     fd::Image full = fd::Image::from_portrait(d.rgb.data(), sw, sh);
     fd::Image tile = fd::cover_tile(d, fd::kTileSide);
-    fd::Rect tr = fd::grid_tile_rect(k);
+    fd::Rect tr = fd::grid_tile_rect(k, fd::kGridCols);
     fd::Buffer ref;
     fd::Buffer got;
     std::vector<uint32_t> ground = noise(ref.w, ref.h, 0x9e3779b9u);

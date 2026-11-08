@@ -79,6 +79,21 @@ int main()
     check(utf.size() == 1 && ends_with(utf[0], "..."), "accented clamped line ends with ellipsis");
     check(utf.size() == 1 && valid_utf8(utf[0]), "ellipsis trim does not split a utf8 code point");
 
+    auto px24 = [](const std::string& s) { return (int)s.size() * 24; };
+    std::vector<std::string> turned = wrap_lines(
+        "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliett Kilo Lima Mike November Oscar Papa", 648, 3,
+        px24);
+    bool fits = turned.size() == 3;
+    for (const std::string& l : turned)
+        if (px24(l) > 648)
+            fits = false;
+    check(fits, "a turned title wraps at 648 px into 3 lines that fit");
+    check(turned.size() == 3 && turned[0] == "Alpha Bravo Charlie Delta" && ends_with(turned[2], "..."),
+          "the turned title packs each line and ends line 3 with an ellipsis");
+    std::vector<std::string> word = wrap_lines("Supercalifragilisticexpialidocious Synth", 648, 3, px24);
+    check(word.size() == 2 && px24(word[0]) > 648 && !ends_with(word[0], "..."),
+          "one word longer than 648 px stays whole on its line for the raster cut");
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

@@ -412,7 +412,7 @@ static int run()
             model.bar_a256 = pm.bar_a256(now);
         }
     };
-    auto render_home = [&](Canvas& c) { draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view, theme()); };
+    auto render_home = [&](Canvas& c) { draw_selector(c, fonts, model, pane, false, system_view, theme()); };
     auto render_page = [&](Canvas& c, Screen sc, int64_t now) {
         if (sc == Screen::Bluetooth)
             btp.draw(c, ink, now);
@@ -669,7 +669,7 @@ static int run()
         if (nav.top() != Screen::Home || to_dirty)
             return;
         Canvas tc(to_buf.surface());
-        tc.set_bound(grid_tile_rect(pos).grow(kTileFocusBorder));
+        tc.set_bound(grid_tile_rect(pos, kGridCols).grow(kTileFocusBorder));
         render_home(tc);
     };
     auto place_art = [&](int64_t id, const Art& img) {

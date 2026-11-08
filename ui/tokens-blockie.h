@@ -735,8 +735,9 @@ inline constexpr Token kTokens[] = {
     {"adjustNumberDrop", "0.35", "ratio", 22938},
     {"backdrop.coverSigma", "6", "u", 393216},
     {"backdrop.coverGrid", "0.25", "ratio", 16384},
+    {"turnedLineStart", "340", "u", 22282240},
 };
-inline constexpr int kTokenCount = 724;
+inline constexpr int kTokenCount = 725;
 
 inline constexpr int32_t u = (int32_t)kTokens[0].num;
 inline constexpr int32_t canvasW = (int32_t)kTokens[1].num;
@@ -1462,5 +1463,6 @@ inline constexpr int32_t adjustColumn = (int32_t)kTokens[720].num;
 inline constexpr int32_t adjustNumberDrop = (int32_t)kTokens[721].num;
 inline constexpr int32_t backdrop_coverSigma = (int32_t)kTokens[722].num;
 inline constexpr int32_t backdrop_coverGrid = (int32_t)kTokens[723].num;
+inline constexpr int32_t turnedLineStart = (int32_t)kTokens[724].num;
 
 }

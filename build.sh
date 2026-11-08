@@ -362,6 +362,7 @@ build_app() {
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
     pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$appobj/vtext.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/vtext.cpp"
     pool "$appobj/text_wrap.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$appobj/theme.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/theme.cpp"
     pool "$appobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
@@ -389,7 +390,7 @@ build_app() {
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/vtext.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/library.o" "$appobj/image.o" \
@@ -520,6 +521,9 @@ build_input_test() {
     pool "$testobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$testobj/repeat_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/repeat_test.cpp"
     pool "$testobj/nav_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/nav_test.cpp"
+    pool "$testobj/home.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/home.cpp"
+    pool "$testobj/home_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/home_test.cpp"
+    pool "$testobj/tile_grid_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/tile_grid_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/input"
@@ -529,8 +533,14 @@ build_input_test() {
     "$cxx" "$testobj/input_pad.o" "$testobj/nav.o" "$testobj/nav_test.o" $appldflags \
         -o "$out/input/blockie-nav-test.tmp" || return 1
     mv "$out/input/blockie-nav-test.tmp" "$out/input/blockie-nav-test"
-    echo "build.sh: $out/input/blockie-repeat-test $out/input/blockie-nav-test"
-    "$out/input/blockie-repeat-test" && "$out/input/blockie-nav-test"
+    "$cxx" "$testobj/home.o" "$testobj/home_test.o" $appldflags -o "$out/input/blockie-home-test.tmp" || return 1
+    mv "$out/input/blockie-home-test.tmp" "$out/input/blockie-home-test"
+    "$cxx" "$testobj/tile_grid_test.o" $appldflags -o "$out/input/blockie-tile-grid-test.tmp" || return 1
+    mv "$out/input/blockie-tile-grid-test.tmp" "$out/input/blockie-tile-grid-test"
+    echo "build.sh: $out/input/blockie-repeat-test $out/input/blockie-nav-test $out/input/blockie-home-test" \
+        "$out/input/blockie-tile-grid-test"
+    "$out/input/blockie-repeat-test" && "$out/input/blockie-nav-test" && "$out/input/blockie-home-test" &&
+        "$out/input/blockie-tile-grid-test"
 }
 
 build_motion_test() {
@@ -546,16 +556,36 @@ build_motion_test() {
     pool "$testobj/fold_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/fold_test.cpp"
     pool "$testobj/pagemove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/pagemove_test.cpp"
     pool "$testobj/ink_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/ink_test.cpp"
+    for s in motion glide slide home nav repeat pops; do
+        pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    for s in motion_test glide_test slide_test pops_test; do
+        pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/$s.cpp"
+    done
     drain
     ((fail)) && return 1
     mkdir -p "$out/motion"
-    "$cxx" "$testobj/fold.o" "$testobj/fold_test.o" $appldflags -lpthread -lm -o "$out/motion/blockie-fold-test" || return 1
+    "$cxx" "$testobj/fold.o" "$testobj/fold_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
+        -o "$out/motion/blockie-fold-test" || return 1
     "$cxx" "$testobj/pagemove.o" "$testobj/pagemove_test.o" "$genobj/core_curves.cpp.o" $appldflags -lpthread -lm \
         -o "$out/motion/blockie-pagemove-test" || return 1
     "$cxx" "$testobj/ink.o" "$testobj/theme.o" "$testobj/ink_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags \
         -lpthread -lm -o "$out/motion/blockie-ink-test" || return 1
+    "$cxx" "$testobj/motion.o" "$testobj/fold.o" "$testobj/slide.o" "$testobj/home.o" "$testobj/nav.o" \
+        "$testobj/glide.o" "$testobj/repeat.o" "$testobj/theme.o" "$testobj/motion_test.o" "$genobj/core_curves.cpp.o" \
+        "$genobj/gfx_canvas.cpp.o" \
+        $appldflags -lpthread -lm -o "$out/motion/blockie-motion-test" || return 1
+    "$cxx" "$testobj/glide.o" "$testobj/glide_test.o" "$genobj/core_curves.cpp.o" $appldflags -lm \
+        -o "$out/motion/blockie-glide-test" || return 1
+    "$cxx" "$testobj/slide.o" "$testobj/fold.o" "$testobj/motion.o" "$testobj/slide_test.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
+        -o "$out/motion/blockie-slide-test" || return 1
+    "$cxx" "$testobj/pops.o" "$testobj/pops_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
+        -o "$out/motion/blockie-pops-test" || return 1
     echo "build.sh: $out/motion"
-    "$out/motion/blockie-fold-test" && "$out/motion/blockie-pagemove-test" && "$out/motion/blockie-ink-test"
+    "$out/motion/blockie-fold-test" && "$out/motion/blockie-pagemove-test" && "$out/motion/blockie-ink-test" &&
+        "$out/motion/blockie-motion-test" && "$out/motion/blockie-glide-test" && "$out/motion/blockie-slide-test" &&
+        "$out/motion/blockie-pops-test"
 }
 
 build_bt_model_test() {
@@ -618,6 +648,51 @@ build_decodeq_test() {
     "$out/decodeq/blockie-decodeq-test"
 }
 
+build_vtext_test() {
+    deps
+    build_deps_obj
+    ((fail)) && return 1
+    deps_fonts
+    toolver=$("$cxx" --version | head -n 1)
+    local s extra
+    local -a gobjs=()
+    while IFS= read -r s; do
+        extra=$(cpp_extra "$s")
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
+        gobjs+=("$genobj/${s//\//_}.o")
+    done < <(generic_srcs)
+    for s in vtext theme t9 screen_selector; do
+        pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
+    pool "$testobj/vtext_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/vtext_test.cpp"
+    pool "$testobj/t9_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/t9_test.cpp"
+    pool "$testobj/selector_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/selector_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/vtext"
+    local -a dobjs=()
+    mapfile -t dobjs < <(dep_objs)
+    "$cxx" "${gobjs[@]}" "$testobj/vtext.o" "$testobj/theme.o" "$testobj/vtext_test.o" "${dobjs[@]}" $appldflags \
+        -lpthread -lm -o "$out/vtext/blockie-vtext-test.tmp" || return 1
+    mv "$out/vtext/blockie-vtext-test.tmp" "$out/vtext/blockie-vtext-test"
+    "$cxx" "${gobjs[@]}" "$testobj/t9.o" "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" \
+        "$testobj/theme.o" "$testobj/t9_test.o" "${dobjs[@]}" $appldflags -lpthread -lm \
+        -o "$out/vtext/blockie-t9-test.tmp" || return 1
+    mv "$out/vtext/blockie-t9-test.tmp" "$out/vtext/blockie-t9-test"
+    "$cxx" "${gobjs[@]}" "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
+        "$testobj/selector_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-selector-test.tmp" ||
+        return 1
+    mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
+    echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test"
+    local cjk
+    cjk=$(fc-list ':family=Noto Sans CJK JP:style=Light' file 2> /dev/null | head -n 1 | sed 's/: *$//' || true)
+    [[ -n $cjk && -f $cjk ]] || cjk=
+    echo "build.sh: vtext CJK fallback ${cjk:-none}"
+    "$out/vtext/blockie-vtext-test" "$fonts_dir" "$cjk" && "$out/vtext/blockie-t9-test" "$fonts_dir" &&
+        "$out/vtext/blockie-selector-test" "$fonts_dir"
+}
+
 build_shot() {
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -637,6 +712,9 @@ build_shot() {
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
+    for s in vtext nav home motion glide t9 slide pagemove repeat pops; do
+        pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
     drain
     ((fail)) && return 1
@@ -645,7 +723,9 @@ build_shot() {
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/theme.o" "$shotobj/ink.o" \
         "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
-        "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/shot.o" \
+        "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/vtext.o" "$shotobj/nav.o" "$shotobj/home.o" \
+        "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
+        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
@@ -682,7 +762,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }

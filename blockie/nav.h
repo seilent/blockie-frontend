@@ -3,6 +3,7 @@
 
 #include "input_pad.h"
 #include "screen_selector.h"
+#include "tile_grid.h"
 
 namespace fd {
 
@@ -23,12 +24,16 @@ public:
     virtual void push(Screen s) = 0;
     virtual void pop(Screen s) = 0;
     virtual bool page_action(Screen s, PadAction a, bool repeat) = 0;
+    virtual void pane_moved(Pane) {}
 };
 
 struct Nav {
     static constexpr int kCols = 2;
     static constexpr int kRows = 4;
 
+    int cols = kCols;
+    SlotMap recent_map = SlotMap::RowMajor;
+    bool partial_rows = false;
     Pane pane = Pane::Selector;
     int focus = 0;
     int menu_top = 0;
