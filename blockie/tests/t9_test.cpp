@@ -26,7 +26,7 @@ void check(bool ok, const char* what)
     }
 }
 
-std::string title(int i) { return "Synth " + std::to_string(i); }
+T9Text title(int i) { return {100 + i, "Synth " + std::to_string(i), "SYNTH"}; }
 
 bool rest(T9Pose p) { return p.shift == 0 && p.a256 == 256; }
 
@@ -42,7 +42,15 @@ int main(int argc, char** argv)
         t.set(title(0));
         check(!t.running(0) && rest(t.pose(0)) && t.shown(0) == title(0), "a set title rests");
         t.change(title(0), 10);
-        check(!t.running(10), "the same title starts no motion");
+        check(!t.running(10), "the same game starts no motion");
+        T9Text twin = title(0);
+        twin.id = 200;
+        twin.system = "SYNTH TWO";
+        t.change(twin, 10);
+        check(t.running(10) && t.shown(509) == title(0) && t.shown(510) == twin && t.end() == 910,
+              "another game with the same title runs T9 and carries its system line with the title");
+        t.land();
+        t.set(title(0));
         t.change(title(1), 100);
         T9Pose mid = t.pose(350);
         check(mid.shift == 75 && mid.a256 == 64 && t.shown(350) == title(0), "out: easeOut to +50u and o 0, old title");
@@ -56,7 +64,7 @@ int main(int argc, char** argv)
         T9 t;
         t.set(title(0));
         std::vector<int64_t> ticks = {0, 300, 380, 460, 540, 620, 700, 780, 860, 940};
-        std::vector<std::string> seen = {title(0)};
+        std::vector<T9Text> seen = {title(0)};
         size_t k = 0;
         T9Pose before{};
         T9Pose after{};
@@ -109,17 +117,17 @@ int main(int argc, char** argv)
             m.game_system = "SYNTH";
             m.t9_edge = edge;
             T9 t;
-            t.set(longer);
-            t.change(jtitle, 0);
+            t.set({1, longer, "SYNTH"});
+            t.change({2, jtitle, "SYNTH"}, 0);
             bool inside = true, masked = true, inked = false;
             for (int64_t ms = 0; ms <= 900; ms += 4) {
                 T9Pose p = t.pose(ms);
-                m.game_title = t.shown(ms);
+                m.game_title = t.shown(ms).title;
                 m.title_shift = p.shift;
                 m.title_a256 = p.a256;
                 Canvas c(s);
                 c.fill(s.rect(), sentinel);
-                draw_turned(c, fonts, m, true, theme_dark());
+                draw_turned(c, fonts, m, theme_dark());
                 for (int y = 0; y < s.h; y++)
                     for (int x = 0; x < s.w; x++) {
                         bool ground = LiveF::unpack(s.at(x, y)) == sentinel;
@@ -142,13 +150,13 @@ int main(int argc, char** argv)
         m.game_title = "Synth Old Title";
         {
             Canvas c(s);
-            draw_turned(c, fonts, m, true, theme_dark());
+            draw_turned(c, fonts, m, theme_dark());
         }
         size_t r0 = turned_rasters();
         T9 t;
-        t.set(m.game_title);
+        t.set({1, m.game_title, m.game_system});
         const std::string fresh = "Synth New Title Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India";
-        t.change(fresh, 0);
+        t.change({2, fresh, m.game_system}, 0);
         SelectorModel w = m;
         w.game_title = fresh;
         warm_turned(fonts, w);
@@ -158,11 +166,11 @@ int main(int argc, char** argv)
         size_t lines = wrap_lines(fresh, 648 * 64, 3, measure).size();
         for (int64_t ms = 0; ms <= 900; ms += 16) {
             T9Pose p = t.pose(ms);
-            m.game_title = t.shown(ms);
+            m.game_title = t.shown(ms).title;
             m.title_shift = p.shift;
             m.title_a256 = p.a256;
             Canvas c(s);
-            draw_turned(c, fonts, m, true, theme_dark());
+            draw_turned(c, fonts, m, theme_dark());
         }
         size_t r2 = turned_rasters();
         check(lines >= 2 && r1 - r0 == lines && r2 == r1,

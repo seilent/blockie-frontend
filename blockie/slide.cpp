@@ -25,7 +25,7 @@ int text_from() { return std_px(tok::motion_trackShiftIn); }
 
 int mix(int a, int b, double f) { return a + (int)std::lround((b - a) * f); }
 
-int64_t right_ms(const SlidePlan& p) { return p.mode == SlideMode::System ? kSlideMs + text_ms() : kSlideMs; }
+int64_t right_ms() { return kSlideMs + text_ms(); }
 
 bool settled(int64_t t, int64_t prev, int64_t end) { return prev >= end && t >= end; }
 
@@ -48,10 +48,9 @@ double slide_ease(double x)
     return cbez(kY1, kY2, (lo + hi) / 2);
 }
 
-SlidePlan slide_plan(SlideMode mode, int target, LeftMove left, int ring_frames, Rect header)
+SlidePlan slide_plan(int target, LeftMove left, int ring_frames, Rect header)
 {
     SlidePlan p;
-    p.mode = mode;
     p.target = target;
     p.left = left;
     if (left == LeftMove::Cells)
@@ -68,17 +67,15 @@ int64_t slide_left_ms(const SlidePlan& p)
     return std::max<int64_t>(kSlideMs, left_span(p.cells));
 }
 
-int64_t slide_duration(const SlidePlan& p) { return std::max(right_ms(p), slide_left_ms(p)); }
+int64_t slide_duration(const SlidePlan& p) { return std::max(right_ms(), slide_left_ms(p)); }
 
 SlidePose slide_pose(const SlidePlan& p, int64_t t)
 {
     SlidePose s;
     double e = slide_ease((double)std::clamp<int64_t>(t, 0, kSlideMs) / kSlideMs);
     s.boundary = mix(kPaneSplit, p.target, e);
-    s.pane_a256 = p.mode == SlideMode::System ? mix(256, 0, e) : 256;
+    s.pane_a256 = mix(256, 0, e);
     s.left_a256 = mix(0, 256, e);
-    if (p.mode != SlideMode::System)
-        return s;
     s.text_shift = text_from();
     if (t < kSlideMs)
         return s;
@@ -102,7 +99,7 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
     SlidePose s = slide_pose(p, t);
     bool skip_left = settled(t, prev, slide_left_ms(p));
     bool skip_mid = settled(t, prev, kSlideMs);
-    bool skip_pane = settled(t, prev, right_ms(p));
+    bool skip_pane = settled(t, prev, right_ms());
     if (!skip_left) {
         if (p.left == LeftMove::Cells)
             left_compose(a, b, dst, p.cells, t, s.left_a256);
@@ -112,13 +109,12 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
     int bx = std::clamp(s.boundary, kPaneSplit, w);
     int shift = bx - kPaneSplit;
     int edge = std::min(w, bx + kTileFocusBorder);
-    bool recent = p.mode == SlideMode::Recent;
     uint32_t g = LiveF::pack(bg);
     int x_lo = skip_mid ? kPaneSplitWide : kPaneLeftEdge;
     int x_hi = skip_pane ? std::min(w, kPaneSplitWide) : w;
-    int to_end = std::min(recent ? edge : bx, x_hi);
+    int to_end = std::min(bx, x_hi);
     int g0 = std::max(x_lo, to_end), g1 = std::min(std::max(edge, x_lo), x_hi);
-    int r0 = std::max({x_lo, edge, to_end});
+    int r0 = std::max(x_lo, edge);
     for (int y = 0; y < h && x_lo < x_hi; y++) {
         const uint32_t* bs = b.row(y);
         const uint32_t* as = a.row(y);
@@ -129,10 +125,6 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
             d[x] = g;
         if (r0 >= x_hi)
             continue;
-        if (recent) {
-            copy_px(d + r0, as + r0 - shift, x_hi - r0);
-            continue;
-        }
         for (int x = r0; x < x_hi; x++) {
             uint32_t v = as[x - shift];
             d[x] = s.pane_a256 <= 0 || v == g ? g : s.pane_a256 >= 256 ? v : blend_px(g, v, s.pane_a256);

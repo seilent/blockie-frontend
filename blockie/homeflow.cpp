@@ -18,7 +18,7 @@ void HomeFlow::setup()
     nav.menu_top = std::max(0, nav.focus - (kMenuVisibleRows - 1));
     home.cols = nav.cols;
     home.rows = o_.big ? kBigRows : Nav::kRows;
-    home.pad_rows = o_.grid_band ? 1 : 0;
+    home.pad_rows = o_.grid_band ? 2 : 0;
     home.recent_cap = kGridColsWide * Nav::kRows;
     ctl.render = [this](const Surface& s, Rect bound) { draw(s, model, nav, false, fold_focus(nav), bound); };
     ctl.render_kept = [this](const Surface& s) {
@@ -107,6 +107,11 @@ bool HomeFlow::art(int64_t id, int64_t epoch, const Art& img)
 std::vector<HomeGame> HomeFlow::game_ran(const std::vector<HomeGame>& list)
 {
     std::vector<HomeGame> want = home.game_ran(model, list, nav);
+    if (!nav.system_view && nav.pane == Pane::Details) {
+        show_recent(nav.tile_focus);
+        t9_.set(shown_text(home.recent, nav.tile_focus));
+        warm_turned(fonts_, model);
+    }
     ctl.dirty();
     redraw_ = true;
     return want;
@@ -134,7 +139,7 @@ int HomeFlow::boundary(int64_t t) const
         return slide_pose(*plan_, ctl.forward_time(t)).boundary;
     if (nav.pane != Pane::Details || nav.top() != Screen::Home)
         return kPaneSplit;
-    return nav.system_view ? kPaneSplitWide : recent_edge();
+    return kPaneSplitWide;
 }
 
 bool HomeFlow::take_step_in()
@@ -173,15 +178,17 @@ SelectorModel HomeFlow::posed(const SelectorModel& base, const Nav& n, bool at_t
         m.tile_focus = n.sys_focus - home.first;
         int gy = at_target ? grid_.target() : grid_.at(t);
         m.grid_y_px = home.first / std::max(1, home.cols) * kGridRowPitch - gy;
-        if (!at_target) {
-            m.game_title = t9_.shown(t);
-            T9Pose tp = t9_.pose(t);
-            m.title_shift = tp.shift;
-            m.title_a256 = tp.a256;
-        }
     } else {
         m.tile_focus = focus == Pane::Details ? n.tile_focus : -1;
         m.grid_y_px = 0;
+    }
+    if (n.pane == Pane::Details && !at_target) {
+        const T9Text& shown = t9_.shown(t);
+        m.game_title = shown.title;
+        m.game_system = shown.system;
+        T9Pose tp = t9_.pose(t);
+        m.title_shift = tp.shift;
+        m.title_a256 = tp.a256;
     }
     if (ctl.folding(t) && ctl.kind() == FoldKind::Startup) {
         m.poses.resize(m.systems.size());
@@ -218,32 +225,38 @@ void HomeFlow::draw(const Surface& dst, const SelectorModel& base, const Nav& n,
     draw_selector(c, fonts_, m, focus, false, n.system_view, theme(), expanded);
 }
 
-int HomeFlow::recent_edge() const
+T9Text HomeFlow::shown_text(const std::vector<HomeGame>& list, int k) const
 {
-    return o_.big ? big_tile_rect(kBigCols - 1).x1 : grid_tile_rect(kGridColsWide - 1, kGridColsWide).x1;
+    if (k < 0 || k >= (int)list.size())
+        return {};
+    const HomeGame& g = list[k];
+    return {g.id, g.name, home.system_view ? home.sys_name : g.system};
 }
 
-FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, SlideMode mode)
+void HomeFlow::show_recent(int k)
 {
-    int target = mode == SlideMode::System ? kPaneSplitWide : recent_edge();
+    bool in = k >= 0 && k < (int)home.recent.size();
+    model.game_title = in ? home.recent[k].name : std::string();
+    model.game_system = in ? home.recent[k].system : std::string();
+}
+
+FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details)
+{
     Rect head = header_rect(fonts_, collapsed);
-    auto plan = std::make_shared<SlidePlan>(slide_plan(mode, target, o_.left, o_.unit, head));
+    auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, o_.left, o_.unit, head));
     plan_ = plan;
     FoldPlay p;
-    p.details = mode == SlideMode::Recent;
+    p.details = details;
     p.to_bound = Rect{0, 0, kPaneSplitWide, kPortraitH};
     p.duration = slide_duration(*plan);
-    SlideText text;
-    if (mode == SlideMode::System) {
-        auto tm = std::make_shared<const SelectorModel>(em);
-        Fonts* f = &fonts_;
-        text = [tm, f](Canvas& c, int shift, int a) {
-            SelectorModel m = *tm;
-            m.turn_shift = shift;
-            m.turn_a256 = a;
-            draw_turned(c, *f, m, true, theme());
-        };
-    }
+    auto tm = std::make_shared<const SelectorModel>(em);
+    Fonts* f = &fonts_;
+    SlideText text = [tm, f](Canvas& c, int shift, int a) {
+        SelectorModel m = *tm;
+        m.turn_shift = shift;
+        m.turn_a256 = a;
+        draw_turned(c, *f, m, theme());
+    };
     p.prepare = [plan](const Surface& a, const Surface& b) {
         slide_prepare(*plan, a, b);
         return slide_duration(*plan);
@@ -274,17 +287,17 @@ void HomeFlow::start_wanted()
     want_ = Want::None;
     switch (w) {
     case Want::Enter:
-        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, SlideMode::System), now_);
+        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, false), now_);
         break;
     case Want::Exit:
-        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, SlideMode::System), now_);
+        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, false), now_);
         break;
     case Want::RecentIn:
-        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, SlideMode::Recent), now_);
+        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, true), now_);
         step_in_ = ctl.details() && ctl.kind() == FoldKind::Expand && !ctl.reversed();
         break;
     case Want::RecentOut:
-        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, SlideMode::Recent), now_);
+        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, true), now_);
         break;
     case Want::Push:
         ctl.start(FoldKind::Push, page_play(), now_);
@@ -339,7 +352,7 @@ int HomeFlow::enter_system(int sys)
     std::vector<HomeGame> want = home.enter(model, model.systems[sys].name, list);
     if (covers_wanted)
         covers_wanted(want, 0);
-    t9_.set(model.game_title);
+    t9_.set(shown_text(home.sysgames, 0));
     if (rearm)
         rearm(now_);
     want_ = Want::Enter;
@@ -349,7 +362,7 @@ int HomeFlow::enter_system(int sys)
 void HomeFlow::exit_system()
 {
     home.leave(model);
-    t9_.set(std::string());
+    t9_.set(T9Text{});
     if (system_left)
         system_left();
     if (rearm)
@@ -362,7 +375,7 @@ void HomeFlow::system_moved(bool scrolled)
     std::vector<HomeGame> want = home.window(model, nav.sys_scroll, nav.sys_focus, scrolled);
     if (scrolled && covers_wanted)
         covers_wanted(want, nav.sys_scroll);
-    t9_.change(model.game_title, now_);
+    t9_.change(shown_text(home.sysgames, nav.sys_focus), now_);
     warm_turned(fonts_, model);
 }
 
@@ -403,9 +416,19 @@ bool HomeFlow::page_action(Screen s, PadAction a, bool repeat)
 
 void HomeFlow::pane_moved(Pane p)
 {
+    bool in = p == Pane::Details;
+    show_recent(in ? nav.tile_focus : -1);
+    t9_.set(in ? shown_text(home.recent, nav.tile_focus) : T9Text{});
     if (rearm)
         rearm(now_);
-    want_ = p == Pane::Details ? Want::RecentIn : Want::RecentOut;
+    want_ = in ? Want::RecentIn : Want::RecentOut;
+}
+
+void HomeFlow::recent_moved()
+{
+    show_recent(nav.tile_focus);
+    t9_.change(shown_text(home.recent, nav.tile_focus), now_);
+    warm_turned(fonts_, model);
 }
 
 }

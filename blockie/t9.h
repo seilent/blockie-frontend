@@ -9,13 +9,22 @@ struct T9Pose {
     int a256 = 256;
 };
 
+struct T9Text {
+    int64_t id = 0;
+    std::string title;
+    std::string system;
+
+    bool operator==(const T9Text& o) const { return id == o.id && title == o.title && system == o.system; }
+    bool operator!=(const T9Text& o) const { return !(*this == o); }
+};
+
 class T9 {
 public:
-    void set(const std::string& s);
-    void change(const std::string& s, int64_t now);
+    void set(const T9Text& s);
+    void change(const T9Text& s, int64_t now);
     void land();
     T9Pose pose(int64_t now) const;
-    const std::string& shown(int64_t now) const;
+    const T9Text& shown(int64_t now) const;
     bool running(int64_t now) const { return now < end(); }
     int64_t end() const;
 
@@ -29,8 +38,8 @@ private:
 
     void advance(int64_t now);
 
-    std::string shown_;
-    std::string pending_;
+    T9Text shown_;
+    T9Text pending_;
     Phase phase_ = Phase::Idle;
     int64_t t0_ = 0;
     T9Pose from_;

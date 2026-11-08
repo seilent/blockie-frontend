@@ -61,6 +61,7 @@ public:
     void at(int64_t now) { now_ = now; }
     int64_t now() const { return now_; }
     bool launched() const { return launched_; }
+    const T9& t9() const { return t9_; }
 
     Nav kept_focus() const;
     const SelectorModel& kept() const { return kept_; }
@@ -85,6 +86,7 @@ public:
     void pop(Screen s) override;
     bool page_action(Screen s, PadAction a, bool repeat) override;
     void pane_moved(Pane p) override;
+    void recent_moved() override;
 
 private:
     enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop };
@@ -92,8 +94,9 @@ private:
     Pane fold_focus(const Nav& n) const { return ctl.details() ? Pane::Details : n.pane; }
     SelectorModel posed(const SelectorModel& base, const Nav& n, bool at_target, Pane focus) const;
     SelectorModel turned(const SelectorModel& base, const Nav& n) const;
-    int recent_edge() const;
-    FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, SlideMode mode);
+    T9Text shown_text(const std::vector<HomeGame>& list, int k) const;
+    void show_recent(int k);
+    FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details);
     FoldPlay page_play();
     void start_wanted();
     void launch(const HomeGame& g);

@@ -7,11 +7,9 @@
 
 namespace fd {
 
-enum class SlideMode { System, Recent };
 enum class LeftMove { Fade, Cells };
 
 struct SlidePlan {
-    SlideMode mode = SlideMode::System;
     int target = 0;
     LeftMove left = LeftMove::Cells;
     LeftFold cells;
@@ -28,7 +26,7 @@ struct SlidePose {
 using SlideText = std::function<void(Canvas&, int shift, int a256)>;
 
 double slide_ease(double x);
-SlidePlan slide_plan(SlideMode mode, int target, LeftMove left, int ring_frames, Rect header);
+SlidePlan slide_plan(int target, LeftMove left, int ring_frames, Rect header);
 int64_t slide_ms();
 int64_t slide_left_ms(const SlidePlan& p);
 int64_t slide_duration(const SlidePlan& p);

@@ -1,8 +1,10 @@
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "../glide.h"
 #include "../home.h"
 
 using namespace fd;
@@ -157,6 +159,77 @@ int main()
               "a recent launch puts the game first and the focus on it");
         list = played_first(h.recent, games[30], 3);
         check(list.size() == 3 && list[0].id == 130, "played_first caps the list");
+    }
+
+    {
+        HomeState h;
+        h.cols = 3;
+        h.rows = 4;
+        h.pad_rows = 2;
+        h.load = [](const HomeGame& g) -> Art { return solid((uint32_t)g.id); };
+        SelectorModel m;
+        std::vector<HomeGame> games = synth(100, 40, "Synth");
+        h.enter(m, "Synth", games);
+        h.window(m, 5, 15, true);
+        std::unordered_set<int64_t> keep = h.keep_set(5);
+        check(h.first == 9 && m.tiles.size() == 24 && px(m.tiles[0]) == 109 && px(m.tiles[23]) == 132 &&
+                  keep.size() == 24 && keep.count(109) && keep.count(132) && !keep.count(108) && !keep.count(133),
+              "with two pad rows the tiles and the keep set hold rows scroll - 2 to scroll + 5, 24 tiles");
+
+        const int total = (int)games.size();
+        const int cols = h.cols;
+        const int band_top = kTileFirstTop - kTileFocusBorder;
+        const int band_bottom = kTileFirstTop + (kGridRows - 1) * kGridRowPitch + kTileSide + kTileFocusBorder;
+        int focus = 0, scroll = 0, checked = 0, missed = -1;
+        h.window(m, 0, 0, true);
+        Glide grid;
+        grid.set(0);
+        auto hold = [&](int dir, int64_t t0, int64_t t1) {
+            int64_t next = t0, gap = 300;
+            for (int64_t t = t0; t <= t1 + 200; t++) {
+                if (t <= t1 && t == next) {
+                    int to = focus + dir * cols;
+                    if (dir > 0 && to >= total && (focus / cols + 1) * cols < total)
+                        to = total - 1;
+                    if (to >= 0 && to < total) {
+                        focus = to;
+                        int s = scroll;
+                        if (focus < s * cols)
+                            s--;
+                        if (focus >= (s + h.rows) * cols)
+                            s++;
+                        if (s != scroll) {
+                            scroll = s;
+                            h.window(m, scroll, focus, true);
+                            grid.to(scroll * kGridRowPitch, t, fx_round(tok::motion_scroll), Curve::EaseIn);
+                        }
+                    }
+                    next += gap;
+                    gap = 80;
+                }
+                int gy = grid.at(t);
+                std::unordered_set<int64_t> kept = h.keep_set(scroll);
+                int lo = h.first / cols, hi = lo + ((int)m.tiles.size() + cols - 1) / cols;
+                for (int r = 0; r * cols < total; r++) {
+                    int y0 = kTileFirstTop + r * kGridRowPitch - gy;
+                    if (y0 + kTileSide <= band_top || y0 >= band_bottom)
+                        continue;
+                    checked++;
+                    bool in = r >= lo && r < hi;
+                    for (int k = r * cols; k < std::min(total, (r + 1) * cols); k++)
+                        in = in && kept.count(games[k].id);
+                    if (!in && missed < 0)
+                        missed = (int)t;
+                }
+            }
+        };
+        hold(1, 0, 3000);
+        bool bottom = focus == total - 1 && scroll == (total - 1) / cols - h.rows + 1;
+        hold(-1, 4000, 7000);
+        if (missed >= 0)
+            std::printf("  first row outside the held tiles at %d ms\n", missed);
+        check(missed < 0 && checked > 0 && bottom && focus == 0 && scroll == 0,
+              "Down then Up held over 40 games: every row in the band at the glide offset is held");
     }
 
     {

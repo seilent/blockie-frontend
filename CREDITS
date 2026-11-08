@@ -24,6 +24,8 @@ Input and navigation follow MicroDAP at cb78c74:
 - player/qml/MicroDap/screens/Home.qml: home menu keys, back opening the recent grid, no pane change on a repeat.
 - player/qml/MicroDap/screens/Quickplay.qml: moveVertical, a move onto a partial last row lands on its last tile.
 - player/qml/MicroDap/screens/Quickplay.qml: the grid row scroll, 100 ms easeIn that retargets on every row step.
+- player/qml/MicroDap/screens/JumpGrid.qml: stepLinear, left and right in reading order across rows, stopping at the
+  first and the last tile.
 
 Page and menu motion reuse:
 
@@ -34,6 +36,8 @@ Page and menu motion reuse:
   once into a coverage plane and drawn with Canvas::coverage.
 - MicroDAP cb78c74, player/qml/MicroDap/screens/NowPlaying.qml trackChanged and trackAnim: the title change motion
   and its coalescing.
+- MicroDAP cb78c74, player/qml/MicroDap/screens/NowPlaying.qml applyShown: the artist line outside the title motion,
+  swapped with the title when the new one enters.
 - funeOS c319d2ef2, docs/DESIGN.md input during motion: a back reverses a running push or expand from where it is,
   every leg running back over the time it has run.
 

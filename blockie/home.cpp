@@ -77,8 +77,9 @@ void HomeState::leave(SelectorModel& m)
 std::unordered_set<int64_t> HomeState::keep_set(int scroll) const
 {
     int n = (int)sysgames.size();
-    int lo = std::max(0, (scroll - 1) * cols);
-    int hi = std::min(n, (scroll + rows + 1) * cols);
+    int pad = std::max(1, pad_rows);
+    int lo = std::max(0, (scroll - pad) * cols);
+    int hi = std::min(n, (scroll + rows + pad) * cols);
     std::unordered_set<int64_t> keep;
     for (int i = lo; i < hi; i++)
         keep.insert(sysgames[i].id);

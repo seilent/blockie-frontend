@@ -83,47 +83,33 @@ int row_down(const Nav& n, int focus, int total)
     return -1;
 }
 
+bool system_to(Nav& n, NavHost& h, int to)
+{
+    if (to < 0 || to >= n.sys_total)
+        return false;
+    n.sys_focus = to;
+    bool up = n.sys_focus < n.sys_scroll * n.cols;
+    bool down = n.sys_focus >= (n.sys_scroll + Nav::kRows) * n.cols;
+    if (up)
+        n.sys_scroll--;
+    if (down)
+        n.sys_scroll++;
+    h.system_moved(up || down);
+    return true;
+}
+
 bool apply_system(Nav& n, NavHost& h, PadAction a, bool repeat)
 {
     int total = n.sys_total;
-    int cols = n.cols;
     switch (a) {
-    case PadAction::Up: {
-        if (n.sys_focus - cols < 0)
-            return false;
-        n.sys_focus -= cols;
-        bool scrolled = n.sys_focus < n.sys_scroll * cols;
-        if (scrolled)
-            n.sys_scroll--;
-        h.system_moved(scrolled);
-        return true;
-    }
-    case PadAction::Down: {
-        int to = row_down(n, n.sys_focus, total);
-        if (to < 0)
-            return false;
-        n.sys_focus = to;
-        bool scrolled = n.sys_focus >= (n.sys_scroll + Nav::kRows) * cols;
-        if (scrolled)
-            n.sys_scroll++;
-        h.system_moved(scrolled);
-        return true;
-    }
+    case PadAction::Up:
+        return system_to(n, h, n.sys_focus - n.cols);
+    case PadAction::Down:
+        return system_to(n, h, row_down(n, n.sys_focus, total));
     case PadAction::Right:
-        if (n.sys_focus % cols >= cols - 1 || n.sys_focus + 1 >= total)
-            return false;
-        n.sys_focus++;
-        h.system_moved(false);
-        return true;
+        return system_to(n, h, n.sys_focus + 1);
     case PadAction::Left:
-        if (n.sys_focus % cols > 0) {
-            n.sys_focus--;
-            h.system_moved(false);
-            return true;
-        }
-        if (repeat)
-            return false;
-        return leave_system(n, h);
+        return system_to(n, h, n.sys_focus - 1);
     case PadAction::Back:
         if (repeat)
             return false;
@@ -138,18 +124,23 @@ bool apply_system(Nav& n, NavHost& h, PadAction a, bool repeat)
     }
 }
 
-bool slot_move(Nav& n, int tiles, int dcol, int drow)
+int slot_target(const Nav& n, int tiles, int dcol, int drow)
 {
     int s = slot_of(n.tile_focus, n.cols, n.recent_map);
     if (s < 0)
-        return false;
+        return -1;
     int col = s % n.cols + dcol, row = s / n.cols + drow;
     if (col < 0 || col >= n.cols || row < 0)
+        return -1;
+    return game_at(row * n.cols + col, n.cols, n.recent_map, tiles);
+}
+
+bool recent_to(Nav& n, NavHost& h, int to, int tiles)
+{
+    if (to < 0 || to >= tiles)
         return false;
-    int g = game_at(row * n.cols + col, n.cols, n.recent_map, tiles);
-    if (g < 0)
-        return false;
-    n.tile_focus = g;
+    n.tile_focus = to;
+    h.recent_moved();
     return true;
 }
 
@@ -163,42 +154,16 @@ bool leave_recent(Nav& n, NavHost& h)
 bool apply_recent(Nav& n, NavHost& h, PadAction a, bool repeat)
 {
     int tiles = h.recent_count();
-    int cols = n.cols;
     bool slots = n.recent_map != SlotMap::RowMajor;
     switch (a) {
     case PadAction::Up:
-        if (slots)
-            return slot_move(n, tiles, 0, -1);
-        if (n.tile_focus - cols < 0)
-            return false;
-        n.tile_focus -= cols;
-        return true;
-    case PadAction::Down: {
-        if (slots)
-            return slot_move(n, tiles, 0, 1);
-        int to = row_down(n, n.tile_focus, tiles);
-        if (to < 0)
-            return false;
-        n.tile_focus = to;
-        return true;
-    }
+        return recent_to(n, h, slots ? slot_target(n, tiles, 0, -1) : n.tile_focus - n.cols, tiles);
+    case PadAction::Down:
+        return recent_to(n, h, slots ? slot_target(n, tiles, 0, 1) : row_down(n, n.tile_focus, tiles), tiles);
     case PadAction::Right:
-        if (slots)
-            return slot_move(n, tiles, 1, 0);
-        if (n.tile_focus % cols >= cols - 1 || n.tile_focus + 1 >= tiles)
-            return false;
-        n.tile_focus++;
-        return true;
+        return recent_to(n, h, slots ? slot_target(n, tiles, 1, 0) : n.tile_focus + 1, tiles);
     case PadAction::Left:
-        if (slots ? slot_of(n.tile_focus, cols, n.recent_map) % cols > 0 : n.tile_focus % cols > 0) {
-            if (slots)
-                return slot_move(n, tiles, -1, 0);
-            n.tile_focus--;
-            return true;
-        }
-        if (repeat)
-            return false;
-        return leave_recent(n, h);
+        return recent_to(n, h, slots ? slot_target(n, tiles, -1, 0) : n.tile_focus - 1, tiles);
     case PadAction::Back:
         if (repeat)
             return false;

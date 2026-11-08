@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 
@@ -38,6 +39,8 @@ public:
     bool pop_on_back = true;
     int pane_moves = 0;
     Pane last_pane = Pane::Selector;
+    int recent_moves = 0;
+    bool last_scrolled = false;
 
     int menu_count() const override { return n_systems + (pages ? 2 : 0); }
     MenuKind menu_kind(int i) const override
@@ -54,6 +57,7 @@ public:
     void system_moved(bool scrolled) override
     {
         moves++;
+        last_scrolled = scrolled;
         if (scrolled)
             scrolls++;
     }
@@ -70,6 +74,7 @@ public:
         pane_moves++;
         last_pane = p;
     }
+    void recent_moved() override { recent_moves++; }
 };
 
 Nav grid_nav(int cols, bool partial)
@@ -80,7 +85,7 @@ Nav grid_nav(int cols, bool partial)
     return n;
 }
 
-int system_move(int total, int cols, bool partial, int start, PadAction a)
+int system_move(int total, int cols, bool partial, int start, PadAction a, bool rep = false)
 {
     FakeHost h;
     h.games = total;
@@ -88,10 +93,11 @@ int system_move(int total, int cols, bool partial, int start, PadAction a)
     nav_apply(n, h, PadAction::Accept, false);
     n.sys_focus = start;
     n.sys_scroll = start / cols >= Nav::kRows ? start / cols - Nav::kRows + 1 : 0;
-    return nav_apply(n, h, a, false) ? n.sys_focus : -1;
+    bool moved = nav_apply(n, h, a, rep);
+    return moved && n.system_view && h.exits == 0 ? n.sys_focus : -1;
 }
 
-int recent_move(int total, SlotMap map, int start, PadAction a)
+int recent_move(int total, SlotMap map, int start, PadAction a, bool rep = true)
 {
     FakeHost h;
     h.n_recent = total;
@@ -99,7 +105,7 @@ int recent_move(int total, SlotMap map, int start, PadAction a)
     n.recent_map = map;
     nav_apply(n, h, PadAction::Left, false);
     n.tile_focus = start;
-    return nav_apply(n, h, a, true) && n.pane == Pane::Details ? n.tile_focus : -1;
+    return nav_apply(n, h, a, rep) && n.pane == Pane::Details && h.pane_moves == 1 ? n.tile_focus : -1;
 }
 
 struct Move {
@@ -126,6 +132,23 @@ const Move kDown2[] = {{1, 0, kD, -1}, {3, 0, kD, 2},  {3, 1, kD, 2},  {4, 1, kD
                        {7, 5, kD, 6},  {9, 7, kD, 8},  {11, 9, kD, 10}, {12, 9, kD, 11}, {12, 10, kD, -1}};
 
 const Move kDown2Strict[] = {{3, 0, kD, 2}, {3, 1, kD, -1}, {5, 3, kD, -1}, {7, 5, kD, -1}, {12, 9, kD, 11}};
+
+const Move kSide3[] = {{1, 0, kR, -1},   {1, 0, kL, -1},   {2, 0, kR, 1},    {2, 1, kR, -1},   {2, 1, kL, 0},
+                       {3, 1, kR, 2},    {3, 2, kR, -1},   {4, 2, kR, 3},    {4, 3, kR, -1},   {4, 3, kL, 2},
+                       {5, 2, kR, 3},    {5, 4, kR, -1},   {5, 3, kL, 2},    {6, 5, kR, -1},   {7, 5, kR, 6},
+                       {7, 6, kR, -1},   {7, 6, kL, 5},    {8, 7, kR, -1},   {9, 8, kR, -1},   {9, 6, kL, 5},
+                       {10, 8, kR, 9},   {10, 9, kR, -1},  {10, 9, kL, 8},   {11, 10, kR, -1}, {12, 8, kR, 9},
+                       {12, 11, kR, -1}, {12, 9, kL, 8},   {12, 0, kL, -1},  {13, 11, kR, 12}, {13, 12, kR, -1},
+                       {13, 12, kL, 11}, {40, 11, kR, 12}, {40, 35, kR, 36}, {40, 38, kR, 39}, {40, 39, kR, -1},
+                       {40, 36, kL, 35}, {40, 39, kL, 38}, {40, 12, kL, 11}, {40, 0, kL, -1}};
+
+const Move kSide2[] = {{1, 0, kR, -1},  {1, 0, kL, -1},   {2, 1, kR, -1},   {2, 1, kL, 0},    {3, 1, kR, 2},
+                       {3, 2, kR, -1},  {3, 2, kL, 1},    {5, 3, kR, 4},    {5, 4, kL, 3},    {7, 5, kR, 6},
+                       {9, 7, kR, 8},   {9, 8, kL, 7},    {12, 9, kR, 10},  {12, 11, kR, -1}, {13, 11, kR, 12},
+                       {13, 12, kR, -1}, {13, 12, kL, 11}, {40, 7, kR, 8},  {40, 8, kL, 7},   {40, 39, kR, -1},
+                       {40, 0, kL, -1},  {4, 1, kR, 2},    {4, 2, kL, 1},    {6, 3, kR, 4},    {6, 4, kL, 3},
+                       {8, 5, kR, 6},    {8, 6, kL, 5},    {10, 7, kR, 8},   {10, 8, kL, 7},   {11, 9, kR, 10},
+                       {11, 10, kL, 9}};
 
 const Move kRecentC[] = {{1, 0, kR, -1}, {1, 0, kD, -1},  {1, 0, kU, -1},  {3, 0, kR, 1},   {3, 1, kR, -1},
                          {3, 0, kD, 2},  {3, 1, kD, -1},  {3, 2, kU, 0},   {3, 2, kR, -1},  {8, 1, kR, -1},
@@ -171,8 +194,10 @@ int main()
         for (int i = 0; i < 10; i++)
             nav_apply(n, h, PadAction::Left, true);
         check(n.pane == Pane::Details, "a held left stays in the recent grid");
-        nav_apply(n, h, PadAction::Left, false);
-        check(n.pane == Pane::Selector, "a fresh left at column 0 returns to the menu");
+        check(!nav_apply(n, h, PadAction::Left, false) && n.pane == Pane::Details,
+              "a fresh left at game 0 stays in the recent grid");
+        nav_apply(n, h, PadAction::Back, false);
+        check(n.pane == Pane::Selector, "back from game 0 returns to the menu");
         for (int i = 0; i < 10; i++)
             nav_apply(n, h, PadAction::Left, true);
         check(n.pane == Pane::Selector, "a held left on the menu does not bounce to the grid");
@@ -201,8 +226,10 @@ int main()
         check(n.sys_focus == 8 && n.sys_scroll == 1 && h.scrolls == 1, "held down scrolls the system grid");
         nav_apply(n, h, PadAction::Accept, false);
         check(h.launched_game == 8, "accept launches the focused system game");
-        nav_apply(n, h, PadAction::Left, false);
-        check(!n.system_view && n.pane == Pane::Selector && h.exits == 1, "a fresh left at column 0 leaves the system");
+        check(nav_apply(n, h, PadAction::Left, false) && n.sys_focus == 7 && n.system_view && h.exits == 0,
+              "a fresh left at column 0 goes to the last tile of the row above and stays in the system");
+        nav_apply(n, h, PadAction::Back, false);
+        check(!n.system_view && n.pane == Pane::Selector && h.exits == 1, "back leaves the system");
     }
     {
         FakeHost h;
@@ -262,8 +289,10 @@ int main()
         for (int i = 0; i < 10; i++)
             nav_apply(n, h, PadAction::Left, true);
         check(h.pane_moves == 1 && n.pane == Pane::Details, "a held left never reports a pane move");
-        nav_apply(n, h, PadAction::Left, false);
-        check(h.pane_moves == 2 && h.last_pane == Pane::Selector, "pane_moved once when left at column 0 returns");
+        check(!nav_apply(n, h, PadAction::Left, false) && h.pane_moves == 1 && n.pane == Pane::Details,
+              "a fresh left at game 0 reports no pane move");
+        nav_apply(n, h, PadAction::Back, false);
+        check(h.pane_moves == 2 && h.last_pane == Pane::Selector, "pane_moved once when back returns");
         for (int i = 0; i < 10; i++)
             nav_apply(n, h, PadAction::Back, true);
         check(h.pane_moves == 2 && n.pane == Pane::Selector, "a held back on the menu never reports a pane move");
@@ -298,14 +327,18 @@ int main()
         nav_apply(n, h, PadAction::Up, false);
         check(n.sys_focus == 9, "up from the 13th goes to column 0 of row 3");
         n.sys_focus = 2;
-        check(!nav_apply(n, h, PadAction::Right, true) && n.sys_focus == 2, "3 columns: right stops at the last column");
+        n.sys_scroll = 0;
+        check(nav_apply(n, h, PadAction::Right, true) && n.sys_focus == 3,
+              "3 columns: right at the last column goes on to the first tile of the next row");
         n.sys_focus = 1;
         nav_apply(n, h, PadAction::Right, true);
         check(n.sys_focus == 2, "3 columns: right moves inside the row");
         n.sys_focus = 3;
-        check(!nav_apply(n, h, PadAction::Left, true) && n.system_view, "3 columns: a held left at column 0 stays");
-        nav_apply(n, h, PadAction::Left, false);
-        check(!n.system_view && h.exits == 1, "3 columns: a fresh left at column 0 leaves the system");
+        check(nav_apply(n, h, PadAction::Left, true) && n.sys_focus == 2 && n.system_view,
+              "3 columns: a held left at column 0 goes to the last tile of the row above");
+        n.sys_focus = 3;
+        check(nav_apply(n, h, PadAction::Left, false) && n.sys_focus == 2 && n.system_view && h.exits == 0,
+              "3 columns: a fresh left at column 0 stays in the system");
     }
     {
         check(table_ok(kDown3, [](const Move& m) {
@@ -317,7 +350,117 @@ int main()
         Nav n = grid_nav(3, true);
         nav_apply(n, h, PadAction::Left, false);
         n.tile_focus = 2;
-        check(!nav_apply(n, h, PadAction::Right, true) && n.tile_focus == 2, "recent (a): right stops at column 2");
+        check(nav_apply(n, h, PadAction::Right, true) && n.tile_focus == 3,
+              "recent (a): right at column 2 goes on to the first tile of the next row");
+    }
+    {
+        check(table_ok(kSide3, [](const Move& m) { return system_move(m.total, 3, true, m.from, m.a); }),
+              "3 columns: right and left move in reading order across rows and stop at the ends, n 1 to 13 and 40");
+        check(table_ok(kSide3, [](const Move& m) { return system_move(m.total, 3, true, m.from, m.a, true); }),
+              "3 columns: held right and left move the same way");
+        check(table_ok(kSide2, [](const Move& m) { return system_move(m.total, 2, true, m.from, m.a); }),
+              "2 columns: right and left move in reading order across rows and stop at the ends");
+        check(table_ok(kSide2, [](const Move& m) { return system_move(m.total, 2, true, m.from, m.a, true); }),
+              "2 columns: held right and left move the same way");
+        check(table_ok(kSide3,
+                       [](const Move& m) {
+                           return m.total > 12 ? m.to : recent_move(m.total, SlotMap::RowMajor, m.from, m.a, false);
+                       }),
+              "recent (a): right and left move in reading order across rows and stop at the ends, n 1 to 12");
+        check(table_ok(kSide3,
+                       [](const Move& m) {
+                           return m.total > 12 ? m.to : recent_move(m.total, SlotMap::RowMajor, m.from, m.a, true);
+                       }),
+              "recent (a): held right and left move the same way");
+    }
+    {
+        FakeHost h;
+        h.games = 40;
+        Nav n = grid_nav(3, true);
+        nav_apply(n, h, PadAction::Accept, false);
+        n.sys_focus = 11;
+        n.sys_scroll = 0;
+        check(nav_apply(n, h, PadAction::Right, false) && n.sys_focus == 12 && n.sys_scroll == 1 && h.last_scrolled,
+              "40 games: right from 11 at scroll 0 lands on 12 and scrolls one row");
+        n.sys_focus = 2;
+        n.sys_scroll = 0;
+        check(nav_apply(n, h, PadAction::Right, false) && n.sys_focus == 3 && n.sys_scroll == 0 && !h.last_scrolled,
+              "40 games: right from 2 lands on 3 with no scroll");
+        n.sys_focus = 12;
+        n.sys_scroll = 1;
+        check(nav_apply(n, h, PadAction::Left, false) && n.sys_focus == 11 && n.sys_scroll == 1 && !h.last_scrolled,
+              "40 games: left from 12 at scroll 1 lands on 11 with no scroll");
+        n.sys_focus = 12;
+        n.sys_scroll = 4;
+        check(nav_apply(n, h, PadAction::Left, false) && n.sys_focus == 11 && n.sys_scroll == 3 && h.last_scrolled,
+              "40 games: left from 12 at scroll 4 lands on 11 and scrolls up one row");
+        n.sys_focus = 0;
+        n.sys_scroll = 0;
+        int scrolls = h.scrolls;
+        nav_apply(n, h, PadAction::Right, false);
+        for (int i = 0; i < 60; i++)
+            nav_apply(n, h, PadAction::Right, true);
+        check(n.sys_focus == 39 && n.sys_scroll == 10 && h.scrolls - scrolls == 10,
+              "40 games: right held from 0 ends at 39 with scroll 10");
+        int moves = h.moves;
+        check(!nav_apply(n, h, PadAction::Right, true) && !nav_apply(n, h, PadAction::Right, false) &&
+                  n.sys_focus == 39 && n.sys_scroll == 10 && h.moves == moves,
+              "40 games: right at the last game is refused, held and fresh, with no move reported");
+        nav_apply(n, h, PadAction::Left, false);
+        for (int i = 0; i < 60; i++)
+            nav_apply(n, h, PadAction::Left, true);
+        check(n.sys_focus == 0 && n.sys_scroll == 0 && n.system_view && h.exits == 0,
+              "40 games: left held from 39 ends at 0 with scroll 0, still in the system");
+        moves = h.moves;
+        check(!nav_apply(n, h, PadAction::Left, true) && !nav_apply(n, h, PadAction::Left, false) &&
+                  n.sys_focus == 0 && n.system_view && h.exits == 0 && h.pane_moves == 0 && h.moves == moves,
+              "40 games: left at game 0 is refused, held and fresh, never leaves and reports no move");
+        bool rows = true;
+        for (int r = 1; r < 14; r++) {
+            n.sys_focus = 3 * r;
+            n.sys_scroll = std::max(0, r - Nav::kRows + 1);
+            if (!nav_apply(n, h, PadAction::Left, false) || n.sys_focus != 3 * r - 1 || !n.system_view)
+                rows = false;
+        }
+        check(rows && h.exits == 0 && h.pane_moves == 0,
+              "system: a fresh left at column 0 of each row above 0 lands on 3r - 1, no exit, no pane move");
+    }
+    for (int total : {1, 5, 12}) {
+        FakeHost h;
+        h.n_recent = total;
+        Nav n = grid_nav(3, true);
+        nav_apply(n, h, PadAction::Left, false);
+        bool rows = true;
+        for (int r = 1; 3 * r < total; r++) {
+            n.tile_focus = 3 * r;
+            if (!nav_apply(n, h, PadAction::Left, false) || n.tile_focus != 3 * r - 1 || n.pane != Pane::Details)
+                rows = false;
+        }
+        n.tile_focus = 0;
+        int moves = h.recent_moves;
+        bool refused = !nav_apply(n, h, PadAction::Left, false) && !nav_apply(n, h, PadAction::Left, true) &&
+                       n.tile_focus == 0 && n.pane == Pane::Details && h.recent_moves == moves;
+        char name[160];
+        snprintf(name, sizeof name,
+                 "recent at %d: a fresh left at column 0 of each row above 0 lands on 3r - 1, at game 0 it is "
+                 "refused, no pane move after the opening",
+                 total);
+        check(rows && refused && h.pane_moves == 1, name);
+    }
+    {
+        FakeHost h;
+        h.n_recent = 5;
+        Nav n = grid_nav(3, true);
+        nav_apply(n, h, PadAction::Left, false);
+        int before = h.recent_moves;
+        nav_apply(n, h, PadAction::Right, false);
+        nav_apply(n, h, PadAction::Down, true);
+        nav_apply(n, h, PadAction::Left, true);
+        nav_apply(n, h, PadAction::Up, false);
+        int moved = h.recent_moves - before;
+        nav_apply(n, h, PadAction::Up, false);
+        check(moved == 4 && h.recent_moves - before == 4 && n.tile_focus == 0,
+              "recent_moved once per recent move, up, down, left and right, none on a refused one");
     }
     {
         check(table_ok(kRecentC, [](const Move& m) { return recent_move(m.total, SlotMap::RecentC, m.from, m.a); }),
@@ -350,6 +493,10 @@ int main()
         n8.tile_focus = 6;
         check(!nav_apply(n8, h8, PadAction::Down, false) && n8.tile_focus == 6,
               "recent (c) at 8: down from the last row is refused");
+        n8.tile_focus = 2;
+        check(!nav_apply(n8, h8, PadAction::Left, false) && n8.tile_focus == 2 && n8.pane == Pane::Details &&
+                  h8.pane_moves == 1,
+              "recent (c) at 8: a fresh left at slot column 0 is refused and stays in recent");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

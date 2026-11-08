@@ -176,6 +176,17 @@ bool read_lines(const std::string& path, std::vector<std::string>& lines)
     return true;
 }
 
+std::vector<std::string> comma_list(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::istringstream in(s);
+    std::string v;
+    while (std::getline(in, v, ','))
+        if (!v.empty())
+            out.push_back(v);
+    return out;
+}
+
 bool action_of(const std::string& k, PadAction& a)
 {
     static const struct {
@@ -485,6 +496,21 @@ public:
                                             : "the composite at T equals a fresh render")
                            : "FAILED");
             }
+            const T9& t9 = flow.t9();
+            std::string sys = t9.shown(tf).system;
+            int title_a = t9.pose(tf).a256;
+            const char* cause = "";
+            if (!step && seen_ && !was_fold && !ctl.active() && t9.running(tf) && sys != seen_sys_ &&
+                flow.nav.pane == Pane::Details && flow.nav.top() == Screen::Home) {
+                step = 1;
+                cause = " the system line swaps with the title at the T9 out to in boundary";
+                ok = ok && title_a == 0 && seen_title_a_ == 0 && swap_holds(seen_sys_, sys);
+                fprintf(stderr, "blockie-shot: %lld ms system line swap check %s\n", (long long)tf,
+                        ok ? "the frame is the one before with only the system line redrawn" : "FAILED");
+            }
+            seen_ = true;
+            seen_sys_ = sys;
+            seen_title_a_ = title_a;
             if (!frames_dir.empty() && tf >= o_.from) {
                 std::string png = frame_path(frames_dir, written);
                 if (!write_png(png, last_.surface())) {
@@ -492,8 +518,8 @@ public:
                     fclose(side);
                     return 1;
                 }
-                if (fprintf(side, "%d %lld %d %d %d %d %d %d %d %d\n", written, (long long)tf, flow.boundary(tf),
-                            motion ? 1 : 0, step, ok, art_r.x0, art_r.y0, art_r.x1, art_r.y1) < 0) {
+                if (fprintf(side, "%d %lld %d %d %d %d %d %d %d %d%s\n", written, (long long)tf, flow.boundary(tf),
+                            motion ? 1 : 0, step, ok, art_r.x0, art_r.y0, art_r.x1, art_r.y1, cause) < 0) {
                     fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
                     fclose(side);
                     return 1;
@@ -545,6 +571,34 @@ private:
                 ok ? (collapse_step ? "the end pose equals the destination with Details focus"
                                     : "the end pose equals a fresh render")
                    : "FAILED");
+    }
+
+    void system_line(const Surface& s, const std::string& sys)
+    {
+        Canvas c(s);
+        c.fill(s.rect(), theme().bg);
+        SelectorModel m;
+        m.game_system = sys;
+        m.big = o_.big;
+        draw_turned(c, fonts_, m, theme());
+    }
+
+    bool swap_holds(const std::string& from, const std::string& to)
+    {
+        Buffer a, b, blank;
+        system_line(a.surface(), from);
+        system_line(b.surface(), to);
+        Canvas bc(blank.surface());
+        bc.fill(blank.surface().rect(), theme().bg);
+        Surface sa = a.surface(), sb = b.surface(), sz = blank.surface();
+        Surface was = prev_.surface(), now = last_.surface();
+        for (int y = 0; y < now.h; y++)
+            for (int x = 0; x < now.w; x++) {
+                bool line = sa.at(x, y) != sz.at(x, y) || sb.at(x, y) != sz.at(x, y);
+                if (now.at(x, y) != (line ? sb.at(x, y) : was.at(x, y)))
+                    return false;
+            }
+        return true;
     }
 
     void set_now(int64_t t)
@@ -675,6 +729,9 @@ private:
     bool arrived_ = false;
     bool in_frame_ = false;
     int input_ok_ = 1;
+    bool seen_ = false;
+    std::string seen_sys_;
+    int seen_title_a_ = 256;
 };
 
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
@@ -689,6 +746,11 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
     if (!load_tiles(recent_dir, d->recent_covers, kCoverCap) || !read_lines(o.titles, titles) ||
         !read_lines(o.recent_titles, rtitles))
         return 1;
+    std::vector<std::string> rsys = comma_list(o.recent_system);
+    if (rsys.empty()) {
+        fprintf(stderr, "blockie-shot: --recentsys needs a system name\n");
+        return 2;
+    }
     systems = std::max(1, std::min(systems, 10));
     int focus = std::clamp(sys_focus, 0, systems + (items ? 2 : 0) - 1);
     if (!o.repeat_covers) {
@@ -735,7 +797,7 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         HomeGame g;
         g.id = kRecentIds + k;
         g.name = rtitles.empty() ? "Synth Recent " + std::to_string(k + 1) : rtitles[(size_t)k % rtitles.size()];
-        g.system = o.recent_system;
+        g.system = rsys[(size_t)k % rsys.size()];
         if (!d->recent_covers.empty())
             d->art[g.id] = d->recent_covers[(size_t)k % d->recent_covers.size()];
         d->recent_games.push_back(g);
@@ -1385,8 +1447,8 @@ int main(int argc, char** argv)
                 " [same options]\n"
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY:d|u:MS|PCT%%,...] [--at MS] [--from MS]"
                 " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
-                " [--recentsys NAME] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3] [--t9clip pane|edge]"
-                " [--bar content|slot] [--gridscroll band] [--startup] [--arrive MS]"
+                " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3]"
+                " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band] [--startup] [--arrive MS]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n");
         return 2;

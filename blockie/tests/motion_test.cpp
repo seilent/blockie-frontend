@@ -12,6 +12,7 @@
 #include "../nav.h"
 #include "../repeat.h"
 #include "../slide.h"
+#include "../t9.h"
 #include "../theme.h"
 
 using namespace fd;
@@ -95,6 +96,7 @@ public:
     MotionCtl ctl;
     Glide bar;
     Glide label;
+    T9 t9;
     Repeat repeat;
     Buffer last;
     SelectorModel kept;
@@ -149,6 +151,7 @@ public:
         ctl.landed = [this](const char* what, const char* why) { landed.push_back(std::string(what) + ":" + why); };
         ctl.add({"bar", [this](int64_t t) { return bar.running(t); }, [this]() { bar.land(); }});
         ctl.add({"labels", [this](int64_t t) { return label.running(t); }, [this]() { label.land(); }});
+        ctl.add({"t9", [this](int64_t t) { return t9.running(t); }, [this]() { t9.land(); }});
         sync_targets(true);
         draw(last.surface(), model, nav, false, nav.pane, kScreen);
     }
@@ -221,14 +224,7 @@ public:
         int f = n.system_view ? n.sys_focus - home.first : n.tile_focus;
         if (f >= 0 && f < (int)m.tiles.size())
             border(c, grid_tile_rect(f, 3));
-        if (n.system_view) {
-            title(c, 0, 256);
-            return;
-        }
-        for (int i = 0; i < (int)m.systems.size() && i < kMenuVisibleRows; i++) {
-            int base = kMenuFirstBaseline + i * kMenuPitchPx;
-            c.fill({670, base - 40, 850, base}, kDim);
-        }
+        title(c, 0, 256);
     }
 
     Buffer render_now(bool at_target, Pane focus)
@@ -245,18 +241,15 @@ public:
         return b;
     }
 
-    FoldPlay p2(SlideMode mode)
+    FoldPlay p2(bool details)
     {
-        int target = mode == SlideMode::System ? kPaneSplitWide : grid_tile_rect(2, 3).x1;
-        auto pl = std::make_shared<SlidePlan>(slide_plan(mode, target, LeftMove::Cells, unit, kHead));
+        auto pl = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, LeftMove::Cells, unit, kHead));
         plan = pl;
         FoldPlay p;
-        p.details = mode == SlideMode::Recent;
+        p.details = details;
         p.to_bound = Rect{0, 0, kPaneSplitWide, kPortraitH};
         p.duration = slide_duration(*pl);
-        SlideText text;
-        if (mode == SlideMode::System)
-            text = title;
+        SlideText text = title;
         p.prepare = [pl](const Surface& a, const Surface& b) {
             slide_prepare(*pl, a, b);
             return slide_duration(*pl);
@@ -284,10 +277,10 @@ public:
         Want w = want;
         want = Want::None;
         switch (w) {
-        case Want::Enter: ctl.start(FoldKind::Expand, p2(SlideMode::System), now); break;
-        case Want::Exit: ctl.start(FoldKind::Collapse, p2(SlideMode::System), now); break;
-        case Want::In: ctl.start(FoldKind::Expand, p2(SlideMode::Recent), now); break;
-        case Want::Out: ctl.start(FoldKind::Collapse, p2(SlideMode::Recent), now); break;
+        case Want::Enter: ctl.start(FoldKind::Expand, p2(false), now); break;
+        case Want::Exit: ctl.start(FoldKind::Collapse, p2(false), now); break;
+        case Want::In: ctl.start(FoldKind::Expand, p2(true), now); break;
+        case Want::Out: ctl.start(FoldKind::Collapse, p2(true), now); break;
         case Want::Push: ctl.start(FoldKind::Push, page(), now); break;
         case Want::Pop: ctl.start(FoldKind::Pop, page(), now); break;
         case Want::None: break;
@@ -351,6 +344,14 @@ public:
 
     bool saw(const std::string& s) const { return std::find(landed.begin(), landed.end(), s) != landed.end(); }
 
+    T9Text recent_text(int k) const
+    {
+        if (k < 0 || k >= (int)home.recent.size())
+            return {};
+        const HomeGame& g = home.recent[k];
+        return {g.id, g.name, g.system};
+    }
+
     int menu_count() const override { return (int)model.systems.size(); }
     MenuKind menu_kind(int i) const override { return i < 2 ? MenuKind::System : MenuKind::Settings; }
     int recent_count() const override { return (int)home.recent.size(); }
@@ -381,7 +382,12 @@ public:
     void push(Screen) override { want = Want::Push; }
     void pop(Screen) override { want = Want::Pop; }
     bool page_action(Screen, PadAction a, bool rep) override { return a == PadAction::Back && !rep; }
-    void pane_moved(Pane p) override { want = p == Pane::Details ? Want::In : Want::Out; }
+    void pane_moved(Pane p) override
+    {
+        t9.set(p == Pane::Details ? recent_text(nav.tile_focus) : T9Text{});
+        want = p == Pane::Details ? Want::In : Want::Out;
+    }
+    void recent_moved() override { t9.change(recent_text(nav.tile_focus), now); }
 };
 
 }
@@ -544,7 +550,8 @@ int main()
     {
         Host h(2, 12, false);
         h.press(PadAction::Left, 0);
-        check(h.ctl.run_length() == 400, "a Recent in at 2 played re-deals nothing and runs 400 ms");
+        check(h.ctl.run_length() == 800 && h.ctl.run_length() == std::max<int64_t>(800, slide_left_ms(*h.plan)),
+              "a Recent in at 2 played re-deals nothing and runs the system slide's 800 ms");
         Buffer a0 = h.render_kept_as(Pane::Details);
         Buffer b0;
         copy(h.ctl.to(), b0.surface());
@@ -559,7 +566,7 @@ int main()
         for (int64_t s : {(int64_t)0, (int64_t)16, (int64_t)80, (int64_t)159}) {
             h.frame(160 + s, out);
             Buffer want;
-            slide_compose(a0.surface(), b0.surface(), want.surface(), ref, 160 - s, -1, theme().bg, nullptr);
+            slide_compose(a0.surface(), b0.surface(), want.surface(), ref, 160 - s, -1, theme().bg, title);
             if (!equal(out.surface(), want.surface()))
                 mirror = false;
             if (has_bar(out.surface()))
@@ -635,6 +642,52 @@ int main()
         h.land_frames(T, out, before, bar);
         check(h.saw("expand:end") && equal(out.surface(), h.render_now(false, Pane::Details).surface()),
               "the held expand runs to T and ends on the expanded frame");
+    }
+
+    {
+        Host h(5, 12, false);
+        h.press(PadAction::Accept, 0);
+        for (int n = 0; frame_ms(n) < 320; n++)
+            h.frame(frame_ms(n), out);
+        h.press(PadAction::Left, 320);
+        check(h.ctl.active() && h.ctl.kind() == FoldKind::Expand && !h.ctl.reversed() && !h.saw("expand:input") &&
+                  h.nav.system_view && h.nav.sys_focus == 0,
+              "a fresh left at game 0 during a system enter lands nothing and reverses nothing");
+    }
+
+    {
+        Host h(5, 12, false);
+        h.home.recent[1].system = "Synth Two";
+        h.press(PadAction::Left, 0);
+        bool bar = false;
+        int64_t tl = h.land_frames(0, out, before, bar);
+        T9Text g0 = h.recent_text(0), g1 = h.recent_text(1);
+        check(tl > 0 && h.saw("expand:end") && !h.t9.running(tl) && h.t9.shown(tl) == g0,
+              "Recent in lands on game 0's title and system line with no T9");
+        int64_t t0 = tl + 50;
+        h.press(PadAction::Right, t0);
+        check(h.nav.tile_focus == 1 && h.t9.running(t0) && h.t9.end() == t0 + 900,
+              "Right in the Recent browse runs T9 to game 1");
+        check(h.t9.shown(t0 + 499) == g0 && h.t9.shown(t0 + 500) == g1,
+              "the system line stays on game 0 until the out ends, then swaps with the title");
+        h.press(PadAction::Left, t0 + 100);
+        check(h.nav.tile_focus == 0 && h.t9.shown(t0 + 500) == g0 && h.t9.end() == t0 + 900,
+              "a move back during the out replaces the pending title and system, coalesced");
+    }
+
+    {
+        Host h(5, 12, false);
+        h.home.recent[1].name = h.home.recent[0].name;
+        h.home.recent[1].system = "Synth Two";
+        h.press(PadAction::Left, 0);
+        bool bar = false;
+        int64_t tl = h.land_frames(0, out, before, bar);
+        int64_t t0 = tl + 50;
+        h.press(PadAction::Right, t0);
+        const T9Text& in = h.t9.shown(t0 + 500);
+        check(h.t9.running(t0) && in.title == h.home.recent[0].name && in.system == "Synth Two" &&
+                  in.id == h.home.recent[1].id,
+              "two games with one name on different systems run T9, keyed by the game");
     }
 
     {

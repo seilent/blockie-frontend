@@ -294,15 +294,20 @@ static int run()
             }
         return false;
     };
-    auto folder_of = [&](const std::string& system_id) {
+    auto system_cfg = [&](const std::string& system_id) -> const SystemCfg* {
         for (const auto& sc : lib.config())
             if (sc.id == system_id)
-                return sc.libretro_folder;
-        return std::string();
+                return &sc;
+        return nullptr;
+    };
+    auto folder_of = [&](const std::string& system_id) {
+        const SystemCfg* sc = system_cfg(system_id);
+        return sc ? sc->libretro_folder : std::string();
     };
     auto home_game = [&](const Game& g) {
         by_id[g.id] = g;
-        return HomeGame{g.id, g.name, g.system_id};
+        const SystemCfg* sc = system_cfg(g.system_id);
+        return HomeGame{g.id, g.name, sc ? sc->name : std::string()};
     };
     flow.setup();
     home.load = [&](const HomeGame& g) -> Art {
@@ -387,13 +392,9 @@ static int run()
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
             return false;
-        std::string core, sysname;
-        for (const auto& s : lib.config())
-            if (s.id == g.system_id) {
-                core = s.core;
-                sysname = s.name;
-                break;
-            }
+        const SystemCfg* sc = system_cfg(g.system_id);
+        std::string core = sc ? sc->core : std::string();
+        std::string sysname = sc ? sc->name : std::string();
         for (char& ch : sysname)
             ch = (char)std::tolower((unsigned char)ch);
         if (!launcher.core_installed(core)) {

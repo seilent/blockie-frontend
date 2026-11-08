@@ -62,7 +62,7 @@ constexpr int kMenuFirstBaseline = 96;
 
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, bool scatter = false,
                    bool detail = false, const Theme& th = theme(), bool expanded = false);
-void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, bool detail, const Theme& th = theme());
+void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, const Theme& th = theme());
 void warm_turned(Fonts& fonts, const SelectorModel& model);
 size_t turned_rasters();
 Rect header_rect(Fonts& fonts, const SelectorModel& model);

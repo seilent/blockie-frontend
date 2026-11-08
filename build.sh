@@ -528,6 +528,8 @@ build_input_test() {
     pool "$testobj/repeat_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/repeat_test.cpp"
     pool "$testobj/nav_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/nav_test.cpp"
     pool "$testobj/home.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/home.cpp"
+    pool "$genobj/core_curves.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/core/curves.cpp"
+    pool "$testobj/glide.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/glide.cpp"
     pool "$testobj/home_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/home_test.cpp"
     pool "$testobj/tile_grid_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/tile_grid_test.cpp"
     drain
@@ -539,7 +541,8 @@ build_input_test() {
     "$cxx" "$testobj/input_pad.o" "$testobj/nav.o" "$testobj/nav_test.o" $appldflags \
         -o "$out/input/blockie-nav-test.tmp" || return 1
     mv "$out/input/blockie-nav-test.tmp" "$out/input/blockie-nav-test"
-    "$cxx" "$testobj/home.o" "$testobj/home_test.o" $appldflags -o "$out/input/blockie-home-test.tmp" || return 1
+    "$cxx" "$testobj/home.o" "$testobj/glide.o" "$testobj/home_test.o" "$genobj/core_curves.cpp.o" $appldflags -lm \
+        -o "$out/input/blockie-home-test.tmp" || return 1
     mv "$out/input/blockie-home-test.tmp" "$out/input/blockie-home-test"
     "$cxx" "$testobj/tile_grid_test.o" $appldflags -o "$out/input/blockie-tile-grid-test.tmp" || return 1
     mv "$out/input/blockie-tile-grid-test.tmp" "$out/input/blockie-tile-grid-test"
@@ -562,7 +565,7 @@ build_motion_test() {
     pool "$testobj/fold_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/fold_test.cpp"
     pool "$testobj/pagemove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/pagemove_test.cpp"
     pool "$testobj/ink_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/ink_test.cpp"
-    for s in motion glide slide home nav repeat pops; do
+    for s in motion glide slide home nav repeat pops t9; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     for s in motion_test glide_test slide_test pops_test; do
@@ -578,8 +581,8 @@ build_motion_test() {
     "$cxx" "$testobj/ink.o" "$testobj/theme.o" "$testobj/ink_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags \
         -lpthread -lm -o "$out/motion/blockie-ink-test" || return 1
     "$cxx" "$testobj/motion.o" "$testobj/fold.o" "$testobj/slide.o" "$testobj/home.o" "$testobj/nav.o" \
-        "$testobj/glide.o" "$testobj/repeat.o" "$testobj/theme.o" "$testobj/motion_test.o" "$genobj/core_curves.cpp.o" \
-        "$genobj/gfx_canvas.cpp.o" \
+        "$testobj/glide.o" "$testobj/repeat.o" "$testobj/theme.o" "$testobj/t9.o" "$testobj/motion_test.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" \
         $appldflags -lpthread -lm -o "$out/motion/blockie-motion-test" || return 1
     "$cxx" "$testobj/glide.o" "$testobj/glide_test.o" "$genobj/core_curves.cpp.o" $appldflags -lm \
         -o "$out/motion/blockie-glide-test" || return 1
@@ -688,7 +691,7 @@ build_vtext_test() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    for s in vtext theme t9 screen_selector screen_settings ink; do
+    for s in vtext theme t9 screen_selector screen_settings ink homeflow home motion nav glide slide pagemove fold; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
@@ -697,6 +700,7 @@ build_vtext_test() {
     pool "$testobj/vtext_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/vtext_test.cpp"
     pool "$testobj/t9_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/t9_test.cpp"
     pool "$testobj/selector_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/selector_test.cpp"
+    pool "$testobj/homeflow_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/homeflow_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/vtext"
@@ -717,14 +721,21 @@ build_vtext_test() {
         "$testobj/settings_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" ||
         return 1
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+        "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
+        "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
+        "$testobj/homeflow_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-homeflow-test.tmp" ||
+        return 1
+    mv "$out/vtext/blockie-homeflow-test.tmp" "$out/vtext/blockie-homeflow-test"
     echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test" \
-        "$out/vtext/blockie-settings-test"
+        "$out/vtext/blockie-settings-test $out/vtext/blockie-homeflow-test"
     local cjk
     cjk=$(fc-list ':family=Noto Sans CJK JP:style=Light' file 2> /dev/null | head -n 1 | sed 's/: *$//' || true)
     [[ -n $cjk && -f $cjk ]] || cjk=
     echo "build.sh: vtext CJK fallback ${cjk:-none}"
     "$out/vtext/blockie-vtext-test" "$fonts_dir" "$cjk" && "$out/vtext/blockie-t9-test" "$fonts_dir" &&
-        "$out/vtext/blockie-selector-test" "$fonts_dir" && "$out/vtext/blockie-settings-test" "$fonts_dir"
+        "$out/vtext/blockie-selector-test" "$fonts_dir" && "$out/vtext/blockie-settings-test" "$fonts_dir" &&
+        "$out/vtext/blockie-homeflow-test" "$fonts_dir"
 }
 
 build_shot() {

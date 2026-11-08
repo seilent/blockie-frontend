@@ -25,6 +25,7 @@ public:
     virtual void pop(Screen s) = 0;
     virtual bool page_action(Screen s, PadAction a, bool repeat) = 0;
     virtual void pane_moved(Pane) {}
+    virtual void recent_moved() {}
 };
 
 struct Nav {

@@ -43,10 +43,11 @@ bool same(Buffer& a, Buffer& b, Rect r)
     return true;
 }
 
-void draw(Buffer& b, Fonts& fonts, const SelectorModel& m, Pane focus, const Theme& th)
+void draw(Buffer& b, Fonts& fonts, const SelectorModel& m, Pane focus, const Theme& th, bool detail = false,
+          bool expanded = false)
 {
     Canvas c(b.surface());
-    draw_selector(c, fonts, m, focus, false, false, th, false);
+    draw_selector(c, fonts, m, focus, false, detail, th, expanded);
 }
 
 }
@@ -80,6 +81,28 @@ int main(int argc, char** argv)
         check(same(hold, det, tile) && !same(hold, sel, tile),
               th->light ? "light: the tiles still take the Details alpha"
                         : "dark: the tiles still take the Details alpha");
+    }
+
+    SelectorModel e;
+    e.systems = {{"gba", 52, ""}, {"bluetooth", 0, "not connected"}, {"settings", 0, "display"}};
+    e.tiles = m.tiles;
+    e.tile_focus = 0;
+    SelectorModel bare = e;
+    e.game_system = "GBA";
+    e.game_title = "Synth Recent One";
+    Rect pane{648, 0, 960, 720};
+    for (const Theme* th : {&theme_dark(), &theme_light()}) {
+        Buffer recent, sys, empty, blank;
+        draw(recent, fonts, e, Pane::Details, *th, false, true);
+        draw(sys, fonts, e, Pane::Details, *th, true, true);
+        draw(empty, fonts, bare, Pane::Details, *th, false, true);
+        Canvas bc(blank.surface());
+        bc.fill(blank.surface().rect(), th->bg);
+        check(same(recent, sys, kScreen) && !same(recent, blank, pane),
+              th->light ? "light: the expanded Recent draws the system view's turned title"
+                        : "dark: the expanded Recent draws the system view's turned title");
+        check(same(empty, blank, pane),
+              th->light ? "light: no menu in the expanded right pane" : "dark: no menu in the expanded right pane");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

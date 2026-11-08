@@ -154,35 +154,7 @@ void draw_turned_detail(Canvas& c, Fonts& fonts, const SelectorModel& model, int
     }
 }
 
-void draw_stacked_menu(Canvas& c, Fonts& fonts, const SelectorModel& model, int x0, const Theme& th)
-{
-    TextStyle ls = role::homeItem.style();
-    TextStyle ss = role::homeSubtitle.style();
-    int la = alpha256(tok::type_homeItem_alphaDim);
-    int sa = alpha256(role::homeSubtitle.alpha);
-    Rect prev = c.clip();
-    Rect sr = c.surface().rect();
-    c.set_clip(Rect{kPaneSplitWide, sr.y0, sr.x1, sr.y1}.intersect(prev));
-    int slot_lo = kFirstBaseline - kPitch / 2;
-    int slot_hi = kFirstBaseline + (kMenuVisibleRows - 1) * kPitch + kPitch / 2;
-    for (int i = 0; i < (int)model.systems.size(); i++) {
-        int slot = kFirstBaseline + i * kPitch - model.menu_top_px;
-        if (slot <= slot_lo || slot >= slot_hi)
-            continue;
-        const SelectorItem& item = model.systems[i];
-        fonts.draw(c, ls, item.name.c_str(), x64(x0), slot, th.ink, la);
-        std::string sub = item.subtitle;
-        if (sub.empty()) {
-            char count[32];
-            count_line(count, sizeof count, item.games);
-            sub = count;
-        }
-        fonts.draw(c, ss, sub.c_str(), x64(x0 + (kSubtitleX - kLabelX)), slot + kSubtitleDrop, th.ink, sa);
-    }
-    c.set_clip(prev);
-}
-
-void draw_expanded(Canvas& c, Fonts& fonts, const SelectorModel& model, bool detail, const Theme& th)
+void draw_expanded(Canvas& c, Fonts& fonts, const SelectorModel& model, const Theme& th)
 {
     c.fill(c.surface().rect(), th.bg);
     int cols = model.big ? kBigCols : kGridColsWide;
@@ -223,18 +195,15 @@ void draw_expanded(Canvas& c, Fonts& fonts, const SelectorModel& model, bool det
     }
     c.set_clip(prev);
     if (prev.x1 > kPaneSplitWide)
-        draw_turned(c, fonts, model, detail, th);
+        draw_turned(c, fonts, model, th);
 }
 
 }
 
-void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, bool detail, const Theme& th)
+void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, const Theme& th)
 {
-    int x0 = turn_x(model);
-    if (!detail)
-        draw_stacked_menu(c, fonts, model, x0, th);
-    else if (model.turn_a256 > 0)
-        draw_turned_detail(c, fonts, model, x0, th);
+    if (model.turn_a256 > 0)
+        draw_turned_detail(c, fonts, model, turn_x(model), th);
 }
 
 void warm_turned(Fonts& fonts, const SelectorModel& model)
@@ -265,7 +234,7 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
                    const Theme& th, bool expanded)
 {
     if (expanded) {
-        draw_expanded(c, fonts, model, detail, th);
+        draw_expanded(c, fonts, model, th);
         return;
     }
     bool on = focus_pane == Pane::Selector;

@@ -29,7 +29,7 @@ int T9::out_px() { return std_px(tok::motion_trackShiftOut); }
 
 int T9::in_px() { return std_px(tok::motion_trackShiftIn); }
 
-void T9::set(const std::string& s)
+void T9::set(const T9Text& s)
 {
     shown_ = pending_ = s;
     phase_ = Phase::Idle;
@@ -46,7 +46,7 @@ void T9::advance(int64_t now)
         phase_ = Phase::Idle;
 }
 
-void T9::change(const std::string& s, int64_t now)
+void T9::change(const T9Text& s, int64_t now)
 {
     advance(now);
     if (phase_ == Phase::Out) {
@@ -86,7 +86,7 @@ T9Pose T9::pose(int64_t now) const
     return {step(in_px(), 0, k), step(0, 256, k)};
 }
 
-const std::string& T9::shown(int64_t now) const
+const T9Text& T9::shown(int64_t now) const
 {
     return phase_ == Phase::Out && now - t0_ >= out_ms() ? pending_ : shown_;
 }
