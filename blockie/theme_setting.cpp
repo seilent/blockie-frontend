@@ -1,5 +1,6 @@
 #include "theme_setting.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -12,6 +13,12 @@ namespace {
 constexpr const char* kDest = "net.seilent.Blockie.Settings";
 constexpr const char* kPath = "/net/seilent/Blockie/Settings";
 constexpr const char* kIface = "net.seilent.Blockie.Settings1";
+
+int64_t clock_ms()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
 
 bool variant_string(DBusMessageIter* it, std::string& out)
 {
@@ -65,9 +72,13 @@ void ThemeSetting::attach(Bus& bus)
 
 void ThemeSetting::fetch(int64_t now)
 {
-    now_ = now;
     if (!bus_)
         return;
+    if (getting_) {
+        again_ = true;
+        return;
+    }
+    getting_ = true;
     DBusMessage* m = dbus_message_new_method_call(kDest, kPath, kIface, "Get");
     if (m) {
         const char* key = kKey;
@@ -75,19 +86,24 @@ void ThemeSetting::fetch(int64_t now)
     }
     bus_->call(m, [this](DBusMessage* r) {
         answered_ = true;
+        getting_ = false;
         std::string v;
         if (parse_value(r, v)) {
             apply(v);
-            return;
+        } else {
+            const char* err =
+                r && dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR ? dbus_message_get_error_name(r) : nullptr;
+            std::fprintf(stderr, "blockie-frontend: theme get failed (%s)\n", err ? err : "no reply");
         }
-        const char* err = r && dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR ? dbus_message_get_error_name(r) : nullptr;
-        std::fprintf(stderr, "blockie-frontend: theme get failed (%s), dark\n", err ? err : "no reply");
+        if (again_) {
+            again_ = false;
+            fetch(clock_ms());
+        }
     }, now, kTimeoutMs);
 }
 
 void ThemeSetting::set(bool light, int64_t now)
 {
-    now_ = now;
     if (!bus_)
         return;
     DBusMessage* m = dbus_message_new_method_call(kDest, kPath, kIface, "Set");
@@ -118,7 +134,7 @@ bool ThemeSetting::on_signal(DBusMessage* m)
 {
     std::string key, value;
     if (parse_changed(m, key, value) && key == kKey)
-        apply(value);
+        fetch(clock_ms());
     return false;
 }
 

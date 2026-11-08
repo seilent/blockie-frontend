@@ -31,7 +31,8 @@ private:
 
     Bus* bus_ = nullptr;
     bool answered_ = false;
-    int64_t now_ = 0;
+    bool getting_ = false;
+    bool again_ = false;
 };
 
 }
