@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -61,12 +62,15 @@ const char* action_name(PadAction a)
 
 struct ScrapeJob {
     int index;
+    int64_t epoch;
     Game game;
     std::string libretro_folder;
 };
 
 struct ArtDrop {
+    int64_t game_id;
     int index;
+    int64_t epoch;
     std::string path;
 };
 
@@ -134,7 +138,7 @@ static int run()
                         folder = sc.libretro_folder;
                         break;
                     }
-                jobs.push_back({(int)i, g, folder});
+                jobs.push_back({(int)i, 0, g, folder});
             }
         }
     }
@@ -161,6 +165,34 @@ static int run()
     std::unordered_map<int64_t, Image> cover_cache;
     Launcher::Child child;
     int64_t child_game_id = -1;
+
+    std::deque<ScrapeJob> squeue;
+    std::mutex qmutex;
+    std::unordered_set<int64_t> requested;
+    int64_t sys_epoch = 0;
+    std::mutex art_mutex;
+    std::vector<ArtDrop> art_drops;
+    std::atomic<bool> scrape_stop{false};
+    int art_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    int work_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+
+    auto enqueue_scrape = [&](const Game& g, int64_t epoch, int index, const std::string& folder) {
+        bool added = false;
+        {
+            std::lock_guard<std::mutex> lk(qmutex);
+            if (requested.insert(g.id).second) {
+                squeue.push_back({index, epoch, g, folder});
+                added = true;
+            }
+        }
+        if (added && work_evfd >= 0) {
+            uint64_t one = 1;
+            ssize_t w = write(work_evfd, &one, sizeof one);
+            (void)w;
+        }
+    };
+    for (const ScrapeJob& j : jobs)
+        enqueue_scrape(j.game, j.epoch, j.index, j.libretro_folder);
 
     auto load_cover = [&](const Game& g) -> Image {
         auto it = cover_cache.find(g.id);
@@ -274,6 +306,22 @@ static int run()
                 else
                     it = cover_cache.erase(it);
             }
+            if (start < (int)sysgames.size()) {
+                std::string folder;
+                for (const auto& sc : lib.config())
+                    if (sc.id == sysgames[start].system_id) {
+                        folder = sc.libretro_folder;
+                        break;
+                    }
+                for (int i = start; i < hi; i++) {
+                    const Game& g = sysgames[i];
+                    if (cover_cache.count(g.id))
+                        continue;
+                    if (i >= end && load_cover(g).w > 0)
+                        continue;
+                    enqueue_scrape(g, sys_epoch, -1, folder);
+                }
+            }
         }
         model.game_system = sys_name;
         model.game_title = (sys_focus >= 0 && sys_focus < (int)sysgames.size()) ? sysgames[sys_focus].name : std::string();
@@ -284,6 +332,7 @@ static int run()
         model.tiles.swap(recent_hold);
         recent_hold.clear();
         cover_cache.clear();
+        requested.clear();
         model.section_label.clear();
         model.game_system.clear();
         model.game_title.clear();
@@ -311,6 +360,7 @@ static int run()
                     sys_focus = 0;
                     sys_scroll = 0;
                     system_view = true;
+                    sys_epoch++;
                     model.tiles.swap(recent_hold);
                     refresh_system(true);
                     pane = Pane::Details;
@@ -418,16 +468,12 @@ static int run()
             sigprocmask(SIG_UNBLOCK, &mask, nullptr);
     }
 
-    std::mutex art_mutex;
-    std::vector<ArtDrop> art_drops;
-    std::atomic<bool> scrape_stop{false};
     std::fprintf(stderr, "blockie-frontend: scrape worklist %zu\n", jobs.size());
-    int art_evfd = jobs.empty() ? -1 : eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     std::thread scrape_thread;
-    if (!jobs.empty() && art_evfd < 0)
+    if (art_evfd < 0 || work_evfd < 0)
         std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape disabled\n");
-    if (art_evfd >= 0) {
-        scrape_thread = std::thread([data_root, jobs = std::move(jobs), art_evfd, &art_mutex, &art_drops,
+    else {
+        scrape_thread = std::thread([data_root, art_evfd, work_evfd, &squeue, &qmutex, &art_mutex, &art_drops,
                                      &scrape_stop]() {
             Library wlib;
             if (!wlib.open(data_root)) {
@@ -435,27 +481,54 @@ static int run()
                 return;
             }
             Scraper sc(wlib, data_root, {}, &scrape_stop);
-            for (const ScrapeJob& j : jobs) {
+            for (;;) {
+                struct pollfd wf;
+                wf.fd = work_evfd;
+                wf.events = POLLIN;
+                wf.revents = 0;
+                int pr = poll(&wf, 1, -1);
+                if (pr < 0) {
+                    if (errno == EINTR)
+                        continue;
+                    break;
+                }
+                uint64_t cnt;
+                while (read(work_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
+                }
                 if (scrape_stop.load())
                     break;
-                std::string eff = sc.resolve_name(j.game.system_id, j.game.rompath_abs);
-                if (eff.empty())
-                    eff = j.game.name;
-                ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, eff, ArtType::Covers);
-                const char* r = o.cached ? "ok" : o.not_found ? "404" : o.transient ? "err" : "miss";
-                std::fprintf(stderr, "blockie-frontend: scrape %s \"%s\" %s %s\n", j.game.system_id.c_str(),
-                             j.game.name.c_str(), r, o.path.c_str());
-                if (o.cached && !o.path.empty()) {
+                for (;;) {
+                    ScrapeJob j;
                     {
-                        std::lock_guard<std::mutex> lk(art_mutex);
-                        art_drops.push_back({j.index, o.path});
+                        std::lock_guard<std::mutex> lk(qmutex);
+                        if (squeue.empty())
+                            break;
+                        j = std::move(squeue.front());
+                        squeue.pop_front();
                     }
-                    uint64_t one = 1;
-                    ssize_t w = write(art_evfd, &one, sizeof one);
-                    (void)w;
+                    if (scrape_stop.load())
+                        return;
+                    std::string eff = sc.resolve_name(j.game.system_id, j.game.rompath_abs);
+                    if (eff.empty())
+                        eff = j.game.name;
+                    if (scrape_stop.load())
+                        return;
+                    ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, eff, ArtType::Covers);
+                    const char* r = o.cached ? "ok" : o.not_found ? "404" : o.transient ? "err" : "miss";
+                    std::fprintf(stderr, "blockie-frontend: scrape %s \"%s\" %s %s\n", j.game.system_id.c_str(),
+                                 j.game.name.c_str(), r, o.path.c_str());
+                    if (o.cached && !o.path.empty()) {
+                        {
+                            std::lock_guard<std::mutex> lk(art_mutex);
+                            art_drops.push_back({j.game.id, j.index, j.epoch, o.path});
+                        }
+                        uint64_t one = 1;
+                        ssize_t w = write(art_evfd, &one, sizeof one);
+                        (void)w;
+                    }
                 }
             }
-            std::fprintf(stderr, "blockie-frontend: scrape done\n");
+            std::fprintf(stderr, "blockie-frontend: scrape worker exit\n");
         });
     }
 
@@ -543,13 +616,38 @@ static int run()
                 drops.swap(art_drops);
             }
             for (const ArtDrop& drp : drops) {
-                std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
-                if (drp.index < 0 || drp.index >= (int)grid.size())
+                if (drp.epoch == 0) {
+                    std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
+                    if (drp.index < 0 || drp.index >= (int)grid.size())
+                        continue;
+                    DecodedImage dec;
+                    if (load_png(drp.path, dec) && dec.ok()) {
+                        grid[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
+                        if (!system_view && child.pid <= 0)
+                            need_redraw = true;
+                    }
+                    continue;
+                }
+                if (!system_view || drp.epoch != sys_epoch)
                     continue;
                 DecodedImage dec;
-                if (load_png(drp.path, dec) && dec.ok()) {
-                    grid[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
-                    if (!system_view && child.pid <= 0)
+                if (!(load_png(drp.path, dec) && dec.ok()))
+                    continue;
+                Image img = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
+                int start = sys_scroll * kCols;
+                int end = start + kRows * kCols;
+                if (end > (int)sysgames.size())
+                    end = (int)sysgames.size();
+                int pos = -1;
+                for (int i = start; i < end; i++)
+                    if (sysgames[i].id == drp.game_id) {
+                        pos = i - start;
+                        break;
+                    }
+                cover_cache[drp.game_id] = img;
+                if (pos >= 0 && pos < (int)model.tiles.size()) {
+                    model.tiles[pos] = img;
+                    if (child.pid <= 0)
                         need_redraw = true;
                 }
             }
@@ -563,8 +661,15 @@ static int run()
     if (child.pid > 0)
         kill(child.pid, SIGTERM);
     scrape_stop.store(true);
+    if (work_evfd >= 0) {
+        uint64_t one = 1;
+        ssize_t w = write(work_evfd, &one, sizeof one);
+        (void)w;
+    }
     if (scrape_thread.joinable())
         scrape_thread.join();
+    if (work_evfd >= 0)
+        close(work_evfd);
     if (art_evfd >= 0)
         close(art_evfd);
     if (sfd >= 0)
