@@ -9,14 +9,25 @@
 
 #include "../gfx/canvas.h"
 #include "../gfx/font.h"
+#include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
 #include "../gfx/png.h"
+#include "../ui/roles.h"
+#include "bt_model.h"
+#include "fold.h"
 #include "image.h"
+#include "ink.h"
+#include "pagemove.h"
+#include "screen_bt.h"
 #include "screen_selector.h"
+#include "screen_settings.h"
+#include "theme.h"
 
 using namespace fd;
 
 namespace {
+
+constexpr int kFrameMs = 1000 / 60;
 
 bool load_tile(const std::string& path, Image& out)
 {
@@ -45,6 +56,72 @@ std::vector<std::string> pngs_in(const std::string& dir)
     return names;
 }
 
+BtDevice shot_device(const char* mac, const char* alias, bool paired, bool connected, const char* uuid)
+{
+    BtDevice d;
+    std::string tail = mac;
+    std::replace(tail.begin(), tail.end(), ':', '_');
+    d.path = "/org/bluez/hci0/dev_" + tail;
+    d.adapter = "/org/bluez/hci0";
+    d.address = mac;
+    d.alias = alias;
+    d.paired = paired;
+    d.connected = connected;
+    d.uuids = {uuid};
+    return d;
+}
+
+int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
+{
+    const char* sink = "0000110b-0000-1000-8000-00805f9b34fb";
+    const char* hid = "00001124-0000-1000-8000-00805f9b34fb";
+    int64_t now = 1000000;
+    BtState s;
+    if (state != "unavailable") {
+        s.up = true;
+        s.adapter.path = "/org/bluez/hci0";
+        s.adapter.powered = state != "off";
+    }
+    if (state != "unavailable" && state != "empty")
+        s.devices = {shot_device("02:00:00:00:00:01", "Synth Headset", true, true, sink),
+                     shot_device("02:00:00:00:00:02", "Synth Buds", true, false, sink),
+                     shot_device("02:00:00:00:00:03", "Synth Pad", false, false, hid),
+                     shot_device("02:00:00:00:00:04", "Synth Speaker", false, false, sink)};
+    if (state == "searching") {
+        s.searching = true;
+        s.search_end = now + 88000;
+    }
+    if (state == "confirm") {
+        s.pair_target = s.devices[3].path;
+        s.prompt = BtPrompt{BtPrompt::Confirm, s.devices[3].path, "", 123456};
+    }
+    GlyphCache glyphs;
+    BtPage page(fonts, glyphs);
+    page.open(now);
+    page.set_model(s, now);
+    if (state == "sheet") {
+        page.action(PadAction::Down, false, now);
+        page.action(PadAction::Context, false, now);
+    }
+    page.land(now);
+    Buffer buf;
+    Canvas c(buf.surface());
+    InkLayer ink;
+    page.draw(c, ink, now + 1000);
+    if (!write_png(out, buf.surface())) {
+        fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    return 0;
+}
+
+std::string frame_path(const std::string& dir, int i)
+{
+    char name[32];
+    snprintf(name, sizeof name, "/f%04d.png", i);
+    return dir + name;
+}
+
 }
 
 int main(int argc, char** argv)
@@ -53,8 +130,20 @@ int main(int argc, char** argv)
     std::string font_dir;
     std::string tiles_dir;
     std::string header;
+    std::string page;
+    std::string fold_dir;
+    std::string turn;
+    std::string frames_dir;
+    std::string bt_sub;
+    std::string bt_state;
     int tile_focus = -1;
     int sys_focus = 0;
+    int systems = 6;
+    int menu_top = 0;
+    int sheet_focus = -1;
+    bool items = false;
+    bool sheet = false;
+    bool light = false;
     Pane focus = Pane::Selector;
     ArtFit fit = ArtFit::Cover;
     bool scatter = false;
@@ -79,6 +168,30 @@ int main(int argc, char** argv)
             tile_focus = atoi(argv[++i]);
         else if (a == "--sysfocus" && i + 1 < argc)
             sys_focus = atoi(argv[++i]);
+        else if (a == "--systems" && i + 1 < argc)
+            systems = atoi(argv[++i]);
+        else if (a == "--menutop" && i + 1 < argc)
+            menu_top = atoi(argv[++i]);
+        else if (a == "--items")
+            items = true;
+        else if (a == "--btsub" && i + 1 < argc)
+            bt_sub = argv[++i];
+        else if (a == "--bt" && i + 1 < argc)
+            bt_state = argv[++i];
+        else if (a == "--light")
+            light = true;
+        else if (a == "--page" && i + 1 < argc)
+            page = argv[++i];
+        else if (a == "--sheet")
+            sheet = true;
+        else if (a == "--sheetfocus" && i + 1 < argc)
+            sheet_focus = atoi(argv[++i]);
+        else if (a == "--fold" && i + 1 < argc)
+            fold_dir = argv[++i];
+        else if (a == "--turnstile" && i + 1 < argc)
+            turn = argv[++i];
+        else if (a == "--frames" && i + 1 < argc)
+            frames_dir = argv[++i];
         else if (a == "--scatter")
             scatter = true;
         else if (a == "--gamedetail" && i + 1 < argc) {
@@ -96,14 +209,20 @@ int main(int argc, char** argv)
             return 2;
         }
     }
-    if (out.empty()) {
+    bool sequence = !fold_dir.empty() || !turn.empty();
+    if ((out.empty() && !sequence) || (sequence && frames_dir.empty())) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
-                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]\n");
+                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
+                " [--light] [--page settings] [--sheet] [--sheetfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]"
+                " [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
+                "       blockie-shot --fold ab|ba --frames DIR [same options]\n"
+                "       blockie-shot --turnstile push|pop --frames DIR [same options]\n");
         return 2;
     }
     if (font_dir.empty())
         font_dir = "fonts";
+    set_theme_light(light);
 
     Fonts fonts;
     if (!fonts.open(font_dir, {})) {
@@ -111,12 +230,22 @@ int main(int argc, char** argv)
         return 1;
     }
     fonts.begin_frame(-1);
+    if (!bt_state.empty())
+        return shot_bt(out, bt_state, fonts);
 
+    static const char* const kNames[] = {"GB", "GBC", "NES", "SNES", "Genesis", "GBA", "PS1", "N64", "PSP", "DC"};
+    static const int kCounts[] = {28, 19, 63, 47, 35, 52, 31, 22, 14, 9};
     SelectorModel model;
-    model.systems = {
-        {"GB", 28}, {"GBC", 19}, {"NES", 63}, {"SNES", 47}, {"Genesis", 35}, {"GBA", 52},
-    };
-    model.focus = sys_focus < 0 ? 0 : (sys_focus >= (int)model.systems.size() ? 0 : sys_focus);
+    systems = std::max(1, std::min(systems, 10));
+    for (int i = 0; i < systems; i++)
+        model.systems.push_back({kNames[i], kCounts[i], ""});
+    if (items) {
+        model.systems.push_back({"bluetooth", 0, bt_sub.empty() ? "not connected" : bt_sub});
+        model.systems.push_back({"settings", 0, "display"});
+    }
+    int count = (int)model.systems.size();
+    model.focus = sys_focus < 0 || sys_focus >= count ? 0 : sys_focus;
+    model.menu_top_px = menu_top * kMenuPitchPx;
 
     if (!tiles_dir.empty()) {
         for (const std::string& p : pngs_in(tiles_dir)) {
@@ -137,9 +266,96 @@ int main(int argc, char** argv)
     model.game_system = game_system;
     model.game_title = game_title;
 
+    InkLayer ink;
+    SettingsView sv;
+    sv.light = light;
+    sv.sheet = sheet ? kOne : 0;
+    sv.sheet_focus = sheet_focus >= 0 ? sheet_focus : (light ? 1 : 0);
+
+    if (!fold_dir.empty()) {
+        SelectorModel menu = model;
+        menu.section_label.clear();
+        menu.game_system.clear();
+        menu.game_title.clear();
+        menu.tile_focus = -1;
+        Buffer sel;
+        Buffer det;
+        Canvas sc(sel.surface());
+        draw_selector(sc, fonts, menu, Pane::Selector, fit, scatter, false);
+        Canvas dc(det.surface());
+        draw_selector(dc, fonts, model, Pane::Details, fit, scatter, true);
+        bool ab = fold_dir == "ab";
+        FoldPlan plan = fold_plan(ab ? FoldDir::ToDetails : FoldDir::ToSelector, model.focus - menu_top,
+                                  detail_title_bottom(fonts, model));
+        int64_t dur = fold_duration(plan);
+        Buffer outb;
+        int n = 0;
+        for (int64_t t = 0;; t += kFrameMs) {
+            int64_t tt = std::min(t, dur);
+            fold_compose(ab ? sel.surface() : det.surface(), ab ? det.surface() : sel.surface(), outb.surface(), plan, tt);
+            if (!write_png(frame_path(frames_dir, n++), outb.surface()))
+                return 1;
+            if (tt >= dur)
+                break;
+        }
+        fprintf(stderr, "blockie-shot: fold %s row %d rings %d %lld ms %d frames\n", fold_dir.c_str(),
+                model.focus - menu_top, plan.maxring + 1, (long long)dur, n);
+        return 0;
+    }
+
+    if (!turn.empty()) {
+        bool push = turn == "push";
+        PageMove pm;
+        int rows = std::min(kMenuVisibleRows, count - menu_top);
+        if (push)
+            pm.push(0, model.focus - menu_top, rows);
+        else
+            pm.pop(0, rows);
+        Buffer outb;
+        Buffer pageb;
+        int n = 0;
+        for (int64_t t = 0;; t += kFrameMs) {
+            PagePhase ph = pm.phase(t);
+            Canvas c(outb.surface());
+            if (ph == PagePhase::PageEnter || ph == PagePhase::PageExit) {
+                SettingsView v = sv;
+                v.chrome.header_dy = pm.header_dy(t);
+                v.chrome.header_alpha = (fx)((int64_t)pm.header_a256(t) * kOne / 256);
+                Canvas pc(pageb.surface());
+                draw_settings(pc, fonts, ink, v, theme());
+                c.fill(outb.surface().rect(), theme().bg);
+                draw_turnstile(pageb.surface(), outb.surface(), pm.page_angle(t), pm.page_a256(t), theme().bg);
+            } else {
+                SelectorModel m = model;
+                m.poses.resize(m.systems.size());
+                for (int i = 0; i < (int)m.systems.size(); i++) {
+                    ItemPose ip = pm.item(t, i - menu_top);
+                    m.poses[i] = {ip.dx, ip.dy, ip.a256};
+                }
+                m.grid_a256 = pm.grid_a256(t);
+                m.bar_a256 = pm.bar_a256(t);
+                if (ph == PagePhase::Idle && push) {
+                    SettingsView v = sv;
+                    draw_settings(c, fonts, ink, v, theme());
+                } else {
+                    draw_selector(c, fonts, m, Pane::Selector, fit, scatter, false);
+                }
+            }
+            if (!write_png(frame_path(frames_dir, n++), outb.surface()))
+                return 1;
+            if (ph == PagePhase::Idle && t > 0)
+                break;
+        }
+        fprintf(stderr, "blockie-shot: turnstile %s %d frames\n", turn.c_str(), n);
+        return 0;
+    }
+
     Buffer buf;
     Canvas c(buf.surface());
-    draw_selector(c, fonts, model, focus, fit, scatter, detail);
+    if (page == "settings")
+        draw_settings(c, fonts, ink, sv, theme());
+    else
+        draw_selector(c, fonts, model, focus, fit, scatter, detail);
 
     if (!write_png(out, buf.surface())) {
         fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());

@@ -1,8 +1,19 @@
 #include "nav.h"
 
+#include <algorithm>
+
 namespace fd {
 
 namespace {
+
+void keep_visible(Nav& n)
+{
+    if (n.focus < n.menu_top)
+        n.menu_top = n.focus;
+    if (n.focus > n.menu_top + kMenuVisibleRows - 1)
+        n.menu_top = n.focus - (kMenuVisibleRows - 1);
+    n.menu_top = std::max(0, n.menu_top);
+}
 
 bool leave_system(Nav& n, NavHost& h)
 {
@@ -20,11 +31,13 @@ bool apply_menu(Nav& n, NavHost& h, PadAction a, bool repeat)
         if (n.focus <= 0)
             return false;
         n.focus--;
+        keep_visible(n);
         return true;
     case PadAction::Down:
         if (n.focus >= count - 1)
             return false;
         n.focus++;
+        keep_visible(n);
         return true;
     case PadAction::Left:
     case PadAction::Back:

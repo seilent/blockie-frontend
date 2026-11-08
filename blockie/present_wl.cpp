@@ -24,6 +24,7 @@ xdg_wm_base_listener g_wm_l{};
 xdg_surface_listener g_surf_l{};
 xdg_toplevel_listener g_top_l{};
 wl_buffer_listener g_buf_l{};
+wl_callback_listener g_frame_l{};
 wl_seat_listener g_seat_l{};
 wl_keyboard_listener g_kbd_l{};
 
@@ -42,7 +43,7 @@ constexpr bool kCore = std::is_same_v<typename P::S, decltype(ref<P>().draw_targ
                        std::is_same_v<decltype(ref<P>().begin_full()), void> &&
                        std::is_same_v<decltype(ref<P>().begin_cover(Rect{})), void> &&
                        std::is_same_v<decltype(ref<P>().begin_frame(int64_t{}, int64_t{})), void> &&
-                       std::is_same_v<decltype(ref<P>().flip()), void> &&
+                       std::is_same_v<decltype(ref<P>().flip()), bool> &&
                        std::is_same_v<decltype(ref<P>().claim()), bool> &&
                        std::is_same_v<decltype(ref<P>().ready()), bool> &&
                        std::is_same_v<decltype(ref<P>().event_fd()), int> &&
@@ -94,6 +95,14 @@ void WaylandPresenter::top_close(void* data, xdg_toplevel*)
 }
 
 void WaylandPresenter::buf_release(void* data, wl_buffer*) { static_cast<Buf*>(data)->busy = false; }
+
+void WaylandPresenter::frame_done(void* data, wl_callback* cb, uint32_t)
+{
+    auto* self = static_cast<WaylandPresenter*>(data);
+    wl_callback_destroy(cb);
+    self->frame_cb_ = nullptr;
+    self->frame_done_ = true;
+}
 
 void WaylandPresenter::seat_caps(void* data, wl_seat*, uint32_t caps)
 {
@@ -337,13 +346,18 @@ int WaylandPresenter::pick_buf()
     return -1;
 }
 
-void WaylandPresenter::flip()
+bool WaylandPresenter::flip()
 {
-    inner_.flip();
     Rect region = (full_ ? kScreen : dmg_).intersect(kScreen);
     int bi = pick_buf();
-    if (bi < 0)
-        bi = 0;
+    if (bi < 0) {
+        owed_[0] = owed_[0].unite(region);
+        owed_[1] = owed_[1].unite(region);
+        dmg_ = {};
+        full_ = false;
+        return false;
+    }
+    inner_.flip();
     Buf& b = buf_[bi];
     Rect paint = region.unite(owed_[bi]).intersect(kScreen);
     if (b.px && !paint.empty())
@@ -361,9 +375,34 @@ void WaylandPresenter::flip()
         wl_display_flush(dpy_);
     dmg_ = {};
     full_ = false;
+    return true;
 }
 
 bool WaylandPresenter::claim() { return pick_buf() >= 0; }
+
+void WaylandPresenter::request_frame()
+{
+    if (!surf_ || frame_cb_)
+        return;
+    frame_cb_ = wl_surface_frame(surf_);
+    g_frame_l.done = frame_done;
+    wl_callback_add_listener(frame_cb_, &g_frame_l, this);
+}
+
+bool WaylandPresenter::take_frame_done()
+{
+    bool d = frame_done_;
+    frame_done_ = false;
+    return d;
+}
+
+void WaylandPresenter::cancel_frame()
+{
+    if (frame_cb_)
+        wl_callback_destroy(frame_cb_);
+    frame_cb_ = nullptr;
+    frame_done_ = false;
+}
 
 bool WaylandPresenter::ready() { return configured_ && !closed_; }
 
@@ -383,6 +422,7 @@ int64_t WaylandPresenter::next_tick(int64_t, int64_t fallback) { return fallback
 
 void WaylandPresenter::stop()
 {
+    cancel_frame();
     for (int i = 0; i < 2; i++) {
         if (buf_[i].wl)
             wl_buffer_destroy(buf_[i].wl);

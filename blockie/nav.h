@@ -31,6 +31,7 @@ struct Nav {
 
     Pane pane = Pane::Selector;
     int focus = 0;
+    int menu_top = 0;
     int tile_focus = 0;
     bool system_view = false;
     int sys_focus = 0;

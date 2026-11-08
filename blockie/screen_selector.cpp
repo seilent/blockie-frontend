@@ -13,7 +13,7 @@ namespace {
 
 constexpr int kLabelX = 512;
 constexpr int kFirstBaseline = 96;
-constexpr int kPitch = 96;
+constexpr int kPitch = kMenuPitchPx;
 constexpr int kSubtitleX = 532;
 constexpr int kSubtitleDrop = 35;
 constexpr int kFocusBarX = 496;
@@ -58,7 +58,7 @@ uint32_t scatter_next(uint32_t& s)
     return s;
 }
 
-void draw_scatter_dots(Canvas& c)
+void draw_scatter_dots(Canvas& c, uint32_t ink)
 {
     Rect sr = c.surface().rect();
     uint32_t s = kScatterSeed;
@@ -67,7 +67,7 @@ void draw_scatter_dots(Canvas& c)
             if (scatter_next(s) % 1000 >= (uint32_t)kScatterPerThousand)
                 continue;
             int a = kScatterAlphaLo + (int)(scatter_next(s) % (kScatterAlphaHi - kScatterAlphaLo + 1));
-            c.blend({x, y, x + kScatterDot, y + kScatterDot}, kWhite, a);
+            c.blend({x, y, x + kScatterDot, y + kScatterDot}, ink, a);
         }
 }
 
@@ -87,28 +87,52 @@ Rect fit_rect(int sw, int sh, int tx, int ty, int side, ArtFit fit)
     return {x, y, x + w, y + h};
 }
 
+std::vector<std::string> title_lines(Fonts& fonts, const std::string& title)
+{
+    TextStyle ts = role::npTitle.style();
+    int avail64 = (kDetailRight - kDetailX) * 64;
+    return wrap_lines(title, avail64, kDetailTitleMaxLines,
+                      [&](const std::string& s) { return (int)fonts.width64(ts, s.c_str()); });
+}
+
+MenuPose pose_of(const SelectorModel& model, int i)
+{
+    if (i >= 0 && i < (int)model.poses.size())
+        return model.poses[i];
+    return {};
+}
+
+}
+
+int detail_title_bottom(Fonts& fonts, const SelectorModel& model)
+{
+    TextStyle ts = role::npTitle.style();
+    int pitch = fonts.ascent(ts.px) + fonts.descent(ts.px);
+    std::vector<std::string> lines = title_lines(fonts, model.game_title);
+    int n = std::max(1, (int)lines.size());
+    return kDetailTitleBaseline + (n - 1) * pitch + fonts.descent(ts.px);
 }
 
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit, bool scatter,
-                   bool detail)
+                   bool detail, const Theme& th)
 {
     bool on = focus_pane == Pane::Selector;
 
-    c.fill(c.surface().rect(), tok::color_bg);
+    c.fill(c.surface().rect(), th.bg);
     if (scatter)
-        draw_scatter_dots(c);
+        draw_scatter_dots(c, th.ink);
 
     fx pane = on ? tok::motion_quickplayAlpha : tok::alpha_full;
-    int tile_alpha = alpha256(pane);
+    int tile_alpha = alpha256(pane) * model.grid_a256 >> 8;
     const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
-    fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, kWhite,
-               alpha256(fx_mul(role::quickplayHeader.alpha, pane)));
+    fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, th.ink,
+               alpha256(fx_mul(role::quickplayHeader.alpha, pane)) * model.grid_a256 >> 8);
     for (int r = 0; r < kGridRows; r++)
         for (int col = 0; col < kGridCols; col++) {
             int x = kGridX + col * (kTileSide + kGridGutter);
             int y = kTileFirstTop + r * kGridRowPitch;
             Rect tr{x, y, x + kTileSide, y + kTileSide};
-            c.blend(tr, tok::color_tile, tile_alpha);
+            c.blend(tr, th.tile, tile_alpha);
             int k = r * kGridCols + col;
             if (k >= (int)model.tiles.size() || model.tiles[k].w <= 0 || model.tiles[k].h <= 0)
                 continue;
@@ -130,49 +154,60 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         int x = kGridX + col * (kTileSide + kGridGutter);
         int y = kTileFirstTop + r * kGridRowPitch;
         Rect tr{x, y, x + kTileSide, y + kTileSide};
-        c.frame_aa(Rect64::of(tr.grow(kTileFocusBorder), Zoom{}), Rect64::of(tr, Zoom{}), kWhite, 256);
+        c.frame_aa(Rect64::of(tr.grow(kTileFocusBorder), Zoom{}), Rect64::of(tr, Zoom{}), th.focus,
+                   model.grid_a256);
     }
 
     if (detail) {
         Rect prev = c.clip();
         Rect sr = c.surface().rect();
         c.set_clip({kDetailX, sr.y0, kDetailRight, sr.y1});
-        fonts.draw(c, role::npArtist.style(), model.game_system.c_str(), x64(kDetailX), kDetailSystemBaseline, kWhite,
+        fonts.draw(c, role::npArtist.style(), model.game_system.c_str(), x64(kDetailX), kDetailSystemBaseline, th.ink,
                    alpha256(role::npArtist.alpha));
         TextStyle ts = role::npTitle.style();
         int title_alpha = alpha256(role::npTitle.alpha);
-        int avail64 = (kDetailRight - kDetailX) * 64;
         int pitch = fonts.ascent(ts.px) + fonts.descent(ts.px);
-        std::vector<std::string> lines = wrap_lines(
-            model.game_title, avail64, kDetailTitleMaxLines,
-            [&](const std::string& s) { return (int)fonts.width64(ts, s.c_str()); });
+        std::vector<std::string> lines = title_lines(fonts, model.game_title);
         for (size_t li = 0; li < lines.size(); li++)
-            fonts.draw(c, ts, lines[li].c_str(), x64(kDetailX), kDetailTitleBaseline + (int)li * pitch, kWhite,
+            fonts.draw(c, ts, lines[li].c_str(), x64(kDetailX), kDetailTitleBaseline + (int)li * pitch, th.ink,
                        title_alpha);
         c.set_clip(prev);
         return;
     }
 
+    TextStyle sub_style = role::homeSubtitle.style();
+    int slot_lo = kFirstBaseline - kPitch / 2;
+    int slot_hi = kFirstBaseline + (kMenuVisibleRows - 1) * kPitch + kPitch / 2;
     int focus_item = on ? model.focus : -1;
     for (int i = 0; i < (int)model.systems.size(); i++) {
-        int baseline = kFirstBaseline + i * kPitch;
-        int label_alpha = alpha256(i == focus_item ? role::homeItem.alpha : tok::type_homeItem_alphaDim);
-        fonts.draw(c, role::homeItem.style(), model.systems[i].name.c_str(), x64(kLabelX), baseline, kWhite,
+        MenuPose ps = pose_of(model, i);
+        int slot = kFirstBaseline + i * kPitch - model.menu_top_px;
+        if (slot <= slot_lo || slot >= slot_hi)
+            continue;
+        int baseline = slot + ps.dy;
+        int label_alpha =
+            alpha256(i == focus_item ? role::homeItem.alpha : tok::type_homeItem_alphaDim) * ps.a256 >> 8;
+        fonts.draw(c, role::homeItem.style(), model.systems[i].name.c_str(), x64(kLabelX + ps.dx), baseline, th.ink,
                    label_alpha);
 
-        char sub[32];
-        count_line(sub, sizeof sub, model.systems[i].games);
-        fonts.draw(c, role::homeSubtitle.style(), sub, x64(kSubtitleX), baseline + kSubtitleDrop, kWhite,
-                   alpha256(role::homeSubtitle.alpha));
+        std::string sub = model.systems[i].subtitle;
+        if (sub.empty()) {
+            char count[32];
+            count_line(count, sizeof count, model.systems[i].games);
+            sub = count;
+        }
+        fonts.draw(c, sub_style, sub.c_str(), x64(kSubtitleX + ps.dx), baseline + kSubtitleDrop, th.ink,
+                   alpha256(role::homeSubtitle.alpha) * ps.a256 >> 8);
 
         if (i == focus_item) {
             int top = baseline - kFocusBarTopInset;
-            c.fill({kFocusBarX, top, kFocusBarX + kFocusBarWidth, top + kFocusBarHeight}, kWhite);
+            c.blend({kFocusBarX + ps.dx, top, kFocusBarX + ps.dx + kFocusBarWidth, top + kFocusBarHeight}, th.focus,
+                    model.bar_a256);
         }
     }
 
     int watermark_alpha = on ? alpha256(role::watermark.alpha) : 0;
-    fonts.draw(c, role::watermark.style(), kWatermarkWord, x64(kWatermarkX), kWatermarkBaseline, kWhite,
+    fonts.draw(c, role::watermark.style(), kWatermarkWord, x64(kWatermarkX), kWatermarkBaseline, th.ink,
                watermark_alpha);
 }
 

@@ -1,0 +1,12 @@
+{
+  "owner": "blockie-set",
+  "keys": {
+    "frontend.theme": {
+      "type": "s",
+      "default": "dark",
+      "enum": ["dark", "light"],
+      "group": "display",
+      "label": "Theme"
+    }
+  }
+}

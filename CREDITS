@@ -22,3 +22,17 @@ Input and navigation follow MicroDAP at cb78c74:
 
 - player/src/core/PadSource.h and DbusPad.cpp: direction repeat timing and the fallback to a still held direction.
 - player/qml/MicroDap/screens/Home.qml: home menu keys, back opening the recent grid, no pane change on a repeat.
+
+Page and menu motion reuse:
+
+- MicroDAP cb78c74, player/qml/MicroDap PageStack.qml, Turnstile.qml and screens/Home.qml: menu exit and entrance,
+  page push and back timings.
+- funeOS d58193469, App::draw_warp in player/ui/app.cpp: turnstile rows and warp.
+
+The Bluetooth page ports logic from funeOS and MicroDAP:
+
+- funeOS fa88b2b85e39137aea02bb3055eb5bbb3ae7760c: player/bt/dbus.cpp, player/bt/core.cpp, player/ui/btpage.cpp,
+  player/ui/btstate.cpp (BlueZ client, pairing agent, row order, filter and state words).
+- MicroDAP cb78c744603f74f0d09b5bc22207c12897e06e65: screens/Bluetooth.qml, screens/PhoneAppPairing.qml,
+  components/Sheet.qml, components/Dialog.qml, src/core/BluezModel.cpp, data/libexec/microdap-bt (search window,
+  device sheet, code dialog).

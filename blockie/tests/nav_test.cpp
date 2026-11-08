@@ -122,6 +122,21 @@ int main()
     }
     {
         FakeHost h;
+        h.n_systems = 9;
+        h.pages = false;
+        Nav n;
+        for (int i = 0; i < 6; i++)
+            nav_apply(n, h, PadAction::Down, true);
+        check(n.focus == 6 && n.menu_top == 1, "the menu scrolls so the focused row stays in the six visible");
+        for (int i = 0; i < 20; i++)
+            nav_apply(n, h, PadAction::Down, true);
+        check(n.focus == 8 && n.menu_top == 3, "the menu stops at the last item");
+        for (int i = 0; i < 20; i++)
+            nav_apply(n, h, PadAction::Up, true);
+        check(n.focus == 0 && n.menu_top == 0, "the menu scrolls back to the top");
+    }
+    {
+        FakeHost h;
         Nav n;
         n.focus = 3;
         nav_apply(n, h, PadAction::Accept, false);

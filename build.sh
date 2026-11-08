@@ -23,8 +23,8 @@ for a in "$@"; do
     case $a in
         DESTDIR=*) destdir=${a#DESTDIR=} ;;
         PREFIX=*) prefix=${a#PREFIX=} ;;
-        all | generic | app | scan | test | scraper | install | shot) target=$a ;;
-        *) echo "build.sh: arg $a, want a target (all generic app scan test scraper install shot) or DESTDIR=/PREFIX=" >&2
+        all | generic | app | scan | test | test-dbus | scraper | install | shot) target=$a ;;
+        *) echo "build.sh: arg $a, want a target (all generic app scan test test-dbus scraper install shot) or DESTDIR=/PREFIX=" >&2
             exit 2 ;;
     esac
 done
@@ -333,7 +333,10 @@ build_app() {
     wayland-scanner client-header "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-client-protocol.h"
     wayland-scanner private-code "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-protocol.c"
     pkg-config --exists libcurl || { echo "build.sh: libcurl not found" >&2; return 1; }
-    local wl_cflags wl_libs xkb_cflags xkb_libs curl_cflags curl_libs
+    pkg-config --exists dbus-1 || { echo "build.sh: dbus-1 not found" >&2; return 1; }
+    local wl_cflags wl_libs xkb_cflags xkb_libs curl_cflags curl_libs dbus_cflags dbus_libs
+    dbus_cflags=$(pkg-config --cflags dbus-1)
+    dbus_libs=$(pkg-config --libs dbus-1)
     wl_cflags=$(pkg-config --cflags wayland-client)
     wl_libs=$(pkg-config --libs wayland-client)
     curl_cflags=$(pkg-config --cflags libcurl)
@@ -360,6 +363,16 @@ build_app() {
     done < <(generic_srcs)
     pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
     pool "$appobj/text_wrap.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
+    pool "$appobj/theme.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/theme.cpp"
+    pool "$appobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
+    pool "$appobj/screen_settings.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_settings.cpp"
+    pool "$appobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
+    pool "$appobj/pagemove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/pagemove.cpp"
+    pool "$appobj/bus.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bus.cpp"
+    pool "$appobj/theme_setting.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/theme_setting.cpp"
+    pool "$appobj/bt.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bt.cpp"
+    pool "$appobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
+    pool "$appobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
@@ -375,10 +388,13 @@ build_app() {
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/text_wrap.o" "$appobj/library.o" "$appobj/image.o" \
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
+        "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
+        "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
+        "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/launch.o" "$appobj/scraper.o" \
         "$appobj/present_wl.o" "$appobj/main.o" \
-        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs \
+        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
@@ -517,6 +533,65 @@ build_input_test() {
     "$out/input/blockie-repeat-test" && "$out/input/blockie-nav-test"
 }
 
+build_motion_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    local s
+    for s in core/curves.cpp gfx/warp.cpp gfx/canvas.cpp; do
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $appcflags "$root/$s"
+    done
+    pool "$testobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
+    pool "$testobj/pagemove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/pagemove.cpp"
+    pool "$testobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
+    pool "$testobj/theme.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/theme.cpp"
+    pool "$testobj/fold_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/fold_test.cpp"
+    pool "$testobj/pagemove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/pagemove_test.cpp"
+    pool "$testobj/ink_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/ink_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/motion"
+    "$cxx" "$testobj/fold.o" "$testobj/fold_test.o" $appldflags -lpthread -lm -o "$out/motion/blockie-fold-test" || return 1
+    "$cxx" "$testobj/pagemove.o" "$testobj/pagemove_test.o" "$genobj/core_curves.cpp.o" "$genobj/gfx_warp.cpp.o" \
+        "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm -o "$out/motion/blockie-pagemove-test" || return 1
+    "$cxx" "$testobj/ink.o" "$testobj/theme.o" "$testobj/ink_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags \
+        -lpthread -lm -o "$out/motion/blockie-ink-test" || return 1
+    echo "build.sh: $out/motion"
+    "$out/motion/blockie-fold-test" && "$out/motion/blockie-pagemove-test" && "$out/motion/blockie-ink-test"
+}
+
+build_bt_model_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
+    pool "$testobj/bt_model_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/bt_model_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/bt"
+    "$cxx" "$testobj/bt_model.o" "$testobj/bt_model_test.o" $appldflags -o "$out/bt/blockie-bt-model-test.tmp" || return 1
+    mv "$out/bt/blockie-bt-model-test.tmp" "$out/bt/blockie-bt-model-test"
+    echo "build.sh: $out/bt/blockie-bt-model-test"
+    "$out/bt/blockie-bt-model-test"
+}
+
+build_test_dbus() {
+    toolver=$("$cxx" --version | head -n 1)
+    pkg-config --exists dbus-1 || { echo "build.sh: dbus-1 not found" >&2; return 1; }
+    command -v dbus-daemon > /dev/null || { echo "build.sh: dbus-daemon not found" >&2; return 1; }
+    local dbus_cflags dbus_libs
+    dbus_cflags=$(pkg-config --cflags dbus-1)
+    dbus_libs=$(pkg-config --libs dbus-1)
+    pool "$testobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
+    pool "$testobj/bt.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bt.cpp"
+    pool "$testobj/bus.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bus.cpp"
+    pool "$testobj/bt_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/tests/bt_dbus_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/btdbus"
+    "$cxx" "$testobj/bt_model.o" "$testobj/bt.o" "$testobj/bus.o" "$testobj/bt_dbus_test.o" $appldflags $dbus_libs \
+        -o "$out/btdbus/blockie-bt-dbus-test.tmp" || return 1
+    mv "$out/btdbus/blockie-bt-dbus-test.tmp" "$out/btdbus/blockie-bt-dbus-test"
+    echo "build.sh: $out/btdbus/blockie-bt-dbus-test"
+    python3 "$root/blockie/tests/fake_bluez.py" "$out/btdbus/blockie-bt-dbus-test"
+}
+
 build_wrap_test() {
     pool "$testobj/text_wrap.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$testobj/text_wrap_test.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/tests/text_wrap_test.cpp"
@@ -541,6 +616,13 @@ build_shot() {
     done < <(generic_srcs)
     pool "$shotobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
     pool "$shotobj/text_wrap.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
+    pool "$shotobj/theme.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/theme.cpp"
+    pool "$shotobj/ink.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ink.cpp"
+    pool "$shotobj/screen_settings.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_settings.cpp"
+    pool "$shotobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
+    pool "$shotobj/pagemove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/pagemove.cpp"
+    pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
+    pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
     drain
@@ -548,7 +630,9 @@ build_shot() {
     mkdir -p "$out/shot"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/image.o" "$shotobj/shot.o" \
+    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/theme.o" "$shotobj/ink.o" \
+        "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/pagemove.o" "$shotobj/bt_model.o" \
+        "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
@@ -562,6 +646,7 @@ build_install() {
     install -Dm644 "$root/dist/blockie-frontend.service" "$destdir$prefix/lib/systemd/user/blockie-frontend.service" ||
         return 1
     install -Dm644 "$root/LICENSE" "$destdir$prefix/share/licenses/blockie-frontend/LICENSE" || return 1
+    install -Dm644 "$root/dist/schema/20-frontend.json" "$destdir$prefix/share/blockie/schema.d/20-frontend.json" || return 1
     local f
     for f in selawkl.ttf selawk.ttf selawkb.ttf selawksl.ttf; do
         install -Dm644 "$fonts_dir/$f" "$destdir$prefix/share/blockie/fonts/$f" || return 1
@@ -584,7 +669,8 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_input_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_input_test && build_motion_test && build_bt_model_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0

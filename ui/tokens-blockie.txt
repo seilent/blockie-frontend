@@ -205,6 +205,12 @@ color.tilePressed #2A2A2A rgb
 color.border #2C2C2C rgb
 color.pageHeader #FFFFFF rgb
 color.pivotInactive #FFFFFF rgb
+color.light.bg #FFFFFF rgb
+color.light.bgElevated #F8F8F8 rgb
+color.light.tile #F0F0F0 rgb
+color.light.tilePressed #E6E6E6 rgb
+color.light.border #E4E4E4 rgb
+color.light.ink #111111 rgb
 alpha.full 1.0 alpha
 alpha.high 0.85 alpha
 alpha.mid 0.6 alpha

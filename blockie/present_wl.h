@@ -46,8 +46,12 @@ public:
     void begin_full();
     void begin_cover(Rect r);
     void begin_frame(int64_t now, int64_t target);
-    void flip();
+    bool flip();
     bool claim();
+    void request_frame();
+    bool take_frame_done();
+    bool frame_pending() const { return frame_cb_ != nullptr; }
+    void cancel_frame();
     bool ready();
     bool take_done(PanDone& d);
     int event_fd();
@@ -86,6 +90,7 @@ private:
     static void top_configure(void* data, xdg_toplevel* top, int32_t w, int32_t h, wl_array* states);
     static void top_close(void* data, xdg_toplevel* top);
     static void buf_release(void* data, wl_buffer* wl);
+    static void frame_done(void* data, wl_callback* cb, uint32_t time);
     static void seat_caps(void* data, wl_seat* seat, uint32_t caps);
     static void seat_name(void* data, wl_seat* seat, const char* name);
     static void kb_keymap(void* data, wl_keyboard* kb, uint32_t format, int fd, uint32_t size);
@@ -119,6 +124,8 @@ private:
     size_t map_len_ = 0;
     int shm_fd_ = -1;
     Buf buf_[2];
+    wl_callback* frame_cb_ = nullptr;
+    bool frame_done_ = false;
     int w_ = kPortraitW;
     int h_ = kPortraitH;
     int stride_ = kPortraitW;

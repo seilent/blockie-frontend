@@ -6,12 +6,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -30,20 +32,50 @@
 #include <linux/input-event-codes.h>
 #endif
 
+#include "../core/curves.h"
+#include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
+#include "../ui/roles.h"
+#include "bt.h"
+#include "bus.h"
+#include "fold.h"
 #include "image.h"
+#include "ink.h"
 #include "input_pad.h"
 #include "launch.h"
 #include "library.h"
 #include "nav.h"
+#include "pagemove.h"
 #include "present_wl.h"
 #include "repeat.h"
+#include "screen_bt.h"
 #include "scraper.h"
 #include "screen_selector.h"
+#include "screen_settings.h"
+#include "theme.h"
+#include "theme_setting.h"
 
 namespace fd {
 
 namespace {
+
+enum class Motion { None, Fold, Page };
+
+constexpr int kFrameWatchdogMs = 100;
+constexpr int kThemeWaitMs = 300;
+
+void copy_surface(const Surface& src, const Surface& dst)
+{
+    Rect r = src.rect().intersect(dst.rect());
+    if constexpr (std::is_same_v<LiveL, Rows>) {
+        for (int y = r.y0; y < r.y1; y++)
+            std::memcpy(dst.row(y) + r.x0, src.row(y) + r.x0, (size_t)(r.x1 - r.x0) * sizeof(Pix));
+    } else {
+        for (int y = r.y0; y < r.y1; y++)
+            for (int x = r.x0; x < r.x1; x++)
+                dst.at(x, y) = src.at(x, y);
+    }
+}
 
 int64_t now_ms()
 {
@@ -82,6 +114,10 @@ struct ArtDrop {
 class FnHost : public NavHost {
 public:
     std::function<int()> count;
+    std::function<MenuKind(int)> kind;
+    std::function<void(Screen)> push_fn;
+    std::function<void(Screen)> pop_fn;
+    std::function<bool(Screen, PadAction, bool)> page_fn;
     std::function<int()> recent;
     std::function<int(int)> enter;
     std::function<void()> leave;
@@ -90,16 +126,16 @@ public:
     std::function<void(int)> play_game;
 
     int menu_count() const override { return count(); }
-    MenuKind menu_kind(int) const override { return MenuKind::System; }
+    MenuKind menu_kind(int i) const override { return kind(i); }
     int recent_count() const override { return recent(); }
     int enter_system(int sys) override { return enter(sys); }
     void exit_system() override { leave(); }
     void system_moved(bool scrolled) override { moved(scrolled); }
     void launch_recent(int i) override { play_recent(i); }
     void launch_system_game(int i) override { play_game(i); }
-    void push(Screen) override {}
-    void pop(Screen) override {}
-    bool page_action(Screen, PadAction, bool) override { return true; }
+    void push(Screen sc) override { push_fn(sc); }
+    void pop(Screen sc) override { pop_fn(sc); }
+    bool page_action(Screen sc, PadAction a, bool repeat) override { return page_fn(sc, a, repeat); }
 };
 
 }
@@ -113,12 +149,32 @@ static int run()
         return 1;
     }
 
+    Bus bus;
+    ThemeSetting theme_set;
+    theme_set.on_value = [](bool light) { set_theme_light(light); };
+    theme_set.attach(bus);
     int64_t t = now_ms();
+    if (bus.open(t)) {
+        int64_t until = t + kThemeWaitMs;
+        while (!theme_set.answered() && now_ms() < until && bus.connected()) {
+            struct pollfd bf;
+            bf.fd = bus.fd();
+            bf.events = POLLIN | (bus.wants_write() ? POLLOUT : 0);
+            bf.revents = 0;
+            if (!bus.data_remains())
+                poll(&bf, 1, (int)std::max<int64_t>(0, until - now_ms()));
+            bus.pump();
+        }
+    }
+    std::fprintf(stderr, "blockie-frontend: theme %s\n", theme().light ? "light" : "dark");
+    Bt bt(bus);
+    bt.start();
+    t = now_ms();
     p.begin_frame(t, p.show_at(t));
     p.begin_full();
     WaylandPresenter::S s = p.draw_target();
     for (int y = 0; y < kPortraitH; y++)
-        fill_px(s.row(y), 0x101418u, kPortraitW);
+        fill_px(s.row(y), theme().bg, kPortraitW);
     p.present(kScreen);
     p.flip();
 
@@ -131,18 +187,25 @@ static int run()
     if (!fonts.open(font_dir, {}))
         std::fprintf(stderr, "blockie-frontend: fonts not found in %s\n", font_dir.c_str());
 
+    GlyphCache glyphs;
+    BtPage btp(fonts, glyphs);
+    btp.set_send([&](const BtCmd& cmd) { bt.run(cmd, now_ms()); });
+    uint32_t bt_seen = bt.serial();
+
     Library lib;
     SelectorModel model;
     model.focus = 0;
     std::vector<Game> recent;
     std::vector<std::string> sys_ids;
+    std::vector<MenuKind> kinds;
     std::vector<ScrapeJob> jobs;
     if (lib.open("")) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
         for (const auto& sw : lib.systems_with_games()) {
-            model.systems.push_back({sw.first.name, sw.second});
+            model.systems.push_back({sw.first.name, sw.second, ""});
             sys_ids.push_back(sw.first.id);
+            kinds.push_back(MenuKind::System);
         }
         recent = lib.recent_games(8);
         for (size_t i = 0; i < recent.size(); i++) {
@@ -171,6 +234,12 @@ static int run()
         }
     }
 
+    int bt_item = (int)model.systems.size();
+    model.systems.push_back({"bluetooth", 0, bt_subtitle(bt.state(), now_ms())});
+    kinds.push_back(MenuKind::Bluetooth);
+    model.systems.push_back({"settings", 0, "display"});
+    kinds.push_back(MenuKind::Settings);
+
     const char* denv = std::getenv("BLOCKIE_DATA");
     std::string data_root = denv && *denv ? denv : "/var/lib/blockie/data";
     while (data_root.size() > 1 && data_root.back() == '/')
@@ -191,6 +260,23 @@ static int run()
     int& sys_focus = nav.sys_focus;
     int& sys_scroll = nav.sys_scroll;
     Repeat repeat;
+    SettingsPage settings_page;
+    settings_page.reset(theme().light);
+    InkLayer ink;
+    Buffer from_buf;
+    Buffer to_buf;
+    Buffer page_buf;
+    Motion motion = Motion::None;
+    FoldPlan fold;
+    int64_t fold_t0 = 0;
+    bool to_dirty = false;
+    PageMove pm;
+    Screen moving_page = Screen::Home;
+    int64_t frame_req_at = -1;
+    bool drop_budget = false;
+    int scroll_from = 0;
+    int scroll_to = 0;
+    int64_t scroll_t0 = -1000000000;
     std::string sys_name;
     std::unordered_map<int64_t, Image> cover_cache;
     Launcher::Child child;
@@ -241,20 +327,137 @@ static int run()
             cover_cache[g.id] = img;
         return img;
     };
-    auto redraw = [&]() {
-        int64_t tt = now_ms();
-        p.begin_frame(tt, p.show_at(tt));
-        p.begin_full();
-        Canvas c(p.draw_target());
-        fonts.begin_frame(-1);
+    auto scroll_px = [&](int64_t now) {
+        int d = fx_round(tok::motion_scroll);
+        int64_t e = now - scroll_t0;
+        if (e >= d || e < 0)
+            return scroll_to;
+        fx k = curve(Curve::EaseIn, (fx)(e * kOne / d));
+        return scroll_from + (int)(((int64_t)(scroll_to - scroll_from) * k) >> kFxBits);
+    };
+    auto scrolling = [&](int64_t now) { return now - scroll_t0 < fx_round(tok::motion_scroll); };
+    auto visible_rows = [&]() {
+        return std::min(kMenuVisibleRows, std::max(0, (int)model.systems.size() - nav.menu_top));
+    };
+    auto sync_model = [&](int64_t now) {
         model.focus = nav.focus;
         if (!system_view)
             model.tile_focus = pane == Pane::Details ? tile_focus : -1;
-        draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view);
-        p.present(kScreen);
-        p.flip();
+        int target = nav.menu_top * kMenuPitchPx;
+        if (target != scroll_to) {
+            scroll_from = scroll_px(now);
+            scroll_to = target;
+            scroll_t0 = p.activated() && child.pid <= 0 ? now : -1000000000;
+        }
+        model.menu_top_px = scroll_px(now);
+        model.poses.clear();
+        model.grid_a256 = 256;
+        model.bar_a256 = 256;
+        if (motion == Motion::Page) {
+            PagePhase ph = pm.phase(now);
+            if (ph == PagePhase::HomeExit || ph == PagePhase::HomeEnter) {
+                model.poses.resize(model.systems.size());
+                for (int i = 0; i < (int)model.systems.size(); i++) {
+                    ItemPose ip = pm.item(now, i - nav.menu_top);
+                    model.poses[i] = {ip.dx, ip.dy, ip.a256};
+                }
+                model.grid_a256 = pm.grid_a256(now);
+                model.bar_a256 = pm.bar_a256(now);
+            }
+        }
     };
-    redraw();
+    auto render_home = [&](Canvas& c) { draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view, theme()); };
+    auto render_page = [&](Canvas& c, Screen sc, int64_t now, PageChrome ch) {
+        if (sc == Screen::Bluetooth) {
+            btp.draw(c, ink, now, ch);
+            return;
+        }
+        if (sc == Screen::Settings) {
+            SettingsView v = settings_page.view(now);
+            v.chrome = ch;
+            draw_settings(c, fonts, ink, v, theme());
+        }
+    };
+    auto animating = [&](int64_t now) {
+        if (motion == Motion::Fold && now - fold_t0 < fold_duration(fold))
+            return true;
+        if (motion == Motion::Page && pm.running(now))
+            return true;
+        if (nav.top() == Screen::Settings && settings_page.animating(now))
+            return true;
+        if (nav.top() == Screen::Bluetooth && btp.animating(now))
+            return true;
+        return nav.top() == Screen::Home && scrolling(now);
+    };
+    auto land = [&](const char* why) {
+        if (motion == Motion::None)
+            return;
+        std::fprintf(stderr, "blockie-frontend: motion landed (%s)\n", why);
+        motion = Motion::None;
+        pm.land();
+        if (p.frame_pending())
+            p.cancel_frame();
+        frame_req_at = -1;
+        need_redraw = true;
+    };
+    auto frame = [&](int64_t now) -> bool {
+        p.begin_frame(now, p.show_at(now));
+        p.begin_full();
+        Surface dst = p.draw_target();
+        Canvas c(dst);
+        fonts.begin_frame(-1);
+        sync_model(now);
+        if (motion == Motion::Fold) {
+            if (to_dirty) {
+                Canvas tc(to_buf.surface());
+                render_home(tc);
+                to_dirty = false;
+            }
+            fold_compose(from_buf.surface(), to_buf.surface(), dst, fold, now - fold_t0);
+        } else if (motion == Motion::Page && (pm.phase(now) == PagePhase::HomeExit || pm.phase(now) == PagePhase::HomeEnter)) {
+            render_home(c);
+        } else if (motion == Motion::Page && (pm.phase(now) == PagePhase::PageEnter || pm.phase(now) == PagePhase::PageExit)) {
+            PageChrome ch;
+            ch.header_dy = pm.header_dy(now);
+            ch.header_alpha = (fx)((int64_t)pm.header_a256(now) * kOne / 256);
+            Canvas pc(page_buf.surface());
+            render_page(pc, moving_page, now, ch);
+            c.fill(dst.rect(), theme().bg);
+            draw_turnstile(page_buf.surface(), dst, pm.page_angle(now), pm.page_a256(now), theme().bg);
+        } else if (nav.top() == Screen::Home) {
+            render_home(c);
+        } else {
+            render_page(c, nav.top(), now, PageChrome{});
+        }
+        p.present(kScreen);
+        bool more = animating(now);
+        if (more)
+            p.request_frame();
+        bool ok = p.flip();
+        if (ok && more)
+            frame_req_at = now;
+        if (ok && motion != Motion::None)
+            drop_budget = true;
+        if (!ok && more)
+            p.cancel_frame();
+        return ok;
+    };
+    auto can_animate = [&]() { return p.activated() && child.pid <= 0; };
+    auto start_fold = [&](FoldDir dir, int title_bottom, int64_t now) {
+        if (!can_animate())
+            return;
+        copy_surface(p.draw_target(), from_buf.surface());
+        fold = fold_plan(dir, nav.focus - nav.menu_top, title_bottom);
+        fold_t0 = now;
+        to_dirty = true;
+        motion = Motion::Fold;
+    };
+    if (can_animate()) {
+        pm.enter(now_ms(), visible_rows(), fx_round(tok::motion_homeEnterStagger));
+        motion = Motion::Page;
+        moving_page = Screen::Home;
+    }
+    need_redraw = true;
 
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
@@ -284,6 +487,7 @@ static int run()
         child = ch;
         child_game_id = g.id;
         repeat.release_all();
+        bt.set_game_running(true, now_ms());
         scrape_pause.store(true);
         std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
     };
@@ -304,6 +508,7 @@ static int run()
             std::fprintf(stderr, "blockie-frontend: game exited (%s)\n", ran ? "ran" : "not launched");
             child = {};
             child_game_id = -1;
+            bt.set_game_running(false, now_ms());
             scrape_pause.store(false);
             if (work_evfd >= 0) {
                 uint64_t one = 1;
@@ -389,6 +594,43 @@ static int run()
     };
     FnHost host;
     host.count = [&]() { return (int)model.systems.size(); };
+    host.kind = [&](int i) { return i >= 0 && i < (int)kinds.size() ? kinds[i] : MenuKind::System; };
+    host.push_fn = [&](Screen sc) {
+        int64_t now = now_ms();
+        if (sc == Screen::Settings)
+            settings_page.reset(theme().light);
+        if (sc == Screen::Bluetooth) {
+            btp.open(now);
+            bt.set_page_open(true, now);
+        }
+        repeat.rearm(now);
+        if (!can_animate())
+            return;
+        pm.push(now, nav.focus - nav.menu_top, visible_rows());
+        motion = Motion::Page;
+        moving_page = sc;
+    };
+    host.pop_fn = [&](Screen sc) {
+        int64_t now = now_ms();
+        repeat.rearm(now);
+        if (!can_animate())
+            return;
+        pm.pop(now, visible_rows());
+        motion = Motion::Page;
+        moving_page = sc;
+    };
+    host.page_fn = [&](Screen sc, PadAction a, bool rep) {
+        int64_t now = now_ms();
+        if (sc == Screen::Settings)
+            return settings_page.action(a, rep, now);
+        if (btp.action(a, rep, now) != BtPage::Act::Pop) {
+            need_redraw = true;
+            return false;
+        }
+        bt.set_page_open(false, now);
+        btp.close();
+        return true;
+    };
     host.recent = [&]() { return (int)recent.size(); };
     host.enter = [&](int sys) -> int {
         if (sys < 0 || sys >= (int)sys_ids.size())
@@ -403,12 +645,17 @@ static int run()
         sys_epoch++;
         model.tiles.swap(recent_hold);
         refresh_system(true);
-        repeat.rearm(now_ms());
+        int64_t now = now_ms();
+        repeat.rearm(now);
+        start_fold(FoldDir::ToDetails, detail_title_bottom(fonts, model), now);
         return (int)sysgames.size();
     };
     host.leave = [&]() {
+        int title_bottom = detail_title_bottom(fonts, model);
         exit_system();
-        repeat.rearm(now_ms());
+        int64_t now = now_ms();
+        repeat.rearm(now);
+        start_fold(FoldDir::ToSelector, title_bottom, now);
     };
     host.moved = [&](bool scrolled) { refresh_system(scrolled); };
     host.play_recent = [&](int i) {
@@ -420,9 +667,23 @@ static int run()
             try_launch(sysgames[i]);
     };
     auto apply = [&](PadAction a, bool rep) {
+        land("input");
         if (nav_apply(nav, host, a, rep))
             need_redraw = true;
     };
+    theme_set.on_value = [&](bool light) {
+        settings_page.set_light(light);
+        if (theme().light != light) {
+            set_theme_light(light);
+            to_dirty = true;
+        }
+        need_redraw = true;
+    };
+    theme_set.on_fail = [&]() {
+        settings_page.set_light(theme().light);
+        need_redraw = true;
+    };
+    settings_page.on_theme = [&](bool light) { theme_set.set(light, now_ms()); };
     auto press = [&](PadAction a, uint8_t src, int64_t now) {
         apply(a, false);
         if (is_direction(a) && child.pid <= 0)
@@ -543,14 +804,35 @@ static int run()
 
     wl_display* d = p.display();
     int wl_fd = p.event_fd();
+    std::vector<ArtDrop> pending_drops;
     while (p.ready()) {
         while (wl_display_prepare_read(d) != 0)
             wl_display_dispatch_pending(d);
-        wl_display_flush(d);
+        bool wl_blocked = wl_display_flush(d) < 0 && errno == EAGAIN;
+        bus.pump();
+        bus.tick(now_ms());
+        {
+            int64_t bnow = now_ms();
+            bt.tick(bnow);
+            if (bt.serial() != bt_seen) {
+                bt_seen = bt.serial();
+                btp.set_model(bt.state(), bnow);
+                if (nav.top() == Screen::Bluetooth)
+                    need_redraw = true;
+            }
+            std::string sub = bt_subtitle(bt.state(), bnow);
+            if (bt_item < (int)model.systems.size() && model.systems[bt_item].subtitle != sub) {
+                model.systems[bt_item].subtitle = sub;
+                if (nav.top() == Screen::Home)
+                    need_redraw = true;
+            }
+            if (nav.top() == Screen::Bluetooth && btp.dirty(bnow))
+                need_redraw = true;
+        }
 
-        struct pollfd fds[4];
+        struct pollfd fds[5];
         fds[0].fd = wl_fd;
-        fds[0].events = POLLIN;
+        fds[0].events = POLLIN | (wl_blocked ? POLLOUT : 0);
         fds[0].revents = 0;
         fds[1].fd = sfd;
         fds[1].events = POLLIN;
@@ -572,10 +854,33 @@ static int run()
             fds[ai].revents = 0;
             nfds++;
         }
+        int bi = -1;
+        if (bus.fd() >= 0) {
+            bi = nfds;
+            fds[bi].fd = bus.fd();
+            fds[bi].events = POLLIN | (bus.wants_write() ? POLLOUT : 0);
+            fds[bi].revents = 0;
+            nfds++;
+        }
+        int64_t pnow = now_ms();
         int timeout = -1;
-        int64_t deadline = repeat.deadline();
-        if (deadline >= 0)
-            timeout = (int)std::max<int64_t>(0, deadline - now_ms());
+        auto until = [&](int64_t when) {
+            if (when < 0)
+                return;
+            int ms = (int)std::max<int64_t>(0, when - pnow);
+            timeout = timeout < 0 ? ms : std::min(timeout, ms);
+        };
+        until(repeat.deadline());
+        until(bus.deadline());
+        until(bt.deadline());
+        until(bt_tick_at(bt.state(), pnow));
+        if (nav.top() == Screen::Bluetooth)
+            until(btp.deadline(pnow));
+        if (frame_req_at >= 0)
+            until(frame_req_at + kFrameWatchdogMs);
+        bool want_frame = child.pid <= 0 && (need_redraw || (animating(pnow) && !p.frame_pending()));
+        if ((want_frame && p.claim()) || bus.data_remains() || (motion == Motion::None && !pending_drops.empty()))
+            timeout = 0;
         int pr = poll(fds, nfds, timeout);
         if (pr < 0) {
             wl_display_cancel_read(d);
@@ -589,6 +894,8 @@ static int run()
         } else {
             wl_display_cancel_read(d);
         }
+        if (bi >= 0 && (fds[bi].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR)))
+            bus.pump();
         if (wl_display_dispatch_pending(d) < 0)
             break;
 
@@ -629,10 +936,21 @@ static int run()
             uint64_t cnt;
             while (read(art_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
             }
-            std::vector<ArtDrop> drops;
             {
                 std::lock_guard<std::mutex> lk(art_mutex);
-                drops.swap(art_drops);
+                for (ArtDrop& a : art_drops)
+                    pending_drops.push_back(std::move(a));
+                art_drops.clear();
+            }
+        }
+        if (!pending_drops.empty() && (motion == Motion::None || drop_budget)) {
+            std::vector<ArtDrop> drops;
+            if (motion == Motion::None) {
+                drops.swap(pending_drops);
+            } else {
+                drop_budget = false;
+                drops.push_back(std::move(pending_drops.front()));
+                pending_drops.erase(pending_drops.begin());
             }
             for (const ArtDrop& drp : drops) {
                 if (drp.epoch == 0) {
@@ -683,13 +1001,46 @@ static int run()
                 apply(ra, true);
         }
 
-        if (need_redraw) {
-            redraw();
+        int64_t fnow = now_ms();
+        if (p.take_frame_done())
+            frame_req_at = -1;
+        if (!can_animate()) {
+            land(child.pid > 0 ? "child" : "hidden");
+            settings_page.land();
+            scroll_t0 = -1000000000;
+        }
+        if (frame_req_at >= 0 && fnow - frame_req_at > kFrameWatchdogMs) {
+            p.cancel_frame();
+            frame_req_at = -1;
+            land("watchdog");
+            settings_page.land();
+            scroll_t0 = -1000000000;
+            need_redraw = true;
+        }
+        if (motion == Motion::Fold && fnow - fold_t0 >= fold_duration(fold)) {
+            motion = Motion::None;
+            need_redraw = true;
+        }
+        if (motion == Motion::Page && !pm.running(fnow)) {
+            motion = Motion::None;
+            need_redraw = true;
+        }
+        if (motion == Motion::Fold && need_redraw) {
+            to_dirty = true;
             need_redraw = false;
+        }
+        if (motion != Motion::None && need_redraw)
+            need_redraw = false;
+        bool anim = animating(fnow);
+        if ((need_redraw || (anim && !p.frame_pending())) && child.pid <= 0 && p.claim()) {
+            if (frame(fnow))
+                need_redraw = false;
         }
     }
     if (child.pid > 0)
         kill(child.pid, SIGTERM);
+    bt.shutdown(now_ms());
+    bus.pump();
     scrape_stop.store(true);
     if (work_evfd >= 0) {
         uint64_t one = 1;
