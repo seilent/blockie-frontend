@@ -228,17 +228,14 @@ int main()
     }
 
     {
-        int present_total = 0;
-        for (auto& s : lib.systems_with_games())
-            present_total += s.second;
-        check((int)lib.recent_games(500).size() == present_total, "recent_games returns every present game");
+        check(lib.recent_games(500).empty(), "recent_games is empty before any game is played");
         auto gall = lib.games("gba");
         if (gall.size() >= 2) {
             int64_t a = gall[0].id, b = gall[1].id;
             lib.mark_played(a, 100);
             lib.mark_played(b, 200);
             auto rec = lib.recent_games(500);
-            check(rec.size() >= 2 && rec[0].id == b && rec[1].id == a, "played games lead, most recent first");
+            check(rec.size() == 2 && rec[0].id == b && rec[1].id == a, "recent_games lists only played games, most recent first");
             auto one = lib.recent_games(1);
             check(one.size() == 1 && one[0].id == b, "recent_games honors the limit");
         } else {

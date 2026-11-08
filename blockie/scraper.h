@@ -37,6 +37,9 @@ public:
                    const std::string& name, ArtType type);
     void scrape_game(const Game& g, const std::string& libretro_folder);
     std::string resolve_name(const std::string& system_id, const std::string& rompath);
+    std::string cached_name(const std::string& system_id, const std::string& rompath);
+    std::string record_local(const Game& g, ArtType type);
+    int sweep_local(ArtType type);
 
     static std::string url_for(const std::string& libretro_folder, const std::string& name, ArtType type);
     static std::string local_path(const std::string& data_root, const std::string& system_id,

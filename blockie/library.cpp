@@ -414,13 +414,13 @@ std::vector<Game> Library::games(const std::string& system_id)
 std::vector<Game> Library::recent_games(int limit)
 {
     std::vector<Game> out;
-    if (limit <= 0)
+    if (limit <= 0 || !db_)
         return out;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(db_,
                        "SELECT id, system_id, name, rompath_abs, is_multidisc, m3u_path, present"
-                       " FROM game WHERE present=1"
-                       " ORDER BY last_played IS NULL, last_played DESC, added_at DESC, id DESC LIMIT ?;",
+                       " FROM game WHERE present=1 AND last_played IS NOT NULL"
+                       " ORDER BY last_played DESC, id DESC LIMIT ?;",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, limit);
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -483,6 +483,18 @@ std::vector<MetaField> Library::meta(int64_t game_id)
     }
     sqlite3_finalize(st);
     return out;
+}
+
+void Library::begin()
+{
+    if (db_)
+        sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr);
+}
+
+void Library::commit()
+{
+    if (db_)
+        sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);
 }
 
 void Library::set_media(int64_t game_id, const std::string& type, const std::string& path, const std::string& source)

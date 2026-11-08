@@ -634,6 +634,58 @@ std::string Scraper::resolve_name(const std::string& system_id, const std::strin
     return name;
 }
 
+std::string Scraper::cached_name(const std::string& system_id, const std::string& rompath)
+{
+    if (rompath.empty() || !is_cartridge(system_id))
+        return "";
+    struct stat sb;
+    if (stat(rompath.c_str(), &sb) != 0)
+        return "";
+    std::string name;
+    if (!lib_.resolve_get(rompath, (int64_t)sb.st_size, (int64_t)sb.st_mtime, kDbEpoch, name))
+        return "";
+    return name;
+}
+
+std::string Scraper::record_local(const Game& g, ArtType type)
+{
+    std::string resolved = cached_name(g.system_id, g.rompath_abs);
+    const std::string* names[] = {&resolved, &g.name};
+    for (const std::string* name : names) {
+        if (name->empty())
+            continue;
+        std::string path = local_path(data_root_, g.system_id, *name, type);
+        if (file_exists(path)) {
+            lib_.set_media(g.id, dir_name(type), path, "local");
+            lib_.neg_clear(neg_key(g.system_id, type, *name));
+            return path;
+        }
+    }
+    return "";
+}
+
+int Scraper::sweep_local(ArtType type)
+{
+    int n = 0;
+    std::string want = dir_name(type);
+    lib_.begin();
+    for (const SystemCfg& sys : lib_.config())
+        for (const Game& g : lib_.games(sys.id)) {
+            if (!g.present)
+                continue;
+            bool have = false;
+            for (const MediaRef& m : lib_.media(g.id))
+                if (m.type == want && file_exists(m.path)) {
+                    have = true;
+                    break;
+                }
+            if (!have && !record_local(g, type).empty())
+                n++;
+        }
+    lib_.commit();
+    return n;
+}
+
 ArtOutcome Scraper::art(int64_t game_id, const std::string& system_id, const std::string& libretro_folder,
                         const std::string& name, ArtType type)
 {

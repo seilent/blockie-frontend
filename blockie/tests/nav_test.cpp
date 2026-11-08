@@ -71,6 +71,15 @@ int main()
 {
     {
         FakeHost h;
+        h.n_recent = 0;
+        Nav n;
+        check(!nav_apply(n, h, PadAction::Left, false) && n.pane == Pane::Selector,
+              "left from the menu does nothing while recent is empty");
+        check(!nav_apply(n, h, PadAction::Back, false) && n.pane == Pane::Selector,
+              "back on the menu does nothing while recent is empty");
+    }
+    {
+        FakeHost h;
         Nav n;
         check(h.menu_count() == 4 && h.menu_kind(2) == MenuKind::Bluetooth && h.menu_kind(3) == MenuKind::Settings,
               "the menu is the systems, then bluetooth, then settings");

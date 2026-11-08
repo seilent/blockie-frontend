@@ -98,7 +98,6 @@ const char* action_name(PadAction a)
 }
 
 struct ScrapeJob {
-    int index;
     int64_t epoch;
     Game game;
     std::string libretro_folder;
@@ -106,7 +105,6 @@ struct ScrapeJob {
 
 struct ArtDrop {
     int64_t game_id;
-    int index;
     int64_t epoch;
     std::string path;
 };
@@ -192,45 +190,25 @@ static int run()
     btp.set_send([&](const BtCmd& cmd) { bt.run(cmd, now_ms()); });
     uint32_t bt_seen = bt.serial();
 
+    const char* denv = std::getenv("BLOCKIE_DATA");
+    std::string data_root = denv && *denv ? denv : "/var/lib/blockie/data";
+    while (data_root.size() > 1 && data_root.back() == '/')
+        data_root.pop_back();
     Library lib;
     SelectorModel model;
     model.focus = 0;
     std::vector<Game> recent;
     std::vector<std::string> sys_ids;
     std::vector<MenuKind> kinds;
-    std::vector<ScrapeJob> jobs;
-    if (lib.open("")) {
+    if (lib.open(data_root)) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
+        Scraper local(lib, data_root);
+        std::fprintf(stderr, "blockie-frontend: local covers recorded %d\n", local.sweep_local(ArtType::Covers));
         for (const auto& sw : lib.systems_with_games()) {
             model.systems.push_back({sw.first.name, sw.second, ""});
             sys_ids.push_back(sw.first.id);
             kinds.push_back(MenuKind::System);
-        }
-        recent = lib.recent_games(8);
-        for (size_t i = 0; i < recent.size(); i++) {
-            const Game& g = recent[i];
-            Image img;
-            bool had_art = false;
-            for (const auto& m : lib.media(g.id))
-                if (m.type == "covers") {
-                    DecodedImage d;
-                    if (load_png(m.path, d) && d.ok()) {
-                        img = Image::from_portrait(d.rgb.data(), d.w, d.h);
-                        had_art = true;
-                    }
-                    break;
-                }
-            model.tiles.push_back(std::move(img));
-            if (!had_art) {
-                std::string folder;
-                for (const auto& sc : lib.config())
-                    if (sc.id == g.system_id) {
-                        folder = sc.libretro_folder;
-                        break;
-                    }
-                jobs.push_back({(int)i, 0, g, folder});
-            }
         }
     }
 
@@ -240,10 +218,6 @@ static int run()
     model.systems.push_back({"settings", 0, "display"});
     kinds.push_back(MenuKind::Settings);
 
-    const char* denv = std::getenv("BLOCKIE_DATA");
-    std::string data_root = denv && *denv ? denv : "/var/lib/blockie/data";
-    while (data_root.size() > 1 && data_root.back() == '/')
-        data_root.pop_back();
     Launcher launcher(data_root);
 
     PadReader pad;
@@ -292,12 +266,12 @@ static int run()
     int art_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     int work_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
-    auto enqueue_scrape = [&](const Game& g, int64_t epoch, int index, const std::string& folder) {
+    auto enqueue_scrape = [&](const Game& g, int64_t epoch, const std::string& folder) {
         bool added = false;
         {
             std::lock_guard<std::mutex> lk(qmutex);
             if (requested.insert(g.id).second) {
-                squeue.push_back({index, epoch, g, folder});
+                squeue.push_back({epoch, g, folder});
                 added = true;
             }
         }
@@ -307,9 +281,6 @@ static int run()
             (void)w;
         }
     };
-    for (const ScrapeJob& j : jobs)
-        enqueue_scrape(j.game, j.epoch, j.index, j.libretro_folder);
-
     auto load_cover = [&](const Game& g) -> Image {
         auto it = cover_cache.find(g.id);
         if (it != cover_cache.end())
@@ -326,6 +297,28 @@ static int run()
             cover_cache[g.id] = img;
         return img;
     };
+    auto folder_of = [&](const std::string& system_id) {
+        for (const auto& sc : lib.config())
+            if (sc.id == system_id)
+                return sc.libretro_folder;
+        return std::string();
+    };
+    auto deal_recent = [&]() {
+        recent = lib.recent_games(8);
+        std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
+        grid.clear();
+        int queued = 0;
+        for (const Game& g : recent) {
+            Image img = load_cover(g);
+            if (img.w <= 0) {
+                enqueue_scrape(g, 0, folder_of(g.system_id));
+                queued++;
+            }
+            grid.push_back(std::move(img));
+        }
+        return queued;
+    };
+    int recent_jobs = deal_recent();
     auto scroll_px = [&](int64_t now) {
         int d = fx_round(tok::motion_scroll);
         int64_t e = now - scroll_t0;
@@ -495,8 +488,12 @@ static int run()
             LaunchExit ex = Launcher::classify(status);
             bool ran = ex != LaunchExit::ConfigError && ex != LaunchExit::CoreAbsent &&
                        ex != LaunchExit::AudioGate && ex != LaunchExit::Busy;
-            if (ran && child_game_id >= 0)
+            if (ran && child_game_id >= 0) {
                 lib.mark_played(child_game_id, (int64_t)time(nullptr));
+                deal_recent();
+                if (!system_view && pane == Pane::Details)
+                    tile_focus = 0;
+            }
             if (!child.cfg_path.empty())
                 unlink(child.cfg_path.c_str());
             std::fprintf(stderr, "blockie-frontend: game exited (%s)\n", ran ? "ran" : "not launched");
@@ -546,19 +543,14 @@ static int run()
                     it = cover_cache.erase(it);
             }
             if (start < (int)sysgames.size()) {
-                std::string folder;
-                for (const auto& sc : lib.config())
-                    if (sc.id == sysgames[start].system_id) {
-                        folder = sc.libretro_folder;
-                        break;
-                    }
+                std::string folder = folder_of(sysgames[start].system_id);
                 for (int i = start; i < hi; i++) {
                     const Game& g = sysgames[i];
                     if (cover_cache.count(g.id))
                         continue;
                     if (i >= end && load_cover(g).w > 0)
                         continue;
-                    enqueue_scrape(g, sys_epoch, -1, folder);
+                    enqueue_scrape(g, sys_epoch, folder);
                 }
             }
         }
@@ -574,11 +566,18 @@ static int run()
         {
             std::lock_guard<std::mutex> lk(qmutex);
             std::deque<ScrapeJob> keep;
-            for (auto& j : squeue)
-                if (j.epoch == 0)
-                    keep.push_back(std::move(j));
-            squeue.swap(keep);
             requested.clear();
+            for (auto& j : squeue) {
+                bool in_recent = j.epoch == 0;
+                for (const Game& g : recent)
+                    if (g.id == j.game.id)
+                        in_recent = true;
+                if (in_recent) {
+                    requested.insert(j.game.id);
+                    keep.push_back(std::move(j));
+                }
+            }
+            squeue.swap(keep);
         }
         model.section_label.clear();
         model.game_system.clear();
@@ -726,7 +725,7 @@ static int run()
             sigprocmask(SIG_UNBLOCK, &mask, nullptr);
     }
 
-    std::fprintf(stderr, "blockie-frontend: scrape worklist %zu\n", jobs.size());
+    std::fprintf(stderr, "blockie-frontend: scrape worklist %d\n", recent_jobs);
     std::thread scrape_thread;
     if (art_evfd < 0 || work_evfd < 0)
         std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape disabled\n");
@@ -768,19 +767,23 @@ static int run()
                     }
                     if (scrape_stop.load())
                         return;
-                    std::string eff = sc.resolve_name(j.game.system_id, j.game.rompath_abs);
-                    if (eff.empty())
-                        eff = j.game.name;
-                    if (scrape_stop.load())
-                        return;
-                    ArtOutcome o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, eff, ArtType::Covers);
+                    std::string hit = sc.record_local(j.game, ArtType::Covers);
+                    ArtOutcome o{true, false, false, hit};
+                    if (hit.empty()) {
+                        std::string eff = sc.resolve_name(j.game.system_id, j.game.rompath_abs);
+                        if (eff.empty())
+                            eff = j.game.name;
+                        if (scrape_stop.load())
+                            return;
+                        o = sc.art(j.game.id, j.game.system_id, j.libretro_folder, eff, ArtType::Covers);
+                    }
                     const char* r = o.cached ? "ok" : o.not_found ? "404" : o.transient ? "err" : "miss";
                     std::fprintf(stderr, "blockie-frontend: scrape %s \"%s\" %s %s\n", j.game.system_id.c_str(),
                                  j.game.name.c_str(), r, o.path.c_str());
                     if (o.cached && !o.path.empty()) {
                         {
                             std::lock_guard<std::mutex> lk(art_mutex);
-                            art_drops.push_back({j.game.id, j.index, j.epoch, o.path});
+                            art_drops.push_back({j.game.id, j.epoch, o.path});
                         }
                         uint64_t one = 1;
                         ssize_t w = write(art_evfd, &one, sizeof one);
@@ -943,37 +946,39 @@ static int run()
                 pending_drops.erase(pending_drops.begin());
             }
             for (const ArtDrop& drp : drops) {
-                if (drp.epoch == 0) {
-                    std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
-                    if (drp.index < 0 || drp.index >= (int)grid.size())
-                        continue;
-                    DecodedImage dec;
-                    if (load_png(drp.path, dec) && dec.ok()) {
-                        grid[drp.index] = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
-                        if (!system_view && child.pid <= 0)
-                            need_redraw = true;
+                std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
+                int rpos = -1;
+                for (int k = 0; k < (int)recent.size() && k < (int)grid.size(); k++)
+                    if (recent[k].id == drp.game_id) {
+                        rpos = k;
+                        break;
                     }
-                    continue;
+                int spos = -1;
+                if (system_view) {
+                    int start = sys_scroll * kCols;
+                    int end = std::min(start + kRows * kCols, (int)sysgames.size());
+                    for (int i = start; i < end; i++)
+                        if (sysgames[i].id == drp.game_id) {
+                            spos = i - start;
+                            break;
+                        }
                 }
-                if (!system_view || drp.epoch != sys_epoch)
+                bool cache = system_view && (spos >= 0 || drp.epoch == sys_epoch);
+                if (rpos < 0 && !cache)
                     continue;
                 DecodedImage dec;
                 if (!(load_png(drp.path, dec) && dec.ok()))
                     continue;
                 Image img = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
-                int start = sys_scroll * kCols;
-                int end = start + kRows * kCols;
-                if (end > (int)sysgames.size())
-                    end = (int)sysgames.size();
-                int pos = -1;
-                for (int i = start; i < end; i++)
-                    if (sysgames[i].id == drp.game_id) {
-                        pos = i - start;
-                        break;
-                    }
-                cover_cache[drp.game_id] = img;
-                if (pos >= 0 && pos < (int)model.tiles.size()) {
-                    model.tiles[pos] = img;
+                if (rpos >= 0) {
+                    grid[rpos] = img;
+                    if (!system_view && child.pid <= 0)
+                        need_redraw = true;
+                }
+                if (cache)
+                    cover_cache[drp.game_id] = img;
+                if (spos >= 0 && spos < (int)model.tiles.size()) {
+                    model.tiles[spos] = img;
                     if (child.pid <= 0)
                         need_redraw = true;
                 }

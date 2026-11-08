@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <ftw.h>
@@ -442,6 +443,84 @@ int main()
         fd::Scraper rs4(lib, root, fetch);
         check(rs4.resolve_name("gb", gbrom).empty(),
               "a fetched dat whose sha256 does not match the pin is rejected, not parsed");
+    }
+
+    {
+        std::string sroot = root + "/sweep";
+        std::string rdir = sroot + "/roms/gba/";
+        write_file(rdir + "Synth Alpha.gba", "alpha rom body");
+        write_file(rdir + "Synth Beta.gba", "beta rom body");
+        write_file(rdir + "Synth Gamma.gba", "gamma rom body");
+        write_file(rdir + "Synth Delta.gba", "delta rom body");
+        write_file(rdir + "Synth Eps.gba", "eps rom body");
+        write_file(rdir + "Synth Zeta.gba", "zeta rom body");
+        write_file(rdir + "Synth Gone.gba", "gone rom body");
+        fd::Library sl;
+        check(sl.open(sroot) && sl.scan() == 7, "sweep fixture scans seven synthetic games");
+        unlink((rdir + "Synth Gone.gba").c_str());
+        check(sl.scan() == 6, "sweep fixture marks one game not present");
+        std::unordered_map<std::string, fd::Game> by;
+        for (const fd::Game& g : sl.games("gba"))
+            by[g.name] = g;
+        check(by.size() == 7, "sweep fixture lists the seven games by name");
+
+        std::optional<uint32_t> bc = fd::Scraper::rom_crc(rdir + "Synth Beta.gba", {".gba"});
+        std::optional<uint32_t> dc = fd::Scraper::rom_crc(rdir + "Synth Delta.gba", {".gba"});
+        std::string dat = "clrmamepro (\n\tname \"Nintendo - Game Boy Advance\"\n)\n"
+                          "game (\n\tname \"Synth Beta (World)\"\n"
+                          "\trom ( name \"b.gba\" size 13 crc " +
+                          hex8(bc ? *bc : 0) +
+                          " )\n)\n"
+                          "game (\n\tname \"Synth Delta (World)\"\n"
+                          "\trom ( name \"d.gba\" size 14 crc " +
+                          hex8(dc ? *dc : 0) + " )\n)\n";
+        responder = [dat](const std::string& url) -> fd::HttpResult {
+            if (url.find("metadat/no-intro") != std::string::npos)
+                return {200, dat, false};
+            return {404, std::string(), false};
+        };
+        fd::Scraper ss(sl, sroot, fetch);
+        ss.set_expected_dat_sha("gba", fd::Scraper::sha256_hex(dat));
+        check(ss.resolve_name("gba", by["Synth Beta"].rompath_abs) == "Synth Beta (World)",
+              "sweep fixture caches the resolved name for one game");
+
+        auto cover = [&](const std::string& name) {
+            return fd::Scraper::local_path(sroot, "gba", name, fd::ArtType::Covers);
+        };
+        write_file(cover("Synth Alpha"), "a");
+        write_file(cover("Synth Beta (World)"), "b");
+        write_file(cover("Synth Beta"), "b2");
+        write_file(cover("Synth Delta (World)"), "d");
+        write_file(cover("Synth Eps"), "e");
+        write_file(cover("Synth Zeta"), "z");
+        write_file(cover("Synth Gone"), "x");
+        write_file(sroot + "/elsewhere.png", "live");
+        sl.set_media(by["Synth Eps"].id, "covers", sroot + "/elsewhere.png", "libretro");
+        sl.set_media(by["Synth Zeta"].id, "covers", sroot + "/deleted.png", "libretro");
+
+        int before = calls;
+        int n = ss.sweep_local(fd::ArtType::Covers);
+        check(n == 3, "sweep records the three local covers it can name without a crc");
+        check(calls == before, "sweep never calls the fetcher");
+        check(has_media(sl.media(by["Synth Alpha"].id), "covers", "local", cover("Synth Alpha")),
+              "sweep finds a cover by the library name");
+        check(has_media(sl.media(by["Synth Beta"].id), "covers", "local", cover("Synth Beta (World)")),
+              "sweep prefers the cached resolved name over the library name");
+        check(sl.media(by["Synth Gamma"].id).empty(), "sweep records nothing for a game with no local file");
+        check(sl.media(by["Synth Delta"].id).empty(), "sweep does not crc to find an uncached resolved name");
+        check(has_media(sl.media(by["Synth Eps"].id), "covers", "libretro", sroot + "/elsewhere.png"),
+              "sweep leaves a covers row that points at a live file alone");
+        check(has_media(sl.media(by["Synth Zeta"].id), "covers", "local", cover("Synth Zeta")),
+              "sweep replaces a covers row that points at a deleted file");
+        check(sl.media(by["Synth Gone"].id).empty(), "sweep skips a game that is not present");
+        check(ss.sweep_local(fd::ArtType::Covers) == 0, "a second sweep records nothing new");
+
+        check(ss.record_local(by["Synth Gamma"], fd::ArtType::Covers).empty(), "record_local misses with no file");
+        write_file(cover("Synth Gamma"), "g");
+        check(ss.record_local(by["Synth Gamma"], fd::ArtType::Covers) == cover("Synth Gamma") &&
+                  has_media(sl.media(by["Synth Gamma"].id), "covers", "local", cover("Synth Gamma")),
+              "record_local picks up a file that appears later");
+        check(calls == before, "record_local never calls the fetcher");
     }
 
     rm_rf(root);

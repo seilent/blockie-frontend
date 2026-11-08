@@ -45,6 +45,8 @@ public:
     std::vector<MediaRef> media(int64_t game_id);
     std::vector<MetaField> meta(int64_t game_id);
     void set_media(int64_t game_id, const std::string& type, const std::string& path, const std::string& source);
+    void begin();
+    void commit();
     const std::vector<SystemCfg>& config() const;
 
     bool neg_fresh(const std::string& key, int64_t ttl_seconds);
