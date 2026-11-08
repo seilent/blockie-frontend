@@ -173,6 +173,7 @@ static int run()
     std::mutex art_mutex;
     std::vector<ArtDrop> art_drops;
     std::atomic<bool> scrape_stop{false};
+    std::atomic<bool> scrape_pause{false};
     int art_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     int work_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
@@ -251,6 +252,7 @@ static int run()
         }
         child = ch;
         child_game_id = g.id;
+        scrape_pause.store(true);
         std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
     };
 
@@ -270,6 +272,12 @@ static int run()
             std::fprintf(stderr, "blockie-frontend: game exited (%s)\n", ran ? "ran" : "not launched");
             child = {};
             child_game_id = -1;
+            scrape_pause.store(false);
+            if (work_evfd >= 0) {
+                uint64_t one = 1;
+                ssize_t w = write(work_evfd, &one, sizeof one);
+                (void)w;
+            }
             if (pad_ok) {
                 pad.poll();
                 if (!pad.is_open())
@@ -332,7 +340,15 @@ static int run()
         model.tiles.swap(recent_hold);
         recent_hold.clear();
         cover_cache.clear();
-        requested.clear();
+        {
+            std::lock_guard<std::mutex> lk(qmutex);
+            std::deque<ScrapeJob> keep;
+            for (auto& j : squeue)
+                if (j.epoch == 0)
+                    keep.push_back(std::move(j));
+            squeue.swap(keep);
+            requested.clear();
+        }
         model.section_label.clear();
         model.game_system.clear();
         model.game_title.clear();
@@ -474,7 +490,7 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape disabled\n");
     else {
         scrape_thread = std::thread([data_root, art_evfd, work_evfd, &squeue, &qmutex, &art_mutex, &art_drops,
-                                     &scrape_stop]() {
+                                     &scrape_stop, &scrape_pause]() {
             Library wlib;
             if (!wlib.open(data_root)) {
                 std::fprintf(stderr, "blockie-frontend: scrape db open failed\n");
@@ -498,6 +514,8 @@ static int run()
                 if (scrape_stop.load())
                     break;
                 for (;;) {
+                    if (scrape_pause.load())
+                        break;
                     ScrapeJob j;
                     {
                         std::lock_guard<std::mutex> lk(qmutex);
