@@ -28,7 +28,6 @@ Page and menu motion reuse:
 
 - MicroDAP cb78c74, player/qml/MicroDap PageStack.qml, Turnstile.qml and screens/Home.qml: menu exit and entrance,
   page push and back timings.
-- funeOS d58193469, App::draw_warp in player/ui/app.cpp: turnstile rows and warp.
 - funeOS d58193469, bezier in player/core/curves.cpp: the cubic bezier form used by the width slide.
 - funeOS 35ec2a60a, CanvasT::coverage_turn in player/gfx/canvas.cpp: counter clockwise text, here each line turned
   once into a coverage plane and drawn with Canvas::coverage.
