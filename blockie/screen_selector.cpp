@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "../ui/roles.h"
+#include "text_wrap.h"
 
 namespace fd {
 
@@ -142,31 +143,9 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         int title_alpha = alpha256(role::npTitle.alpha);
         int avail64 = (kDetailRight - kDetailX) * 64;
         int pitch = fonts.ascent(ts.px) + fonts.descent(ts.px);
-        std::vector<std::string> lines;
-        std::string cur;
-        size_t i = 0;
-        const std::string& title = model.game_title;
-        while (i < title.size() && (int)lines.size() < kDetailTitleMaxLines) {
-            while (i < title.size() && title[i] == ' ')
-                i++;
-            size_t k = i;
-            while (k < title.size() && title[k] != ' ')
-                k++;
-            if (k == i)
-                break;
-            std::string word = title.substr(i, k - i);
-            i = k;
-            if (cur.empty()) {
-                cur = word;
-            } else if (fonts.width64(ts, (cur + " " + word).c_str()) > avail64) {
-                lines.push_back(cur);
-                cur = word;
-            } else {
-                cur += " " + word;
-            }
-        }
-        if (!cur.empty() && (int)lines.size() < kDetailTitleMaxLines)
-            lines.push_back(cur);
+        std::vector<std::string> lines = wrap_lines(
+            model.game_title, avail64, kDetailTitleMaxLines,
+            [&](const std::string& s) { return (int)fonts.width64(ts, s.c_str()); });
         for (size_t li = 0; li < lines.size(); li++)
             fonts.draw(c, ts, lines[li].c_str(), x64(kDetailX), kDetailTitleBaseline + (int)li * pitch, kWhite,
                        title_alpha);

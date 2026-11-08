@@ -359,6 +359,7 @@ build_app() {
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
     pool "$appobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$appobj/text_wrap.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
@@ -372,8 +373,8 @@ build_app() {
     mkdir -p "$out/app"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/library.o" "$appobj/image.o" "$appobj/input_pad.o" \
-        "$appobj/launch.o" "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
+    "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/text_wrap.o" "$appobj/library.o" "$appobj/image.o" \
+        "$appobj/input_pad.o" "$appobj/launch.o" "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
@@ -494,6 +495,18 @@ build_image_test() {
     "$out/image/blockie-image-test"
 }
 
+build_wrap_test() {
+    pool "$testobj/text_wrap.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
+    pool "$testobj/text_wrap_test.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/tests/text_wrap_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/wrap"
+    "$cxx" "$testobj/text_wrap.o" "$testobj/text_wrap_test.o" $appldflags -o "$out/wrap/blockie-wrap-test.tmp" || return 1
+    mv "$out/wrap/blockie-wrap-test.tmp" "$out/wrap/blockie-wrap-test"
+    echo "build.sh: $out/wrap/blockie-wrap-test"
+    "$out/wrap/blockie-wrap-test"
+}
+
 build_shot() {
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -505,6 +518,7 @@ build_shot() {
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
     pool "$shotobj/screen_selector.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_selector.cpp"
+    pool "$shotobj/text_wrap.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
     drain
@@ -512,8 +526,8 @@ build_shot() {
     mkdir -p "$out/shot"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/image.o" "$shotobj/shot.o" "${dobjs[@]}" $appldflags \
-        -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
+    "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/image.o" "$shotobj/shot.o" \
+        "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
     echo "build.sh: fonts $fonts_dir"
@@ -548,7 +562,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0
