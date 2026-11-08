@@ -622,6 +622,8 @@ motion.strip.y2 1 ratio
 input.keyHoldMs 400 ms
 input.volumeHoldMs 400 ms
 input.volumeRepeatMs 100 ms
+input.repeatDelayMs 300 ms
+input.repeatIntervalMs 80 ms
 input.remoteDoubleMs 350 ms
 input.remoteHoldMs 500 ms
 input.knobDoubleMs 350 ms

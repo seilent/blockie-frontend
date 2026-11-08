@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -33,7 +35,9 @@
 #include "input_pad.h"
 #include "launch.h"
 #include "library.h"
+#include "nav.h"
 #include "present_wl.h"
+#include "repeat.h"
 #include "scraper.h"
 #include "screen_selector.h"
 
@@ -56,6 +60,7 @@ const char* action_name(PadAction a)
     case PadAction::Right: return "right";
     case PadAction::Accept: return "accept";
     case PadAction::Back: return "back";
+    case PadAction::Context: return "context";
     }
     return "?";
 }
@@ -72,6 +77,29 @@ struct ArtDrop {
     int index;
     int64_t epoch;
     std::string path;
+};
+
+class FnHost : public NavHost {
+public:
+    std::function<int()> count;
+    std::function<int()> recent;
+    std::function<int(int)> enter;
+    std::function<void()> leave;
+    std::function<void(bool)> moved;
+    std::function<void(int)> play_recent;
+    std::function<void(int)> play_game;
+
+    int menu_count() const override { return count(); }
+    MenuKind menu_kind(int) const override { return MenuKind::System; }
+    int recent_count() const override { return recent(); }
+    int enter_system(int sys) override { return enter(sys); }
+    void exit_system() override { leave(); }
+    void system_moved(bool scrolled) override { moved(scrolled); }
+    void launch_recent(int i) override { play_recent(i); }
+    void launch_system_game(int i) override { play_game(i); }
+    void push(Screen) override {}
+    void pop(Screen) override {}
+    bool page_action(Screen, PadAction, bool) override { return true; }
 };
 
 }
@@ -154,13 +182,15 @@ static int run()
     std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
 
     bool need_redraw = false;
-    Pane pane = Pane::Selector;
-    int tile_focus = 0;
-    bool system_view = false;
+    Nav nav;
+    Pane& pane = nav.pane;
+    int& tile_focus = nav.tile_focus;
+    bool& system_view = nav.system_view;
     std::vector<Game> sysgames;
     std::vector<Image> recent_hold;
-    int sys_focus = 0;
-    int sys_scroll = 0;
+    int& sys_focus = nav.sys_focus;
+    int& sys_scroll = nav.sys_scroll;
+    Repeat repeat;
     std::string sys_name;
     std::unordered_map<int64_t, Image> cover_cache;
     Launcher::Child child;
@@ -217,6 +247,7 @@ static int run()
         p.begin_full();
         Canvas c(p.draw_target());
         fonts.begin_frame(-1);
+        model.focus = nav.focus;
         if (!system_view)
             model.tile_focus = pane == Pane::Details ? tile_focus : -1;
         draw_selector(c, fonts, model, pane, ArtFit::Cover, false, system_view);
@@ -252,6 +283,7 @@ static int run()
         }
         child = ch;
         child_game_id = g.id;
+        repeat.release_all();
         scrape_pause.store(true);
         std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
     };
@@ -287,8 +319,8 @@ static int run()
         }
     };
 
-    const int kCols = 2;
-    const int kRows = 4;
+    const int kCols = Nav::kCols;
+    const int kRows = Nav::kRows;
     auto refresh_system = [&](bool rebuild) {
         int start = sys_scroll * kCols;
         if (rebuild) {
@@ -355,98 +387,49 @@ static int run()
         pane = Pane::Selector;
         need_redraw = true;
     };
-    auto apply = [&](PadAction a) {
-        int cnt = (int)model.systems.size();
-        int tiles = (int)model.tiles.size();
-        if (pane == Pane::Selector) {
-            if (a == PadAction::Up && model.focus > 0) {
-                model.focus--;
-                need_redraw = true;
-            } else if (a == PadAction::Down && cnt > 0 && model.focus < cnt - 1) {
-                model.focus++;
-                need_redraw = true;
-            } else if (a == PadAction::Left && tiles > 0) {
-                pane = Pane::Details;
-                tile_focus = 0;
-                need_redraw = true;
-            } else if (a == PadAction::Accept && model.focus >= 0 && model.focus < (int)sys_ids.size()) {
-                sysgames = lib.games(sys_ids[model.focus]);
-                if (!sysgames.empty()) {
-                    sys_name = model.systems[model.focus].name;
-                    sys_focus = 0;
-                    sys_scroll = 0;
-                    system_view = true;
-                    sys_epoch++;
-                    model.tiles.swap(recent_hold);
-                    refresh_system(true);
-                    pane = Pane::Details;
-                    need_redraw = true;
-                }
-            }
-            return;
-        }
-        if (system_view) {
-            int total = (int)sysgames.size();
-            if (a == PadAction::Up && sys_focus - kCols >= 0) {
-                sys_focus -= kCols;
-                bool scrolled = sys_focus < sys_scroll * kCols;
-                if (scrolled)
-                    sys_scroll--;
-                refresh_system(scrolled);
-                need_redraw = true;
-            } else if (a == PadAction::Down && sys_focus + kCols < total) {
-                sys_focus += kCols;
-                bool scrolled = sys_focus >= (sys_scroll + kRows) * kCols;
-                if (scrolled)
-                    sys_scroll++;
-                refresh_system(scrolled);
-                need_redraw = true;
-            } else if (a == PadAction::Right && sys_focus % kCols < kCols - 1 && sys_focus + 1 < total) {
-                sys_focus++;
-                refresh_system(false);
-                need_redraw = true;
-            } else if (a == PadAction::Left) {
-                if (sys_focus % kCols > 0) {
-                    sys_focus--;
-                    refresh_system(false);
-                    need_redraw = true;
-                } else {
-                    exit_system();
-                }
-            } else if (a == PadAction::Accept && sys_focus >= 0 && sys_focus < total) {
-                try_launch(sysgames[sys_focus]);
-            } else if (a == PadAction::Back) {
-                exit_system();
-            }
-            return;
-        }
-        if (a == PadAction::Up && tile_focus - kCols >= 0) {
-            tile_focus -= kCols;
+    FnHost host;
+    host.count = [&]() { return (int)model.systems.size(); };
+    host.recent = [&]() { return (int)recent.size(); };
+    host.enter = [&](int sys) -> int {
+        if (sys < 0 || sys >= (int)sys_ids.size())
+            return 0;
+        sysgames = lib.games(sys_ids[sys]);
+        if (sysgames.empty())
+            return 0;
+        sys_name = model.systems[sys].name;
+        sys_focus = 0;
+        sys_scroll = 0;
+        system_view = true;
+        sys_epoch++;
+        model.tiles.swap(recent_hold);
+        refresh_system(true);
+        repeat.rearm(now_ms());
+        return (int)sysgames.size();
+    };
+    host.leave = [&]() {
+        exit_system();
+        repeat.rearm(now_ms());
+    };
+    host.moved = [&](bool scrolled) { refresh_system(scrolled); };
+    host.play_recent = [&](int i) {
+        if (i >= 0 && i < (int)recent.size())
+            try_launch(recent[i]);
+    };
+    host.play_game = [&](int i) {
+        if (i >= 0 && i < (int)sysgames.size())
+            try_launch(sysgames[i]);
+    };
+    auto apply = [&](PadAction a, bool rep) {
+        if (nav_apply(nav, host, a, rep))
             need_redraw = true;
-        } else if (a == PadAction::Down && tile_focus + kCols < tiles) {
-            tile_focus += kCols;
-            need_redraw = true;
-        } else if (a == PadAction::Right && tile_focus % kCols < kCols - 1 && tile_focus + 1 < tiles) {
-            tile_focus++;
-            need_redraw = true;
-        } else if (a == PadAction::Left) {
-            if (tile_focus % kCols > 0)
-                tile_focus--;
-            else
-                pane = Pane::Selector;
-            need_redraw = true;
-        } else if (a == PadAction::Accept) {
-            if (tile_focus >= 0 && tile_focus < (int)recent.size())
-                try_launch(recent[tile_focus]);
-        } else if (a == PadAction::Back) {
-            pane = Pane::Selector;
-            need_redraw = true;
-        }
+    };
+    auto press = [&](PadAction a, uint8_t src, int64_t now) {
+        apply(a, false);
+        if (is_direction(a) && child.pid <= 0)
+            repeat.press(a, src, now);
     };
 
     p.set_key_handler([&](uint32_t sym, bool pressed) {
-        if (!pressed)
-            return;
         bool have = true;
         PadAction a = PadAction::Up;
 #ifdef BLOCKIE_HAVE_XKB
@@ -456,6 +439,7 @@ static int run()
         else if (sym == XKB_KEY_Right) a = PadAction::Right;
         else if (sym == XKB_KEY_Return) a = PadAction::Accept;
         else if (sym == XKB_KEY_Escape) a = PadAction::Back;
+        else if (sym == XKB_KEY_x) a = PadAction::Context;
         else have = false;
 #else
         if (sym == KEY_UP) a = PadAction::Up;
@@ -464,13 +448,20 @@ static int run()
         else if (sym == KEY_RIGHT) a = PadAction::Right;
         else if (sym == KEY_ENTER) a = PadAction::Accept;
         else if (sym == KEY_ESC) a = PadAction::Back;
+        else if (sym == KEY_X) a = PadAction::Context;
         else have = false;
 #endif
         if (!have)
             return;
+        int64_t now = now_ms();
+        if (!pressed) {
+            repeat.release(a, kFromKeys, now);
+            return;
+        }
         std::fprintf(stderr, "blockie-frontend: key %s\n", action_name(a));
-        apply(a);
+        press(a, kFromKeys, now);
     });
+    p.set_leave_handler([&]() { repeat.release_source(kFromKeys, now_ms()); });
 
     int sfd = -1;
     sigset_t mask;
@@ -581,7 +572,11 @@ static int run()
             fds[ai].revents = 0;
             nfds++;
         }
-        int pr = poll(fds, nfds, -1);
+        int timeout = -1;
+        int64_t deadline = repeat.deadline();
+        if (deadline >= 0)
+            timeout = (int)std::max<int64_t>(0, deadline - now_ms());
+        int pr = poll(fds, nfds, timeout);
         if (pr < 0) {
             wl_display_cancel_read(d);
             if (errno == EINTR)
@@ -611,15 +606,21 @@ static int run()
         }
 
         if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
-            std::vector<PadAction> acts = pad.poll();
-            if (p.activated()) {
-                for (PadAction a : acts) {
-                    std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(a));
-                    apply(a);
+            std::vector<PadEdge> edges = pad.poll_edges();
+            int64_t now = now_ms();
+            for (const PadEdge& e : edges) {
+                if (!e.down) {
+                    repeat.release(e.action, kFromPad, now);
+                    continue;
                 }
+                if (!p.activated())
+                    continue;
+                std::fprintf(stderr, "blockie-frontend: pad %s\n", action_name(e.action));
+                press(e.action, kFromPad, now);
             }
             if (!pad.is_open()) {
                 pad_ok = false;
+                repeat.release_source(kFromPad, now);
                 std::fprintf(stderr, "blockie-frontend: pad disconnected\n");
             }
         }
@@ -669,6 +670,17 @@ static int run()
                         need_redraw = true;
                 }
             }
+        }
+
+        if (!p.activated() || child.pid > 0)
+            repeat.release_all();
+        PadAction ra = PadAction::Up;
+        int64_t tn = now_ms();
+        if (repeat.due(tn, ra)) {
+            if (repeat.sources(ra) == kFromPad && pad_ok && pad.held(ra) == Held::No)
+                repeat.release(ra, kFromPad, tn);
+            else
+                apply(ra, true);
         }
 
         if (need_redraw) {

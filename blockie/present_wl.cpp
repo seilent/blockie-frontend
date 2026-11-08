@@ -109,7 +109,12 @@ void WaylandPresenter::kb_keymap(void* data, wl_keyboard*, uint32_t format, int 
 
 void WaylandPresenter::kb_enter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
 
-void WaylandPresenter::kb_leave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
+void WaylandPresenter::kb_leave(void* data, wl_keyboard*, uint32_t, wl_surface*)
+{
+    auto* self = static_cast<WaylandPresenter*>(data);
+    if (self->leave_cb_)
+        self->leave_cb_();
+}
 
 void WaylandPresenter::kb_key(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key, uint32_t state)
 {

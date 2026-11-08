@@ -45,6 +45,16 @@ bool eq(const std::vector<PadAction>& a, const std::vector<PadAction>& b)
     return true;
 }
 
+bool eq_edges(const std::vector<PadEdge>& a, const std::vector<PadEdge>& b)
+{
+    if (a.size() != b.size())
+        return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (a[i].action != b[i].action || a[i].down != b[i].down)
+            return false;
+    return true;
+}
+
 }
 
 int main()
@@ -102,6 +112,53 @@ int main()
     push(p[1], EV_KEY, BTN_MODE, 1);
     push(p[1], EV_MSC, MSC_SCAN, 42);
     check(eq(pad.poll(), {}), "unmapped button and misc events yield nothing");
+
+    push(p[1], EV_KEY, BTN_DPAD_UP, 0);
+    push(p[1], EV_KEY, BTN_DPAD_DOWN, 0);
+    push(p[1], EV_KEY, BTN_DPAD_LEFT, 0);
+    push(p[1], EV_KEY, BTN_DPAD_RIGHT, 0);
+    push(p[1], EV_ABS, ABS_HAT0X, 0);
+    push(p[1], EV_ABS, ABS_HAT0Y, 0);
+    check(eq(pad.poll(), {}), "releasing everything yields no presses");
+
+    push(p[1], EV_KEY, BTN_DPAD_UP, 1);
+    push(p[1], EV_KEY, BTN_DPAD_UP, 0);
+    check(eq_edges(pad.poll_edges(), {{PadAction::Up, true}, {PadAction::Up, false}}),
+          "dpad press and release are both edges");
+
+    push(p[1], EV_ABS, ABS_HAT0X, -1);
+    push(p[1], EV_ABS, ABS_HAT0X, 1);
+    push(p[1], EV_ABS, ABS_HAT0X, 0);
+    check(eq_edges(pad.poll_edges(), {{PadAction::Left, true},
+                                      {PadAction::Left, false},
+                                      {PadAction::Right, true},
+                                      {PadAction::Right, false}}),
+          "hat flip releases the old direction before pressing the new one");
+
+    push(p[1], EV_KEY, BTN_WEST, 1);
+    push(p[1], EV_KEY, BTN_WEST, 0);
+    check(eq_edges(pad.poll_edges(), {{PadAction::Context, true}}), "west is context, its release is not an edge");
+
+    push(p[1], EV_KEY, BTN_EAST, 0);
+    push(p[1], EV_KEY, BTN_SOUTH, 0);
+    check(eq_edges(pad.poll_edges(), {}), "accept and back releases are not edges");
+
+    check(pad.held(PadAction::Up) == Held::Unknown, "held state is unknown without evdev ioctls");
+
+    push(p[1], EV_KEY, BTN_DPAD_LEFT, 1);
+    push(p[1], EV_SYN, SYN_DROPPED, 0);
+    push(p[1], EV_KEY, BTN_DPAD_LEFT, 0);
+    push(p[1], EV_KEY, BTN_DPAD_RIGHT, 1);
+    push(p[1], EV_SYN, SYN_REPORT, 0);
+    check(eq_edges(pad.poll_edges(), {{PadAction::Left, true}, {PadAction::Left, false}}),
+          "syn dropped skips to the report and releases what is held when the state is unknown");
+
+    push(p[1], EV_ABS, ABS_HAT0Y, 1);
+    push(p[1], EV_SYN, SYN_DROPPED, 0);
+    push(p[1], EV_SYN, SYN_REPORT, 0);
+    push(p[1], EV_ABS, ABS_HAT0Y, 1);
+    check(eq_edges(pad.poll_edges(), {{PadAction::Down, true}, {PadAction::Down, false}, {PadAction::Down, true}}),
+          "a hat held through a drop is released, then pressed again by the next event");
 
     check(pad.is_open(), "reader open before writer close");
     close(p[1]);

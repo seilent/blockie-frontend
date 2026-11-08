@@ -17,3 +17,8 @@ redistributed in this repo or the image:
     Nintendo - Super Nintendo Entertainment System.dat   76bb6fc95243d03c0842b0600c34c9a0e6e711be0027d7d4fe90330658ae20ec
     Sega - Mega Drive - Genesis.dat                      2785056d877edd519a31bcc9e042f1aa8821e3ce2520edcc744dd7ecd56e6a4a
     Nintendo - Nintendo 64.dat                           17c3a83994717859cca16a89f5b84952dcd8e55d45fe0cf42b1245f565683e49
+
+Input and navigation follow MicroDAP at cb78c74:
+
+- player/src/core/PadSource.h and DbusPad.cpp: direction repeat timing and the fallback to a still held direction.
+- player/qml/MicroDap/screens/Home.qml: home menu keys, back opening the recent grid, no pane change on a repeat.

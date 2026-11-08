@@ -60,6 +60,7 @@ public:
     wl_display* display() const { return dpy_; }
     bool activated() const { return activated_; }
     void set_key_handler(std::function<void(uint32_t keysym, bool pressed)> f) { key_cb_ = std::move(f); }
+    void set_leave_handler(std::function<void()> f) { leave_cb_ = std::move(f); }
 
 private:
     struct Buf {
@@ -107,6 +108,7 @@ private:
     wl_seat* seat_ = nullptr;
     wl_keyboard* kbd_ = nullptr;
     std::function<void(uint32_t, bool)> key_cb_;
+    std::function<void()> leave_cb_;
 #ifdef BLOCKIE_HAVE_XKB
     xkb_context* xkb_ctx_ = nullptr;
     xkb_keymap* xkb_map_ = nullptr;

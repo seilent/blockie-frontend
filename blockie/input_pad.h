@@ -5,7 +5,14 @@
 
 namespace fd {
 
-enum class PadAction { Up, Down, Left, Right, Accept, Back };
+enum class PadAction { Up, Down, Left, Right, Accept, Back, Context };
+
+struct PadEdge {
+    PadAction action;
+    bool down;
+};
+
+enum class Held { No, Yes, Unknown };
 
 struct PadId {
     uint16_t bus = 0;
@@ -31,11 +38,17 @@ public:
     void close();
 
     std::vector<PadAction> poll();
+    std::vector<PadEdge> poll_edges();
+    Held held(PadAction dir) const;
 
 private:
+    void resync(std::vector<PadEdge>& out);
+
     int fd_ = -1;
     int hat_x_ = 0;
     int hat_y_ = 0;
+    bool dpad_[4] = {false, false, false, false};
+    bool dropping_ = false;
 };
 
 }
