@@ -29,6 +29,22 @@ bool ends_with(const std::string& s, const std::string& suf)
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
 
+bool valid_utf8(const std::string& s)
+{
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        int n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (n == 0 || i + n > s.size())
+            return false;
+        for (int k = 1; k < n; k++)
+            if (((unsigned char)s[i + k] & 0xC0) != 0x80)
+                return false;
+        i += n;
+    }
+    return true;
+}
+
 }
 
 int main()
@@ -57,6 +73,11 @@ int main()
     check(longword.size() == 1 && !ends_with(longword[0], "..."), "single long line is not ellipsised");
 
     check(wrap_lines("", 10, 4, m).empty(), "empty title yields no lines");
+
+    std::vector<std::string> utf = wrap_lines("caf\xC3\xA9 zz", 7, 1, m);
+    check(utf.size() == 1, "accented title clamps to one line");
+    check(utf.size() == 1 && ends_with(utf[0], "..."), "accented clamped line ends with ellipsis");
+    check(utf.size() == 1 && valid_utf8(utf[0]), "ellipsis trim does not split a utf8 code point");
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

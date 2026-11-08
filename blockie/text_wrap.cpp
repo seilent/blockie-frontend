@@ -35,7 +35,12 @@ std::vector<std::string> wrap_lines(const std::string& text, int avail, int max_
         std::string& last = lines.back();
         std::string cand = last + "...";
         while (!last.empty() && measure(cand) > avail) {
-            last.pop_back();
+            while (!last.empty() && ((unsigned char)last.back() & 0xC0) == 0x80)
+                last.pop_back();
+            if (!last.empty())
+                last.pop_back();
+            while (!last.empty() && last.back() == ' ')
+                last.pop_back();
             cand = last + "...";
         }
         last = cand;
