@@ -39,6 +39,7 @@ public:
     std::function<void()> settle;
     std::function<bool()> can_animate;
     std::function<bool()> redraw_pending;
+    std::function<int64_t()> clock_us;
     std::function<void(const char* what, const char* why)> landed;
 
     void add(Channel c) { channels_.push_back(std::move(c)); }
@@ -55,6 +56,11 @@ public:
     bool active() const { return fold_; }
     bool details() const { return fold_ && play_.details; }
     bool copied() const { return copied_; }
+    bool details_play() const { return play_.details; }
+    bool navigating() const { return navigating_; }
+    int from_us() const { return from_us_; }
+    int to_us() const { return to_us_; }
+    bool compose_end(const Surface& dst);
     FoldKind kind() const { return kind_; }
     bool reversed() const { return reversed_; }
     int64_t t0() const { return t0_; }
@@ -84,6 +90,9 @@ private:
     bool copied_ = false;
     bool end_shown_ = false;
     bool stale_ = false;
+    int from_us_ = -1;
+    bool navigating_ = false;
+    int to_us_ = -1;
     int64_t prev_t_ = -1;
     Rect damage_ = kScreen;
     std::vector<Channel> channels_;

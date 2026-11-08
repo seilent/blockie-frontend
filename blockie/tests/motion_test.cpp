@@ -269,7 +269,7 @@ public:
 
     FoldPlay page()
     {
-        FoldPlan pp = fold_plan(FoldDir::PagePush, nav.focus - nav.menu_top, 0);
+        FoldPlan pp = fold_page(nav.focus - nav.menu_top);
         FoldPlay p;
         p.duration = fold_duration(pp);
         p.forward = [pp](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
@@ -718,7 +718,7 @@ int main()
         h.press(PadAction::Accept, 0);
         check(h.ctl.kind() == FoldKind::Push && h.nav.top() == Screen::Settings, "accept on settings pushes the page");
         Buffer p = h.render_now(true, Pane::Selector);
-        FoldPlan pp = fold_plan(FoldDir::PagePush, 2, 0);
+        FoldPlan pp = fold_page(2);
         int64_t pd = fold_duration(pp);
         int64_t tb = pd * 4 / 10;
         bool same_push = true;
@@ -757,6 +757,32 @@ int main()
         check(h.saw("expand:hidden") && !h.ctl.active() && h.nav.system_view &&
                   equal(out.surface(), h.render_now(false, h.nav.pane).surface()),
               "a fold started while hidden lands at once and the frame is the system view");
+    }
+
+    {
+        Host h(0, 12, true);
+        h.nav.focus = 2;
+        h.sync_targets(true);
+        Buffer m = h.render_now(true, Pane::Selector);
+        copy(m.surface(), h.last.surface());
+        h.press(PadAction::Accept, 0);
+        bool bar = false;
+        int64_t tl = h.land_frames(0, out, before, bar);
+        Buffer pg = h.render_now(true, Pane::Selector);
+        h.press(PadAction::Back, tl + 50);
+        check(tl > 0 && h.ctl.kind() == FoldKind::Pop && !h.ctl.reversed() && h.nav.top() == Screen::Home,
+              "back on a landed page starts a fresh page pop");
+        FoldPlan pp = fold_page(2);
+        int64_t pd = fold_duration(pp);
+        bool backward = true;
+        for (int64_t s : {(int64_t)0, (int64_t)16, pd / 2, pd - 17}) {
+            h.frame(tl + 50 + s, out);
+            Buffer want;
+            fold_compose(m.surface(), pg.surface(), want.surface(), pp, pd - s);
+            if (!equal(out.surface(), want.surface()))
+                backward = false;
+        }
+        check(backward, "a fresh page pop at s is the page push at T - s");
     }
 
     {

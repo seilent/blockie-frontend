@@ -83,19 +83,6 @@ MenuPose pose_of(const SelectorModel& model, int i)
     return {};
 }
 
-}
-
-int detail_title_bottom(Fonts& fonts, const SelectorModel& model)
-{
-    TextStyle ts = role::npTitle.style();
-    int pitch = fonts.ascent(ts.px) + fonts.descent(ts.px);
-    std::vector<std::string> lines = title_lines(fonts, model.game_title);
-    int n = std::max(1, (int)lines.size());
-    return kDetailTitleBaseline + (n - 1) * pitch + fonts.descent(ts.px);
-}
-
-namespace {
-
 constexpr int kTurnStart = std_px(tok::turnedLineStart);
 constexpr int kTurnEnd = std_px(tok::edge);
 constexpr int kTurnWrap = kTurnStart - kTurnEnd;

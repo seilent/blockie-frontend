@@ -97,6 +97,7 @@ void MotionCtl::dirty(Rect r)
 
 void MotionCtl::render_to()
 {
+    int64_t c0 = clock_us ? clock_us() : 0;
     to_dirty_ = false;
     Rect full = to_.surface().rect();
     Rect bound = forward_dir() ? play_.to_bound.intersect(full) : full;
@@ -114,6 +115,20 @@ void MotionCtl::render_to()
             play_.duration = d;
     }
     prev_t_ = -1;
+    if (clock_us)
+        to_us_ = (int)(clock_us() - c0);
+}
+
+bool MotionCtl::compose_end(const Surface& dst)
+{
+    if (!play_.forward)
+        return false;
+    Surface f = from_.surface();
+    Surface t = to_.surface();
+    bool fw = forward_dir();
+    int64_t ft = fw ? play_.duration : 0;
+    play_.forward(fw ? f : t, fw ? t : f, dst, ft, -1);
+    return true;
 }
 
 void MotionCtl::input(int64_t now, const std::function<InputResult()>& nav)
@@ -124,7 +139,9 @@ void MotionCtl::input(int64_t now, const std::function<InputResult()>& nav)
     if (keep)
         keep();
     started_ = false;
+    navigating_ = true;
     InputResult r = nav ? nav() : InputResult{};
+    navigating_ = false;
     if (started_)
         return;
     if (!r.changed && !r.launched)
@@ -158,6 +175,7 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
             kind_ = k;
             end_shown_ = false;
             part_ = Rect{};
+            from_us_ = -1;
             if (settle)
                 settle();
             render_to();
@@ -180,6 +198,7 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
         to_dirty_ = true;
         return;
     }
+    int64_t c0 = clock_us ? clock_us() : 0;
     if (opens(k) || after) {
         copied_ = !after && !moving && !stale_ && !play_.details && last && !(redraw_pending && redraw_pending());
         if (copied_)
@@ -189,6 +208,7 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
     } else if (last) {
         last(from_.surface());
     }
+    from_us_ = clock_us ? (int)(clock_us() - c0) : -1;
     if (settle)
         settle();
     render_to();

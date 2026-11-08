@@ -380,6 +380,9 @@ build_app() {
     pool "$appobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
+    for s in homeflow home motion slide glide t9; do
+        pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
     pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
     pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
@@ -395,6 +398,7 @@ build_app() {
         "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
+        "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
         "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
@@ -712,7 +716,7 @@ build_shot() {
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
-    for s in vtext nav home motion glide t9 slide pagemove repeat pops; do
+    for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
@@ -725,7 +729,7 @@ build_shot() {
         "$shotobj/screen_settings.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
         "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/vtext.o" "$shotobj/nav.o" "$shotobj/home.o" \
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
-        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/shot.o" \
+        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"

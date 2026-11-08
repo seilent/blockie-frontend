@@ -60,8 +60,6 @@ constexpr int kMenuVisibleRows = 6;
 constexpr int kMenuPitchPx = 96;
 constexpr int kMenuFirstBaseline = 96;
 
-int detail_title_bottom(Fonts& fonts, const SelectorModel& model);
-
 void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, bool scatter = false,
                    bool detail = false, const Theme& th = theme(), bool expanded = false);
 void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, bool detail, const Theme& th = theme());

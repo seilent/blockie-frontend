@@ -100,7 +100,7 @@ Clip ramp(int jump_at)
     return c;
 }
 
-int judge(const Clip& c, bool lead = true)
+int judge(const Clip& c, bool lead, std::vector<std::string>& lines)
 {
     std::vector<PopDiff> diffs(c.frames.size());
     for (size_t i = 1; i < c.frames.size(); i++) {
@@ -110,8 +110,24 @@ int judge(const Clip& c, bool lead = true)
             pop_count(c.frames[i - 1].data(), c.frames[i + 1].data(), kW, kH, c.rows[i].b, c.rows[i].art,
                       diffs[i].skip, diffs[i].e_skip, nullptr);
     }
-    std::vector<std::string> lines;
     return pop_judge(c.rows, diffs, lead, lines);
+}
+
+int judge(const Clip& c, bool lead = true)
+{
+    std::vector<std::string> lines;
+    return judge(c, lead, lines);
+}
+
+bool names(const Clip& c, const char* fail)
+{
+    std::vector<std::string> lines;
+    if (judge(c, true, lines) == 0)
+        return false;
+    for (const std::string& l : lines)
+        if (l.find(fail) != std::string::npos)
+            return true;
+    return false;
 }
 
 }
@@ -124,17 +140,17 @@ int main()
         Clip c = clean();
         for (size_t i = kStill; i < c.frames.size(); i++)
             fill(c.frames[i], 0, 432, 0x808080);
-        check(judge(c) > 0, "a whole left pane switch at the input frame fails");
+        check(names(c, "FAIL step in x < 432"), "a whole left pane switch at the input frame fails as a step");
     }
     {
         Clip c = clean();
         fill(c.frames[kStill + 4], 0, 432, 0xF0F0F0);
-        check(judge(c) > 0, "a one frame flash in the middle of the motion fails");
+        check(names(c, "FAIL flash in x < 432"), "a one frame flash in the middle of the motion fails as a flash");
     }
     {
         Clip c = clean();
         fill(c.frames[kStill], 648, 960, 0xE0E0E0);
-        check(judge(c) > 0, "a flash at the exit input frame fails");
+        check(names(c, "FAIL flash in right of b"), "a flash at the exit input frame fails as a flash");
     }
     {
         Clip c = clean();
@@ -182,11 +198,12 @@ int main()
     check(judge(path({1, 2, 3, 4, 5, 4, 3, 2, 1, 0})) == 0, "an exact turnaround on the motion path passes");
     check(judge(path({1, 2, 3, 4, 5, 3, 2, 1, 0})) == 0, "a turnaround whose return is off by one step passes");
     check(judge(ramp(-1)) == 0, "a ramp of 7, 8 and 9 levels a frame over 1500 px passes");
-    check(judge(ramp(5)) > 0, "a 95 level jump of a second 1500 px block for one frame inside the ramp fails");
+    check(names(ramp(5), "FAIL flash in right of b"),
+          "a 95 level jump of a second 1500 px block for one frame inside the ramp fails as a flash");
     {
         Clip c = path({1, 2, 3, 4, 5, 4, 3, 2, 1, 0});
         fill(c.frames[kStill + 4], 648, 960, 0xE0E0E0);
-        check(judge(c) > 0, "a one frame wrong buffer at a turnaround fails");
+        check(names(c, "FAIL flash in right of b"), "a one frame wrong buffer at a turnaround fails as a flash");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

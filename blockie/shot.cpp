@@ -18,23 +18,19 @@
 #include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
 #include "../gfx/png.h"
-#include "../ui/roles.h"
 #include "bt_model.h"
 #include "fold.h"
-#include "glide.h"
 #include "home.h"
+#include "homeflow.h"
 #include "image.h"
 #include "ink.h"
 #include "motion.h"
 #include "nav.h"
-#include "pagemove.h"
 #include "pops.h"
 #include "repeat.h"
 #include "screen_bt.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
-#include "slide.h"
-#include "t9.h"
 #include "theme.h"
 #include "tile_grid.h"
 
@@ -256,6 +252,7 @@ struct DriveOpts {
     int64_t at = -1;
     int tail = 0;
     double cadence = 0;
+    bool repeat_covers = false;
 };
 
 constexpr const char* kNames[] = {"GB", "GBC", "NES", "SNES", "Genesis", "GBA", "PS1", "N64", "PSP", "DC"};
@@ -263,6 +260,7 @@ constexpr int kCounts[] = {28, 19, 63, 47, 35, 52, 31, 22, 14, 9};
 constexpr int kRecentIds = 900000;
 constexpr int kSystemIds = 1000;
 constexpr int kDriveGamesMax = 99;
+constexpr int kCoverCap = 40;
 constexpr int64_t kDriveCapMs = 20000;
 constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
 
@@ -280,16 +278,24 @@ void copy_surface(const Surface& src, const Surface& dst)
         copy_px(dst.row(y), src.row(y), dst.w);
 }
 
-enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop };
+FlowOpts flow_opts(const DriveOpts& o)
+{
+    FlowOpts f;
+    f.big = o.big;
+    f.slots = o.slots;
+    f.left = o.left;
+    f.unit = o.unit;
+    f.t9_edge = o.t9_edge;
+    f.bar_slot = o.bar_slot;
+    f.grid_band = o.grid_band;
+    return f;
+}
 
-class Drive : public NavHost {
+class Drive {
 public:
-    Drive(Fonts& fonts, const DriveOpts& o) : fonts_(fonts), o_(o) {}
+    Drive(Fonts& fonts, const DriveOpts& o) : flow(fonts, flow_opts(o)), fonts_(fonts), o_(o) {}
 
-    Nav nav;
-    HomeState home;
-    SelectorModel model;
-    std::vector<MenuKind> kinds;
+    HomeFlow flow;
     std::vector<std::vector<HomeGame>> games;
     std::vector<HomeGame> recent_games;
     std::vector<Art> sys_covers;
@@ -302,15 +308,32 @@ public:
             fprintf(stderr, "blockie-shot: bad --script %s\n", o_.script.c_str());
             return false;
         }
-        nav.cols = o_.big ? kBigCols : kGridColsWide;
-        nav.recent_map = o_.slots;
-        nav.partial_rows = true;
-        nav.menu_top = std::max(0, nav.focus - (kMenuVisibleRows - 1));
-        home.cols = nav.cols;
-        home.rows = o_.big ? kBigRows : Nav::kRows;
-        home.pad_rows = o_.grid_band ? 1 : 0;
-        home.recent_cap = kGridColsWide * Nav::kRows;
-        home.load = [this](const HomeGame& g) -> Art {
+        flow.games = [this](int sys) {
+            return sys >= 0 && sys < (int)games.size() ? games[sys] : std::vector<HomeGame>();
+        };
+        flow.launch_game = [this](const HomeGame& g) {
+            played_ = g;
+            playing_ = true;
+            flow.land_all(now_, "child");
+            return true;
+        };
+        flow.draw_page = [this](Canvas& c, Screen, int64_t) {
+            SettingsView sv;
+            sv.light = theme().light;
+            sv.sheet_focus = theme().light ? 1 : 0;
+            draw_settings(c, fonts_, ink_, sv, theme());
+        };
+        flow.rearm = [this](int64_t now) { repeat_.rearm(now); };
+        flow.last_frame = [this](const Surface& s) { copy_surface(last_.surface(), s); };
+        flow.setup();
+        flow.ctl.can_animate = []() { return true; };
+        flow.ctl.landed = [this](const char* what, const char* why) {
+            fprintf(stderr, "blockie-shot: %lld ms %s landed (%s)\n", (long long)now_, what, why);
+            bool by_input = !in_frame_ && !flow.ctl.navigating();
+            if (by_input && std::strcmp(why, "end") == 0 && std::strcmp(what, "startup") != 0)
+                end_check_input();
+        };
+        flow.home.load = [this](const HomeGame& g) -> Art {
             if (late_.count(g.id) && !arrived_)
                 return nullptr;
             auto it = art.find(g.id);
@@ -321,52 +344,16 @@ public:
         if (o_.arrive >= 0)
             for (const HomeGame& g : list)
                 late_.insert(g.id);
-        home.deal_recent(model, list);
-        ctl_.render = [this](const Surface& s, Rect bound) { draw(s, model, nav, false, fold_focus(nav), bound); };
-        ctl_.render_kept = [this](const Surface& s) {
-            draw(s, kept_, kept_focus(), true, fold_focus(kept_nav_), s.rect());
-        };
-        ctl_.last = [this](const Surface& s) { copy_surface(last_.surface(), s); };
-        ctl_.keep = [this]() {
-            kept_ = model;
-            kept_nav_ = nav;
-        };
-        ctl_.settle = [this]() { sync(true); };
-        ctl_.can_animate = []() { return true; };
-        ctl_.redraw_pending = [this]() { return redraw_; };
-        ctl_.landed = [this](const char* what, const char* why) {
-            fprintf(stderr, "blockie-shot: %lld ms %s landed (%s)\n", (long long)now_, what, why);
-        };
-        ctl_.add({"scroll", [this](int64_t t) { return scroll_.running(t); }, [this]() { scroll_.land(); }});
-        ctl_.add({"bar", [this](int64_t t) { return bar_.running(t); }, [this]() { bar_.land(); }});
-        ctl_.add({"grid", [this](int64_t t) { return grid_.running(t); }, [this]() { grid_.land(); }});
-        ctl_.add({"labels",
-                  [this](int64_t t) {
-                      for (const Glide& g : labels_)
-                          if (g.running(t))
-                              return true;
-                      return false;
-                  },
-                  [this]() {
-                      for (Glide& g : labels_)
-                          g.land();
-                  }});
-        ctl_.add({"t9", [this](int64_t t) { return t9_.running(t); }, [this]() { t9_.land(); }});
+        flow.home.deal_recent(flow.model, list);
         return true;
     }
 
     int run(const std::string& out, const std::string& frames_dir)
     {
-        now_ = 0;
-        sync(true);
-        if (o_.startup) {
-            int rows = std::min(kMenuVisibleRows, std::max(0, (int)model.systems.size() - nav.menu_top));
-            pm_.enter(0, rows, fx_round(tok::motion_homeEnterStagger));
-            FoldPlay p;
-            p.duration = pm_.end();
-            ctl_.start(FoldKind::Startup, p, 0);
-        }
-        draw(last_.surface(), model, nav, false, nav.pane, kScreen);
+        set_now(0);
+        if (o_.startup)
+            flow.startup(0);
+        flow.draw(last_.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
         FILE* side = nullptr;
         if (!frames_dir.empty() && !(side = fopen((frames_dir + "/frames.txt").c_str(), "w"))) {
             fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
@@ -381,33 +368,34 @@ public:
             if (stop)
                 tf = o_.at;
             advance(tf);
-            now_ = tf;
+            set_now(tf);
             fonts_.next_frame();
-            bool was_fold = ctl_.active();
-            bool was_details = ctl_.details();
-            FoldKind was_kind = ctl_.kind();
-            bool step_in = step_in_;
-            step_in_ = false;
-            bool motion = was_moving || ctl_.animating(tf);
-            Rect art = art_rect_;
-            art_rect_ = Rect{};
+            MotionCtl& ctl = flow.ctl;
+            bool was_fold = ctl.active();
+            bool was_details = ctl.details();
+            FoldKind was_kind = ctl.kind();
+            bool step_in = flow.take_step_in();
+            bool motion = was_moving || flow.animating(tf);
+            Rect art_r = flow.take_art_rect();
             copy_surface(last_.surface(), prev_.surface());
-            bool more = ctl_.frame(tf, last_.surface());
+            in_frame_ = true;
+            bool more = flow.frame(tf, last_.surface());
+            in_frame_ = false;
             was_moving = more;
-            redraw_ = false;
-            int step = 0, ok = 1;
+            int step = 0, ok = input_ok_;
+            input_ok_ = 1;
             if (step_in) {
                 step = 1;
                 Buffer ref;
-                draw(ref.surface(), kept_, kept_focus(), true, Pane::Details, kScreen);
+                flow.draw(ref.surface(), flow.kept(), flow.kept_focus(), true, Pane::Details, kScreen);
                 ok = same_px(ref.surface(), last_.surface());
             }
-            if (was_fold && !ctl_.active() && was_kind != FoldKind::Startup) {
+            if (was_fold && !ctl.active() && was_kind != FoldKind::Startup) {
                 bool collapse_step = was_details && was_kind == FoldKind::Collapse;
                 if (collapse_step) {
                     step = 1;
                     Buffer ref;
-                    draw(ref.surface(), model, nav, false, Pane::Details, kScreen);
+                    flow.draw(ref.surface(), flow.model, flow.nav, false, Pane::Details, kScreen);
                     ok = same_px(ref.surface(), prev_.surface());
                 } else {
                     ok = same_px(prev_.surface(), last_.surface());
@@ -424,8 +412,8 @@ public:
                     fclose(side);
                     return 1;
                 }
-                if (fprintf(side, "%d %lld %d %d %d %d %d %d %d %d\n", written, (long long)tf, boundary(tf),
-                            motion ? 1 : 0, step, ok, art.x0, art.y0, art.x1, art.y1) < 0) {
+                if (fprintf(side, "%d %lld %d %d %d %d %d %d %d %d\n", written, (long long)tf, flow.boundary(tf),
+                            motion ? 1 : 0, step, ok, art_r.x0, art_r.y0, art_r.x1, art_r.y1) < 0) {
                     fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
                     fclose(side);
                     return 1;
@@ -460,85 +448,34 @@ public:
         return 0;
     }
 
-    int menu_count() const override { return (int)model.systems.size(); }
-    MenuKind menu_kind(int i) const override
-    {
-        return i >= 0 && i < (int)kinds.size() ? kinds[i] : MenuKind::System;
-    }
-    int recent_count() const override { return (int)home.recent.size(); }
-
-    int enter_system(int sys) override
-    {
-        if (sys < 0 || sys >= (int)games.size() || games[sys].empty())
-            return 0;
-        home.enter(model, model.systems[sys].name, games[sys]);
-        t9_.set(model.game_title);
-        repeat_.rearm(now_);
-        want_ = Want::Enter;
-        return (int)games[sys].size();
-    }
-
-    void exit_system() override
-    {
-        home.leave(model);
-        t9_.set(std::string());
-        repeat_.rearm(now_);
-        want_ = Want::Exit;
-    }
-
-    void system_moved(bool scrolled) override
-    {
-        home.window(model, nav.sys_scroll, nav.sys_focus, scrolled);
-        t9_.change(model.game_title, now_);
-        warm_turned(fonts_, model);
-    }
-
-    void launch_recent(int i) override
-    {
-        if (i >= 0 && i < (int)home.recent.size())
-            launch(home.recent[i]);
-    }
-
-    void launch_system_game(int i) override
-    {
-        if (i >= 0 && i < (int)home.sysgames.size())
-            launch(home.sysgames[i]);
-    }
-
-    void push(Screen) override
-    {
-        repeat_.rearm(now_);
-        want_ = Want::Push;
-    }
-
-    void pop(Screen) override
-    {
-        repeat_.rearm(now_);
-        want_ = Want::Pop;
-    }
-
-    bool page_action(Screen, PadAction a, bool repeat) override { return a == PadAction::Back && !repeat; }
-
-    void pane_moved(Pane p) override
-    {
-        repeat_.rearm(now_);
-        want_ = p == Pane::Details ? Want::RecentIn : Want::RecentOut;
-    }
-
 private:
+    void end_check_input()
+    {
+        MotionCtl& ctl = flow.ctl;
+        Buffer end, ref;
+        if (!ctl.compose_end(end.surface()))
+            return;
+        bool collapse_step = ctl.details_play() && ctl.kind() == FoldKind::Collapse;
+        flow.draw(ref.surface(), flow.model, flow.nav, false, collapse_step ? Pane::Details : flow.nav.pane, kScreen);
+        bool ok = same_px(end.surface(), ref.surface());
+        if (!ok)
+            input_ok_ = 0;
+        fprintf(stderr, "blockie-shot: %lld ms %s end check on an input %s\n", (long long)now_,
+                fold_kind_name(ctl.kind()),
+                ok ? (collapse_step ? "the end pose equals the destination with Details focus"
+                                    : "the end pose equals a fresh render")
+                   : "FAILED");
+    }
+
+    void set_now(int64_t t)
+    {
+        now_ = t;
+        flow.at(t);
+    }
+
     int64_t frame_time(int n) const
     {
         return o_.cadence > 0 ? (int64_t)(n * o_.cadence) : frame_ms(n);
-    }
-
-    Pane fold_focus(const Nav& n) const { return ctl_.details() ? Pane::Details : n.pane; }
-
-    Nav kept_focus() const
-    {
-        Nav k = kept_nav_;
-        if (ctl_.details())
-            k.tile_focus = nav.tile_focus;
-        return k;
     }
 
     int64_t snap(int64_t ms) const
@@ -549,224 +486,21 @@ private:
         return frame_time(n);
     }
 
-    int boundary(int64_t t) const
-    {
-        if (ctl_.active() && plan_)
-            return slide_pose(*plan_, ctl_.forward_time(t)).boundary;
-        if (nav.pane != Pane::Details || nav.top() != Screen::Home)
-            return kPaneSplit;
-        return nav.system_view ? kPaneSplitWide : recent_edge();
-    }
-
-    SelectorModel posed(const SelectorModel& base, const Nav& n, bool at_target, Pane focus) const
-    {
-        SelectorModel m = base;
-        int64_t t = now_;
-        m.focus = n.focus;
-        m.big = o_.big;
-        m.t9_edge = o_.t9_edge;
-        m.slots = n.system_view ? SlotMap::RowMajor : o_.slots;
-        m.grid_band = o_.grid_band;
-        m.menu_top_px = at_target ? scroll_.target() : scroll_.at(t);
-        int bar = at_target ? bar_.target() : bar_.at(t);
-        m.bar_baseline = o_.bar_slot ? bar : bar - m.menu_top_px;
-        m.label_a256.clear();
-        if (focus == Pane::Selector) {
-            m.label_a256.assign(m.systems.size(), 256);
-            for (size_t i = 0; i < m.systems.size() && i < labels_.size(); i++)
-                m.label_a256[i] = at_target ? labels_[i].target() : labels_[i].at(t);
-        }
-        if (n.system_view) {
-            m.tile_focus = n.sys_focus - home.first;
-            int gy = at_target ? grid_.target() : grid_.at(t);
-            m.grid_y_px = home.first / std::max(1, home.cols) * kGridRowPitch - gy;
-            if (!at_target) {
-                m.game_title = t9_.shown(t);
-                T9Pose tp = t9_.pose(t);
-                m.title_shift = tp.shift;
-                m.title_a256 = tp.a256;
-            }
-        } else {
-            m.tile_focus = focus == Pane::Details ? n.tile_focus : -1;
-            m.grid_y_px = 0;
-        }
-        if (ctl_.folding(t) && ctl_.kind() == FoldKind::Startup) {
-            m.poses.resize(m.systems.size());
-            for (int i = 0; i < (int)m.systems.size(); i++) {
-                ItemPose ip = pm_.item(t, i - n.menu_top);
-                m.poses[i] = {ip.dx, ip.a256};
-            }
-            m.grid_a256 = pm_.grid_a256(t);
-            m.bar_a256 = pm_.bar_a256(t);
-        }
-        return m;
-    }
-
-    SelectorModel turned(const SelectorModel& base, const Nav& n) const
-    {
-        SelectorModel m = posed(base, n, true, n.pane);
-        m.tiles.clear();
-        return m;
-    }
-
-    void draw(const Surface& dst, const SelectorModel& base, const Nav& n, bool at_target, Pane focus, Rect bound)
-    {
-        Canvas c(dst);
-        c.set_bound(bound);
-        if (n.top() != Screen::Home) {
-            SettingsView sv;
-            sv.light = theme().light;
-            sv.sheet_focus = theme().light ? 1 : 0;
-            draw_settings(c, fonts_, ink_, sv, theme());
-            return;
-        }
-        SelectorModel m = posed(base, n, at_target, focus);
-        bool expanded = n.pane == Pane::Details;
-        m.header_dim = !expanded && focus == Pane::Details;
-        draw_selector(c, fonts_, m, focus, false, n.system_view, theme(), expanded);
-    }
-
-    int recent_edge() const
-    {
-        return o_.big ? big_tile_rect(kBigCols - 1).x1 : grid_tile_rect(kGridColsWide - 1, kGridColsWide).x1;
-    }
-
-    FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, SlideMode mode)
-    {
-        int target = mode == SlideMode::System ? kPaneSplitWide : recent_edge();
-        Rect head = header_rect(fonts_, collapsed);
-        auto plan = std::make_shared<SlidePlan>(slide_plan(mode, target, o_.left, o_.unit, head));
-        plan_ = plan;
-        FoldPlay p;
-        p.details = mode == SlideMode::Recent;
-        p.to_bound = Rect{0, 0, kPaneSplitWide, kPortraitH};
-        p.duration = slide_duration(*plan);
-        SlideText text;
-        if (mode == SlideMode::System) {
-            auto tm = std::make_shared<const SelectorModel>(em);
-            Fonts* f = &fonts_;
-            text = [tm, f](Canvas& c, int shift, int a) {
-                SelectorModel m = *tm;
-                m.turn_shift = shift;
-                m.turn_a256 = a;
-                draw_turned(c, *f, m, true, theme());
-            };
-        }
-        p.prepare = [plan](const Surface& a, const Surface& b) {
-            slide_prepare(*plan, a, b);
-            return slide_duration(*plan);
-        };
-        p.forward = [plan, text](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t prev) {
-            return slide_compose(a, b, dst, *plan, t, prev, theme().bg, text);
-        };
-        return p;
-    }
-
-    FoldPlay page_play()
-    {
-        plan_.reset();
-        FoldPlan plan = fold_plan(FoldDir::PagePush, nav.focus - nav.menu_top, 0);
-        FoldPlay p;
-        p.duration = fold_duration(plan);
-        auto shared = std::make_shared<const FoldPlan>(plan);
-        p.forward = [shared](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
-            fold_compose(a, b, dst, *shared, t);
-            return dst.rect();
-        };
-        return p;
-    }
-
-    void start_wanted()
-    {
-        Want w = want_;
-        want_ = Want::None;
-        switch (w) {
-        case Want::Enter:
-            ctl_.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, SlideMode::System), now_);
-            break;
-        case Want::Exit:
-            ctl_.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, SlideMode::System), now_);
-            break;
-        case Want::RecentIn:
-            ctl_.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, SlideMode::Recent), now_);
-            step_in_ = ctl_.details() && ctl_.kind() == FoldKind::Expand && !ctl_.reversed();
-            break;
-        case Want::RecentOut:
-            ctl_.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, SlideMode::Recent), now_);
-            break;
-        case Want::Push:
-            ctl_.start(FoldKind::Push, page_play(), now_);
-            break;
-        case Want::Pop:
-            ctl_.start(FoldKind::Pop, page_play(), now_);
-            break;
-        case Want::None:
-            break;
-        }
-    }
-
-    void launch(const HomeGame& g)
-    {
-        played_ = g;
-        playing_ = true;
-        launched_ = true;
-        ctl_.land_all(now_, "child");
-    }
-
     void game_returned()
     {
         if (!playing_)
             return;
         playing_ = false;
-        home.game_ran(model, played_first(home.recent, played_, home.recent_cap), nav);
-        ctl_.dirty();
-        redraw_ = true;
+        flow.game_ran(played_first(flow.home.recent, played_, flow.home.recent_cap));
     }
 
-    void sync(bool instant)
-    {
-        int64_t t = now_;
-        auto go = [&](Glide& g, int target, int dur, Curve c) {
-            if (instant)
-                g.set(target);
-            else
-                g.to(target, t, dur, c);
-        };
-        go(scroll_, nav.menu_top * kMenuPitchPx, fx_round(tok::motion_scroll), Curve::EaseIn);
-        int slot = o_.bar_slot ? nav.focus - nav.menu_top : nav.focus;
-        go(bar_, kMenuFirstBaseline + slot * kMenuPitchPx, fx_round(tok::motion_focusCursor), Curve::Sine);
-        labels_.resize(model.systems.size());
-        for (size_t i = 0; i < labels_.size(); i++) {
-            bool lit = nav.pane == Pane::Selector && (int)i == nav.focus;
-            go(labels_[i], alpha256(lit ? role::homeItem.alpha : tok::type_homeItem_alphaDim),
-               fx_round(tok::motion_focusAlpha), Curve::Linear);
-        }
-        int gy = nav.system_view ? nav.sys_scroll * kGridRowPitch : 0;
-        if (o_.grid_band && !instant)
-            grid_.to(gy, t, fx_round(tok::motion_scroll), Curve::EaseIn);
-        else
-            grid_.set(gy);
-    }
-
-    void input(PadAction a, bool rep)
-    {
-        launched_ = false;
-        want_ = Want::None;
-        ctl_.input(now_, [&]() {
-            InputResult r;
-            r.changed = nav_apply(nav, *this, a, rep);
-            r.launched = launched_;
-            start_wanted();
-            return r;
-        });
-        sync(ctl_.started());
-    }
+    void input(PadAction a, bool rep) { flow.input(a, rep, now_); }
 
     int64_t step_time(size_t i)
     {
         Step& st = steps_[i];
         if (st.pct >= 0) {
-            st.ms = ctl_.t0() + ctl_.run_length() * st.pct / 100;
+            st.ms = flow.ctl.t0() + flow.ctl.run_length() * st.pct / 100;
             st.pct = -1;
         }
         if (i > 0)
@@ -785,7 +519,7 @@ private:
         if (st.key == "theme") {
             if (st.down) {
                 set_theme_light(!theme().light);
-                ctl_.land("theme");
+                flow.theme_changed();
             }
             return;
         }
@@ -804,21 +538,10 @@ private:
     void arrive()
     {
         arrived_ = true;
-        bool expanded = nav.pane == Pane::Details;
         for (int64_t id : late_) {
             auto it = art.find(id);
-            if (it == art.end())
-                continue;
-            std::vector<Art> before = model.tiles;
-            if (!home.drop(model, id, 0, it->second))
-                continue;
-            redraw_ = true;
-            for (int k = 0; k < (int)model.tiles.size(); k++)
-                if (k >= (int)before.size() || model.tiles[k] != before[k]) {
-                    Rect r = tile_slot_rect(posed(model, nav, false, fold_focus(nav)), k, expanded);
-                    ctl_.dirty(r);
-                    art_rect_ = art_rect_.unite(r);
-                }
+            if (it != art.end())
+                flow.art(id, 0, it->second);
         }
     }
 
@@ -831,7 +554,7 @@ private:
             int64_t t = std::min({te, tr, ta});
             if (t > tf || t == kNever)
                 return;
-            now_ = t;
+            set_now(t);
             if (t == ta) {
                 arrive();
                 continue;
@@ -848,32 +571,19 @@ private:
 
     Fonts& fonts_;
     DriveOpts o_;
-    MotionCtl ctl_;
     Repeat repeat_;
-    Glide scroll_;
-    Glide bar_;
-    Glide grid_;
-    std::vector<Glide> labels_;
-    T9 t9_;
-    PageMove pm_;
     InkLayer ink_;
     Buffer last_;
     Buffer prev_;
-    SelectorModel kept_;
-    Nav kept_nav_;
     int64_t now_ = 0;
-    bool launched_ = false;
     bool playing_ = false;
-    bool redraw_ = false;
-    Rect art_rect_;
-    bool step_in_ = false;
-    Want want_ = Want::None;
-    std::shared_ptr<SlidePlan> plan_;
     HomeGame played_;
     std::vector<Step> steps_;
     size_t next_ = 0;
     std::unordered_set<int64_t> late_;
     bool arrived_ = false;
+    bool in_frame_ = false;
+    int input_ok_ = 1;
 };
 
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
@@ -881,14 +591,30 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
               const std::string& recent_dir)
 {
     auto d = std::make_unique<Drive>(fonts, o);
-    if (!o.noart && !load_tiles(tiles_dir, d->sys_covers, 40, o.big ? kBigTileSide : kTileSide))
+    if (!o.noart && !load_tiles(tiles_dir, d->sys_covers, kCoverCap, o.big ? kBigTileSide : kTileSide))
         return 1;
     std::vector<std::string> titles, rtitles;
-    if (!load_tiles(recent_dir, d->recent_covers, 40) || !read_lines(o.titles, titles) ||
+    if (!load_tiles(recent_dir, d->recent_covers, kCoverCap) || !read_lines(o.titles, titles) ||
         !read_lines(o.recent_titles, rtitles))
         return 1;
     systems = std::max(1, std::min(systems, 10));
     int focus = std::clamp(sys_focus, 0, systems + (items ? 2 : 0) - 1);
+    if (!o.repeat_covers) {
+        bool enters = o.script.find("accept") != std::string::npos;
+        int games_n = focus < systems ? std::min(kDriveGamesMax, o.sys_games > 0 ? o.sys_games : kCounts[focus]) : 0;
+        int shown = enters ? std::min(games_n, kCoverCap) : 0;
+        int played = std::min(o.recent_n, kGridColsWide * Nav::kRows);
+        if (!d->sys_covers.empty() && (int)d->sys_covers.size() < shown) {
+            fprintf(stderr, "blockie-shot: %zu covers for %d games, pass --repeat-covers to reuse them\n",
+                    d->sys_covers.size(), shown);
+            return 1;
+        }
+        if (!d->recent_covers.empty() && (int)d->recent_covers.size() < played) {
+            fprintf(stderr, "blockie-shot: %zu recent covers for %d played, pass --repeat-covers to reuse them\n",
+                    d->recent_covers.size(), played);
+            return 1;
+        }
+    }
     for (int s = 0; s < systems; s++) {
         int count = std::min(kDriveGamesMax, s == focus && o.sys_games > 0 ? o.sys_games : kCounts[s]);
         std::vector<HomeGame> list;
@@ -904,14 +630,14 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
             list.push_back(g);
         }
         d->games.push_back(list);
-        d->model.systems.push_back({kNames[s], count, ""});
-        d->kinds.push_back(MenuKind::System);
+        d->flow.model.systems.push_back({kNames[s], count, ""});
+        d->flow.kinds.push_back(MenuKind::System);
     }
     if (items) {
-        d->model.systems.push_back({"bluetooth", 0, bt_sub.empty() ? "not connected" : bt_sub});
-        d->kinds.push_back(MenuKind::Bluetooth);
-        d->model.systems.push_back({"settings", 0, "display"});
-        d->kinds.push_back(MenuKind::Settings);
+        d->flow.model.systems.push_back({"bluetooth", 0, bt_sub.empty() ? "not connected" : bt_sub});
+        d->flow.kinds.push_back(MenuKind::Bluetooth);
+        d->flow.model.systems.push_back({"settings", 0, "display"});
+        d->flow.kinds.push_back(MenuKind::Settings);
     }
     for (int k = 0; k < kGridColsWide * Nav::kRows; k++) {
         HomeGame g;
@@ -922,7 +648,7 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
             d->art[g.id] = d->recent_covers[(size_t)k % d->recent_covers.size()];
         d->recent_games.push_back(g);
     }
-    d->nav.focus = focus;
+    d->flow.nav.focus = focus;
     if (!d->setup())
         return 2;
     return d->run(out, frames_dir);
@@ -971,6 +697,10 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
         if (i + 1 < rows.size()) {
             if (!load_frame(dir, rows[i + 1].n, f2))
                 return 1;
+            if (f2.w != f0.w || f2.h != f0.h) {
+                printf("FAIL frame %d changes size\n", rows[i + 1].n);
+                return 1;
+            }
             pop_count(f0.rgb.data(), f2.rgb.data(), f0.w, f0.h, rows[i].b, rows[i].art, diffs[i].skip,
                       diffs[i].e_skip, nullptr);
         }
@@ -1008,7 +738,6 @@ int main(int argc, char** argv)
     std::string recent_dir;
     std::string header;
     std::string page;
-    std::string fold_dir;
     std::string page_flip;
     std::string frames_dir;
     std::string bt_sub;
@@ -1071,8 +800,6 @@ int main(int argc, char** argv)
             sheet = true;
         else if (a == "--sheetfocus" && i + 1 < argc)
             sheet_focus = atoi(argv[++i]);
-        else if (a == "--fold" && i + 1 < argc)
-            fold_dir = argv[++i];
         else if (a == "--pageflip" && i + 1 < argc)
             page_flip = argv[++i];
         else if (a == "--frames" && i + 1 < argc)
@@ -1111,6 +838,8 @@ int main(int argc, char** argv)
             drive.tail = std::max(0, atoi(argv[++i]));
         else if (a == "--cadence" && i + 1 < argc)
             drive.cadence = atof(argv[++i]);
+        else if (a == "--repeat-covers")
+            drive.repeat_covers = true;
         else if (a == "--pops" && i + 1 < argc)
             pops_dir = argv[++i];
         else if (a == "--no-lead")
@@ -1159,7 +888,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "blockie-shot: --menutop is not a --drive option, the drive keeps the focus in view\n");
         return 2;
     }
-    bool sequence = !fold_dir.empty() || !page_flip.empty();
+    bool sequence = !page_flip.empty();
     bool driven = drive.on && (!out.empty() || !frames_dir.empty());
     if (!driven && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
         fprintf(stderr,
@@ -1167,13 +896,12 @@ int main(int argc, char** argv)
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
                 " [--light] [--page settings] [--sheet] [--sheetfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]"
                 " [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
-                "       blockie-shot --fold ab|ba --frames DIR [--recent DIR] [same options]\n"
                 "       blockie-shot --pageflip push|pop --frames DIR [same options]\n"
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY:d|u:MS|PCT%%,...] [--at MS] [--from MS]"
                 " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
                 " [--recentsys NAME] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3] [--t9clip pane|edge]"
                 " [--bar content|slot] [--gridscroll band] [--startup] [--arrive MS]"
-                " [--tail N] [--cadence MS] [--fallback FONT] [same options]\n"
+                " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n");
         return 2;
     }
@@ -1220,39 +948,6 @@ int main(int argc, char** argv)
     sv.sheet = sheet ? kOne : 0;
     sv.sheet_focus = sheet_focus >= 0 ? sheet_focus : (light ? 1 : 0);
 
-    if (!fold_dir.empty()) {
-        SelectorModel menu = model;
-        menu.section_label.clear();
-        menu.game_system.clear();
-        menu.game_title.clear();
-        menu.tile_focus = -1;
-        if (!recent_dir.empty() && !load_tiles(recent_dir, menu.tiles))
-            return 1;
-        Buffer sel;
-        Buffer det;
-        Canvas sc(sel.surface());
-        draw_selector(sc, fonts, menu, Pane::Selector, scatter, false);
-        Canvas dc(det.surface());
-        draw_selector(dc, fonts, model, Pane::Details, scatter, true);
-        bool ab = fold_dir == "ab";
-        FoldPlan plan = fold_plan(ab ? FoldDir::ToDetails : FoldDir::ToSelector, model.focus - menu_top,
-                                  detail_title_bottom(fonts, model));
-        int64_t dur = fold_duration(plan);
-        Buffer outb;
-        int n = 0;
-        for (int64_t t = 0;; t = frame_ms(n)) {
-            int64_t tt = std::min(t, dur);
-            fold_compose(ab ? sel.surface() : det.surface(), ab ? det.surface() : sel.surface(), outb.surface(), plan, tt);
-            if (!write_png(frame_path(frames_dir, n++), outb.surface()))
-                return 1;
-            if (tt >= dur)
-                break;
-        }
-        fprintf(stderr, "blockie-shot: fold %s row %d rings %d %lld ms %d frames\n", fold_dir.c_str(),
-                model.focus - menu_top, plan.maxring + 1, (long long)dur, n);
-        return 0;
-    }
-
     if (!page_flip.empty()) {
         bool push = page_flip == "push";
         Buffer menub;
@@ -1261,20 +956,32 @@ int main(int argc, char** argv)
         draw_selector(mc, fonts, model, Pane::Selector, scatter, false);
         Canvas pc(pageb.surface());
         draw_settings(pc, fonts, ink, sv, theme());
-        FoldPlan plan = fold_plan(push ? FoldDir::PagePush : FoldDir::PagePop, model.focus - menu_top, 0);
-        int64_t dur = fold_duration(plan);
+        auto plan = std::make_shared<const FoldPlan>(fold_page(model.focus - menu_top));
+        int64_t dur = fold_duration(*plan);
+        Surface shown = push ? menub.surface() : pageb.surface();
+        Surface dest = push ? pageb.surface() : menub.surface();
+        MotionCtl ctl;
+        ctl.render = [&](const Surface& s, Rect) { copy_surface(dest, s); };
+        ctl.last = [&](const Surface& s) { copy_surface(shown, s); };
+        ctl.render_kept = ctl.last;
+        FoldPlay play;
+        play.duration = dur;
+        play.forward = [plan](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
+            fold_compose(a, b, dst, *plan, t);
+            return dst.rect();
+        };
+        ctl.start(push ? FoldKind::Push : FoldKind::Pop, play, 0);
         Buffer outb;
         int n = 0;
-        for (int64_t t = 0;; t = frame_ms(n)) {
-            int64_t tt = std::min(t, dur);
-            fold_compose(push ? menub.surface() : pageb.surface(), push ? pageb.surface() : menub.surface(),
-                         outb.surface(), plan, tt);
-            if (!write_png(frame_path(frames_dir, n++), outb.surface()))
+        for (;; n++) {
+            int64_t t = frame_ms(n);
+            ctl.frame(t, outb.surface());
+            if (!write_png(frame_path(frames_dir, n), outb.surface()))
                 return 1;
-            if (tt >= dur)
+            if (t >= dur)
                 break;
         }
-        fprintf(stderr, "blockie-shot: page %s %lld ms %d frames\n", page_flip.c_str(), (long long)dur, n);
+        fprintf(stderr, "blockie-shot: page %s %lld ms %d frames\n", page_flip.c_str(), (long long)dur, n + 1);
         return 0;
     }
 

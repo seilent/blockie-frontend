@@ -23,6 +23,7 @@ Input and navigation follow MicroDAP at cb78c74:
 - player/src/core/PadSource.h and DbusPad.cpp: direction repeat timing and the fallback to a still held direction.
 - player/qml/MicroDap/screens/Home.qml: home menu keys, back opening the recent grid, no pane change on a repeat.
 - player/qml/MicroDap/screens/Quickplay.qml: moveVertical, a move onto a partial last row lands on its last tile.
+- player/qml/MicroDap/screens/Quickplay.qml: the grid row scroll, 100 ms easeIn that retargets on every row step.
 
 Page and menu motion reuse:
 

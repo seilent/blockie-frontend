@@ -41,15 +41,14 @@
 #include "bt.h"
 #include "bus.h"
 #include "decodeq.h"
-#include "fold.h"
 #include "framestats.h"
+#include "homeflow.h"
 #include "image.h"
 #include "ink.h"
 #include "input_pad.h"
 #include "launch.h"
 #include "library.h"
 #include "nav.h"
-#include "pagemove.h"
 #include "present_wl.h"
 #include "repeat.h"
 #include "screen_bt.h"
@@ -63,8 +62,6 @@
 namespace fd {
 
 namespace {
-
-enum class Motion { None, Fold, Page };
 
 using Art = std::shared_ptr<const Image>;
 
@@ -97,17 +94,6 @@ int64_t now_us()
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-const char* fold_name(FoldDir d)
-{
-    switch (d) {
-    case FoldDir::ToDetails: return "enter";
-    case FoldDir::ToSelector: return "exit";
-    case FoldDir::PagePush: return "push";
-    case FoldDir::PagePop: return "pop";
-    }
-    return "?";
-}
-
 const char* action_name(PadAction a)
 {
     switch (a) {
@@ -133,33 +119,6 @@ struct ArtDrop {
     std::string path;
     Art img;
     bool decoded = false;
-};
-
-class FnHost : public NavHost {
-public:
-    std::function<int()> count;
-    std::function<MenuKind(int)> kind;
-    std::function<void(Screen)> push_fn;
-    std::function<void(Screen)> pop_fn;
-    std::function<bool(Screen, PadAction, bool)> page_fn;
-    std::function<int()> recent;
-    std::function<int(int)> enter;
-    std::function<void()> leave;
-    std::function<void(bool)> moved;
-    std::function<void(int)> play_recent;
-    std::function<void(int)> play_game;
-
-    int menu_count() const override { return count(); }
-    MenuKind menu_kind(int i) const override { return kind(i); }
-    int recent_count() const override { return recent(); }
-    int enter_system(int sys) override { return enter(sys); }
-    void exit_system() override { leave(); }
-    void system_moved(bool scrolled) override { moved(scrolled); }
-    void launch_recent(int i) override { play_recent(i); }
-    void launch_system_game(int i) override { play_game(i); }
-    void push(Screen sc) override { push_fn(sc); }
-    void pop(Screen sc) override { pop_fn(sc); }
-    bool page_action(Screen sc, PadAction a, bool repeat) override { return page_fn(sc, a, repeat); }
 };
 
 }
@@ -221,11 +180,11 @@ static int run()
     while (data_root.size() > 1 && data_root.back() == '/')
         data_root.pop_back();
     Library lib;
-    SelectorModel model;
-    model.focus = 0;
-    std::vector<Game> recent;
+    FlowOpts fopts;
+    HomeFlow flow(fonts, fopts);
+    SelectorModel& model = flow.model;
     std::vector<std::string> sys_ids;
-    std::vector<MenuKind> kinds;
+    std::vector<MenuKind>& kinds = flow.kinds;
     if (lib.open(data_root)) {
         int n = lib.scan();
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
@@ -251,40 +210,22 @@ static int run()
     std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
 
     bool need_redraw = false;
-    Nav nav;
-    Pane& pane = nav.pane;
-    int& tile_focus = nav.tile_focus;
-    bool& system_view = nav.system_view;
-    std::vector<Game> sysgames;
-    std::vector<Art> recent_hold;
-    int& sys_focus = nav.sys_focus;
-    int& sys_scroll = nav.sys_scroll;
+    Nav& nav = flow.nav;
+    HomeState& home = flow.home;
     Repeat repeat;
     SettingsPage settings_page;
     settings_page.reset(theme().light);
     InkLayer ink;
-    Buffer from_buf;
-    Buffer to_buf;
-    Motion motion = Motion::None;
-    FoldPlan fold;
-    int64_t fold_t0 = 0;
-    bool to_dirty = false;
-    bool end_ready = false;
-    PageMove pm;
     int64_t frame_req_at = -1;
     bool drop_budget = false;
-    int scroll_from = 0;
-    int scroll_to = 0;
-    int64_t scroll_t0 = -1000000000;
-    std::string sys_name;
-    std::unordered_map<int64_t, Art> cover_cache;
+    std::unordered_map<int64_t, Game> by_id;
+    std::unordered_map<int64_t, Art> held;
     Launcher::Child child;
     int64_t child_game_id = -1;
 
     std::deque<ScrapeJob> squeue;
     std::mutex qmutex;
     std::unordered_set<int64_t> requested;
-    int64_t sys_epoch = 0;
     std::mutex art_mutex;
     std::vector<ArtDrop> art_drops;
     std::atomic<bool> scrape_stop{false};
@@ -327,12 +268,8 @@ static int run()
         if (added)
             dcv.notify_one();
     };
-    auto cached = [&](int64_t id) {
-        auto it = cover_cache.find(id);
-        return it != cover_cache.end() ? it->second : Art();
-    };
     auto request_cover = [&](const Game& g, int64_t gen) {
-        if (cover_cache.count(g.id))
+        if (home.cache.count(g.id))
             return true;
         if (failed_covers.count(g.id))
             return false;
@@ -349,168 +286,93 @@ static int run()
                 return sc.libretro_folder;
         return std::string();
     };
-    auto deal_recent = [&]() {
-        std::vector<Art>& grid = system_view ? recent_hold : model.tiles;
-        std::unordered_map<int64_t, Art> had;
-        for (size_t k = 0; k < recent.size() && k < grid.size(); k++)
+    auto home_game = [&](const Game& g) {
+        by_id[g.id] = g;
+        return HomeGame{g.id, g.name, g.system_id};
+    };
+    flow.setup();
+    home.load = [&](const HomeGame& g) -> Art {
+        auto it = held.find(g.id);
+        return it != held.end() ? it->second : Art();
+    };
+    auto deal_recent = [&](bool first) {
+        std::vector<Art>& grid = home.system_view ? home.recent_hold : model.tiles;
+        held.clear();
+        for (size_t k = 0; k < home.recent.size() && k < grid.size(); k++)
             if (grid[k])
-                had[recent[k].id] = grid[k];
-        recent = lib.recent_games(8);
-        grid.clear();
+                held[home.recent[k].id] = grid[k];
+        std::vector<HomeGame> list;
+        for (const Game& g : lib.recent_games(home.recent_cap))
+            list.push_back(home_game(g));
+        std::vector<HomeGame> want = first ? home.deal_recent(model, list) : flow.game_ran(list);
+        held.clear();
         std::unordered_set<int64_t> ids;
-        int queued = 0;
-        for (const Game& g : recent) {
+        for (const HomeGame& g : home.recent)
             ids.insert(g.id);
-            auto it = had.find(g.id);
-            Art art = it != had.end() ? it->second : cached(g.id);
-            if (!art && !request_cover(g, kRecentGen)) {
-                enqueue_scrape(g, 0, folder_of(g.system_id));
-                queued++;
-            }
-            grid.push_back(std::move(art));
-        }
         {
             std::lock_guard<std::mutex> lk(dmutex);
             dq.set_recent(std::move(ids));
         }
+        int queued = 0;
+        for (const HomeGame& hg : want) {
+            const Game& g = by_id[hg.id];
+            if (!request_cover(g, kRecentGen)) {
+                enqueue_scrape(g, 0, folder_of(g.system_id));
+                queued++;
+            }
+        }
         return queued;
     };
-    int recent_jobs = deal_recent();
-    auto scroll_px = [&](int64_t now) {
-        int d = fx_round(tok::motion_scroll);
-        int64_t e = now - scroll_t0;
-        if (e >= d || e < 0)
-            return scroll_to;
-        fx k = curve(Curve::EaseIn, (fx)(e * kOne / d));
-        return scroll_from + (int)(((int64_t)(scroll_to - scroll_from) * k) >> kFxBits);
-    };
-    auto scrolling = [&](int64_t now) { return now - scroll_t0 < fx_round(tok::motion_scroll); };
-    auto visible_rows = [&]() {
-        return std::min(kMenuVisibleRows, std::max(0, (int)model.systems.size() - nav.menu_top));
-    };
-    auto sync_model = [&](int64_t now) {
-        model.focus = nav.focus;
-        if (!system_view)
-            model.tile_focus = pane == Pane::Details ? tile_focus : -1;
-        int target = nav.menu_top * kMenuPitchPx;
-        if (target != scroll_to) {
-            scroll_from = scroll_px(now);
-            scroll_to = target;
-            scroll_t0 = p.activated() && child.pid <= 0 ? now : -1000000000;
-        }
-        model.menu_top_px = scroll_px(now);
-        model.poses.clear();
-        model.grid_a256 = 256;
-        model.bar_a256 = 256;
-        if (motion == Motion::Page && pm.running(now)) {
-            model.poses.resize(model.systems.size());
-            for (int i = 0; i < (int)model.systems.size(); i++) {
-                ItemPose ip = pm.item(now, i - nav.menu_top);
-                model.poses[i] = {ip.dx, ip.a256};
-            }
-            model.grid_a256 = pm.grid_a256(now);
-            model.bar_a256 = pm.bar_a256(now);
-        }
-    };
-    auto render_home = [&](Canvas& c) { draw_selector(c, fonts, model, pane, false, system_view, theme()); };
+    int recent_jobs = deal_recent(true);
     auto render_page = [&](Canvas& c, Screen sc, int64_t now) {
         if (sc == Screen::Bluetooth)
             btp.draw(c, ink, now);
         else if (sc == Screen::Settings)
             draw_settings(c, fonts, ink, settings_page.view(now), theme());
     };
-    auto animating = [&](int64_t now) {
-        if (motion == Motion::Fold && now - fold_t0 < fold_duration(fold))
-            return true;
-        if (motion == Motion::Page && pm.running(now))
-            return true;
+    auto page_animating = [&](int64_t now) {
         if (nav.top() == Screen::Settings && settings_page.animating(now))
             return true;
-        if (nav.top() == Screen::Bluetooth && btp.animating(now))
-            return true;
-        return nav.top() == Screen::Home && scrolling(now);
+        return nav.top() == Screen::Bluetooth && btp.animating(now);
     };
-    auto land = [&](const char* why) {
-        if (motion == Motion::None)
-            return;
-        std::fprintf(stderr, "blockie-frontend: motion landed (%s)\n", why);
-        motion = Motion::None;
-        fstats.end(why);
-        pm.land();
-        if (p.frame_pending())
-            p.cancel_frame();
-        frame_req_at = -1;
-        need_redraw = true;
-    };
-    auto render_end = [&](int64_t now) {
-        sync_model(now);
-        Canvas tc(to_buf.surface());
-        if (nav.top() == Screen::Home)
-            render_home(tc);
-        else
-            render_page(tc, nav.top(), now);
-        to_dirty = false;
-        end_ready = true;
-    };
+    auto animating = [&](int64_t now) { return flow.animating(now) || page_animating(now); };
     auto frame = [&](int64_t now) -> bool {
         int64_t t0 = now_us();
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
         Surface dst = p.draw_target();
-        Canvas c(dst);
         fonts.begin_frame(-1);
-        sync_model(now);
-        if (motion == Motion::Fold) {
-            if (to_dirty) {
-                int64_t r0 = now_us();
-                Canvas tc(to_buf.surface());
-                if (nav.top() == Screen::Home)
-                    render_home(tc);
-                else
-                    render_page(tc, nav.top(), now);
-                to_dirty = false;
-                fstats.to((int)(now_us() - r0));
-            }
-            fold_compose(from_buf.surface(), to_buf.surface(), dst, fold, now - fold_t0);
-        } else if (nav.top() == Screen::Home) {
-            render_home(c);
-        } else {
-            render_page(c, nav.top(), now);
-        }
+        bool folding = flow.ctl.active();
+        bool more = flow.frame(now, dst);
+        more = more || page_animating(now);
         p.present(kScreen);
-        bool more = animating(now);
         if (more)
             p.request_frame();
         bool ok = p.flip();
-        if (ok && motion != Motion::None)
+        if (ok && folding)
             fstats.frame(t0, now_us());
         if (ok && more)
             frame_req_at = now;
-        if (ok && motion != Motion::None)
+        if (ok && folding)
             drop_budget = true;
         if (!ok && more)
             p.cancel_frame();
         return ok;
     };
     auto can_animate = [&]() { return p.activated() && child.pid <= 0; };
-    auto start_fold = [&](FoldDir dir, int title_bottom, int64_t now) {
-        if (!can_animate())
+    auto land_all = [&](int64_t now, const char* why) {
+        if (!flow.animating(now))
             return;
-        int64_t c0 = now_us();
-        copy_surface(end_ready ? to_buf.surface() : p.draw_target(), from_buf.surface());
-        int from_us = (int)(now_us() - c0);
-        end_ready = false;
-        fold = fold_plan(dir, nav.focus - nav.menu_top, title_bottom);
-        fold_t0 = now;
-        to_dirty = true;
-        motion = Motion::Fold;
-        fstats.begin(fold_name(dir));
-        fstats.from_us = from_us;
+        flow.land_all(now, why);
+        if (p.frame_pending())
+            p.cancel_frame();
+        frame_req_at = -1;
+        need_redraw = true;
     };
 
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
-            return;
+            return false;
         std::string core, sysname;
         for (const auto& s : lib.config())
             if (s.id == g.system_id) {
@@ -522,7 +384,7 @@ static int run()
             ch = (char)std::tolower((unsigned char)ch);
         if (!launcher.core_installed(core)) {
             std::fprintf(stderr, "blockie-frontend: core %s absent for %s\n", core.c_str(), g.system_id.c_str());
-            return;
+            return false;
         }
         LaunchSpec spec;
         spec.system = sysname;
@@ -531,7 +393,7 @@ static int run()
         Launcher::Child ch = launcher.spawn(spec);
         if (ch.pid < 0) {
             std::fprintf(stderr, "blockie-frontend: spawn failed for %s\n", g.system_id.c_str());
-            return;
+            return false;
         }
         child = ch;
         child_game_id = g.id;
@@ -543,6 +405,7 @@ static int run()
             decode_pause = true;
         }
         std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
+        return true;
     };
 
     auto reap_children = [&]() {
@@ -556,9 +419,7 @@ static int run()
                        ex != LaunchExit::AudioGate && ex != LaunchExit::Busy;
             if (ran && child_game_id >= 0) {
                 lib.mark_played(child_game_id, (int64_t)time(nullptr));
-                deal_recent();
-                if (!system_view && pane == Pane::Details)
-                    tile_focus = 0;
+                deal_recent(false);
             }
             if (!child.cfg_path.empty())
                 unlink(child.cfg_path.c_str());
@@ -586,112 +447,6 @@ static int run()
         }
     };
 
-    const int kCols = Nav::kCols;
-    const int kRows = Nav::kRows;
-    auto refresh_system = [&](bool rebuild) {
-        int start = sys_scroll * kCols;
-        if (rebuild) {
-            model.tiles.clear();
-            int end = start + kRows * kCols;
-            if (end > (int)sysgames.size())
-                end = (int)sysgames.size();
-            for (int i = start; i < end; i++)
-                model.tiles.push_back(cached(sysgames[i].id));
-            model.section_label = sys_name;
-            int lo = (sys_scroll - 1) * kCols;
-            if (lo < 0)
-                lo = 0;
-            int hi = (sys_scroll + kRows + 1) * kCols;
-            if (hi > (int)sysgames.size())
-                hi = (int)sysgames.size();
-            std::unordered_set<int64_t> keep;
-            for (int i = lo; i < hi; i++)
-                keep.insert(sysgames[i].id);
-            for (auto it = cover_cache.begin(); it != cover_cache.end();) {
-                if (keep.count(it->first))
-                    ++it;
-                else
-                    it = cover_cache.erase(it);
-            }
-            {
-                std::lock_guard<std::mutex> lk(dmutex);
-                dq.set_window(++win_gen, std::move(keep));
-            }
-            if (start < (int)sysgames.size()) {
-                std::string folder = folder_of(sysgames[start].system_id);
-                for (int i = start; i < hi; i++)
-                    if (!request_cover(sysgames[i], win_gen))
-                        enqueue_scrape(sysgames[i], sys_epoch, folder);
-            }
-        }
-        model.game_system = sys_name;
-        model.game_title = (sys_focus >= 0 && sys_focus < (int)sysgames.size()) ? sysgames[sys_focus].name : std::string();
-        model.tile_focus = sys_focus - start;
-    };
-    auto exit_system = [&]() {
-        system_view = false;
-        model.tiles.swap(recent_hold);
-        recent_hold.clear();
-        cover_cache.clear();
-        {
-            std::lock_guard<std::mutex> lk(qmutex);
-            std::deque<ScrapeJob> keep;
-            requested.clear();
-            for (auto& j : squeue) {
-                bool in_recent = j.epoch == 0;
-                for (const Game& g : recent)
-                    if (g.id == j.game.id)
-                        in_recent = true;
-                if (in_recent) {
-                    requested.insert(j.game.id);
-                    keep.push_back(std::move(j));
-                }
-            }
-            squeue.swap(keep);
-        }
-        {
-            std::lock_guard<std::mutex> lk(dmutex);
-            dq.set_window(kRecentGen, {});
-        }
-        model.section_label.clear();
-        model.game_system.clear();
-        model.game_title.clear();
-        pane = Pane::Selector;
-        need_redraw = true;
-    };
-    auto show_tile = [&](int pos) {
-        if (child.pid > 0)
-            return;
-        if (motion != Motion::Fold) {
-            need_redraw = true;
-            return;
-        }
-        if (nav.top() != Screen::Home || to_dirty)
-            return;
-        Canvas tc(to_buf.surface());
-        tc.set_bound(grid_tile_rect(pos, kGridCols).grow(kTileFocusBorder));
-        render_home(tc);
-    };
-    auto place_art = [&](int64_t id, const Art& img) {
-        cover_cache[id] = img;
-        std::vector<Art>& grid = system_view ? recent_hold : model.tiles;
-        for (int k = 0; k < (int)recent.size() && k < (int)grid.size(); k++)
-            if (recent[k].id == id) {
-                grid[k] = img;
-                if (!system_view)
-                    show_tile(k);
-                break;
-            }
-        if (!system_view)
-            return;
-        int start = sys_scroll * kCols;
-        for (int i = 0; i < (int)model.tiles.size() && start + i < (int)sysgames.size(); i++)
-            if (sysgames[start + i].id == id) {
-                model.tiles[i] = img;
-                show_tile(i);
-                break;
-            }
-    };
     auto take_drops = [&]() {
         uint64_t cnt;
         while (read(art_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
@@ -713,50 +468,81 @@ static int run()
             failed_covers.erase(drp.game_id);
         if (!want)
             return;
+        bool in_recent = false;
+        for (const HomeGame& g : home.recent)
+            if (g.id == drp.game_id)
+                in_recent = true;
         if (drp.decoded) {
             if (drp.img) {
-                place_art(drp.game_id, drp.img);
+                if (flow.art(drp.game_id, home.epoch, drp.img) && !flow.ctl.active() && child.pid <= 0)
+                    need_redraw = true;
                 return;
             }
             failed_covers.insert(drp.game_id);
-            for (const Game& g : recent)
-                if (g.id == drp.game_id) {
-                    enqueue_scrape(g, 0, folder_of(g.system_id));
-                    return;
-                }
-            for (const Game& g : sysgames)
-                if (g.id == drp.game_id) {
-                    enqueue_scrape(g, sys_epoch, folder_of(g.system_id));
-                    return;
-                }
+            bool in_system = false;
+            for (const HomeGame& g : home.sysgames)
+                if (g.id == drp.game_id)
+                    in_system = true;
+            auto it = by_id.find(drp.game_id);
+            if (it != by_id.end() && (in_recent || in_system))
+                enqueue_scrape(it->second, in_recent ? 0 : home.epoch, folder_of(it->second.system_id));
             return;
         }
-        bool in_recent = false;
-        for (const Game& g : recent)
-            if (g.id == drp.game_id)
-                in_recent = true;
         queue_decode(drp.game_id, drp.path, in_recent ? kRecentGen : win_gen);
     };
-    FnHost host;
-    host.count = [&]() { return (int)model.systems.size(); };
-    host.kind = [&](int i) { return i >= 0 && i < (int)kinds.size() ? kinds[i] : MenuKind::System; };
-    host.push_fn = [&](Screen sc) {
-        int64_t now = now_ms();
+    flow.games = [&](int sys) {
+        std::vector<HomeGame> list;
+        if (sys < 0 || sys >= (int)sys_ids.size())
+            return list;
+        for (const Game& g : lib.games(sys_ids[sys]))
+            list.push_back(home_game(g));
+        return list;
+    };
+    flow.covers_wanted = [&](const std::vector<HomeGame>& want, int scroll) {
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            dq.set_window(++win_gen, home.keep_set(scroll));
+        }
+        for (const HomeGame& hg : want) {
+            const Game& g = by_id[hg.id];
+            if (!request_cover(g, win_gen))
+                enqueue_scrape(g, home.epoch, folder_of(g.system_id));
+        }
+    };
+    flow.system_left = [&]() {
+        {
+            std::lock_guard<std::mutex> lk(qmutex);
+            std::deque<ScrapeJob> keep;
+            requested.clear();
+            for (auto& j : squeue) {
+                bool in_recent = j.epoch == 0;
+                for (const HomeGame& g : home.recent)
+                    if (g.id == j.game.id)
+                        in_recent = true;
+                if (in_recent) {
+                    requested.insert(j.game.id);
+                    keep.push_back(std::move(j));
+                }
+            }
+            squeue.swap(keep);
+        }
+        std::lock_guard<std::mutex> lk(dmutex);
+        dq.set_window(kRecentGen, {});
+    };
+    flow.launch_game = [&](const HomeGame& g) {
+        auto it = by_id.find(g.id);
+        return it != by_id.end() && try_launch(it->second);
+    };
+    flow.draw_page = [&](Canvas& c, Screen sc, int64_t now) { render_page(c, sc, now); };
+    flow.page_open = [&](Screen sc, int64_t now) {
         if (sc == Screen::Settings)
             settings_page.reset(theme().light);
         if (sc == Screen::Bluetooth) {
             btp.open(now);
             bt.set_page_open(true, now);
         }
-        repeat.rearm(now);
-        start_fold(FoldDir::PagePush, 0, now);
     };
-    host.pop_fn = [&](Screen) {
-        int64_t now = now_ms();
-        repeat.rearm(now);
-        start_fold(FoldDir::PagePop, 0, now);
-    };
-    host.page_fn = [&](Screen sc, PadAction a, bool rep) {
+    flow.page_input = [&](Screen sc, PadAction a, bool rep) {
         int64_t now = now_ms();
         if (sc == Screen::Settings)
             return settings_page.action(a, rep, now);
@@ -768,55 +554,34 @@ static int run()
         btp.close();
         return true;
     };
-    host.recent = [&]() { return (int)recent.size(); };
-    host.enter = [&](int sys) -> int {
-        if (sys < 0 || sys >= (int)sys_ids.size())
-            return 0;
-        sysgames = lib.games(sys_ids[sys]);
-        if (sysgames.empty())
-            return 0;
-        sys_name = model.systems[sys].name;
-        sys_focus = 0;
-        sys_scroll = 0;
-        system_view = true;
-        sys_epoch++;
-        model.tiles.swap(recent_hold);
-        refresh_system(true);
-        int64_t now = now_ms();
-        repeat.rearm(now);
-        start_fold(FoldDir::ToDetails, detail_title_bottom(fonts, model), now);
-        return (int)sysgames.size();
-    };
-    host.leave = [&]() {
-        int title_bottom = detail_title_bottom(fonts, model);
-        exit_system();
-        int64_t now = now_ms();
-        repeat.rearm(now);
-        start_fold(FoldDir::ToSelector, title_bottom, now);
-    };
-    host.moved = [&](bool scrolled) { refresh_system(scrolled); };
-    host.play_recent = [&](int i) {
-        if (i >= 0 && i < (int)recent.size())
-            try_launch(recent[i]);
-    };
-    host.play_game = [&](int i) {
-        if (i >= 0 && i < (int)sysgames.size())
-            try_launch(sysgames[i]);
+    flow.rearm = [&](int64_t now) { repeat.rearm(now); };
+    flow.last_frame = [&](const Surface& s) { copy_surface(p.draw_target(), s); };
+    flow.ctl.can_animate = can_animate;
+    flow.ctl.clock_us = now_us;
+    flow.ctl.landed = [&](const char* what, const char* why) {
+        std::fprintf(stderr, "blockie-frontend: %s landed (%s)\n", what, why);
+        if (std::strcmp(what, "expand") == 0 || std::strcmp(what, "collapse") == 0 || std::strcmp(what, "push") == 0 ||
+            std::strcmp(what, "pop") == 0 || std::strcmp(what, "startup") == 0)
+            fstats.end(why);
     };
     auto apply = [&](PadAction a, bool rep) {
-        bool cut = motion != Motion::None;
-        land("input");
-        if (cut)
-            render_end(now_ms());
-        if (nav_apply(nav, host, a, rep))
+        bool changed = flow.input(a, rep, now_ms());
+        bool started = flow.ctl.started() && flow.ctl.active();
+        if (changed && !started)
             need_redraw = true;
-        end_ready = false;
+        if (started) {
+            if (flow.ctl.reversed())
+                fstats.end("reversed");
+            fstats.begin(fold_kind_name(flow.ctl.kind()));
+            fstats.from_us = flow.ctl.from_us();
+            fstats.to(flow.ctl.to_us());
+        }
     };
     theme_set.on_value = [&](bool light) {
         settings_page.set_light(light);
         if (theme().light != light) {
             set_theme_light(light);
-            to_dirty = true;
+            flow.theme_changed();
         }
         need_redraw = true;
     };
@@ -994,8 +759,8 @@ static int run()
             bool waiting = false;
             {
                 std::lock_guard<std::mutex> lk(dmutex);
-                for (size_t k = 0; k < recent.size() && k < model.tiles.size(); k++)
-                    if (!model.tiles[k] && dq.pending(recent[k].id))
+                for (size_t k = 0; k < home.recent.size() && k < model.tiles.size(); k++)
+                    if (!model.tiles[k] && dq.pending(home.recent[k].id))
                         waiting = true;
             }
             int64_t left = until - now_ms();
@@ -1010,8 +775,7 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: recent covers waited %lld ms\n", (long long)(now_ms() - t0));
     }
     if (can_animate()) {
-        pm.enter(now_ms(), visible_rows(), fx_round(tok::motion_homeEnterStagger));
-        motion = Motion::Page;
+        flow.startup(now_ms());
         fstats.begin("t1");
     }
     need_redraw = true;
@@ -1036,8 +800,10 @@ static int run()
             std::string sub = bt_subtitle(bt.state(), bnow);
             if (bt_item < (int)model.systems.size() && model.systems[bt_item].subtitle != sub) {
                 model.systems[bt_item].subtitle = sub;
-                if (nav.top() == Screen::Home)
+                if (nav.top() == Screen::Home) {
+                    flow.redraw();
                     need_redraw = true;
+                }
             }
             if (nav.top() == Screen::Bluetooth && btp.dirty(bnow))
                 need_redraw = true;
@@ -1092,7 +858,7 @@ static int run()
         if (frame_req_at >= 0)
             until(frame_req_at + kFrameWatchdogMs);
         bool want_frame = child.pid <= 0 && (need_redraw || (animating(pnow) && !p.frame_pending()));
-        if ((want_frame && p.claim()) || bus.data_remains() || (motion == Motion::None && !pending_drops.empty()))
+        if ((want_frame && p.claim()) || bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty()))
             timeout = 0;
         int pr = poll(fds, nfds, timeout);
         if (pr < 0) {
@@ -1147,9 +913,9 @@ static int run()
 
         if (ai >= 0 && (fds[ai].revents & POLLIN))
             take_drops();
-        if (!pending_drops.empty() && (motion == Motion::None || drop_budget)) {
+        if (!pending_drops.empty() && (!flow.ctl.active() || drop_budget)) {
             std::vector<ArtDrop> drops;
-            if (motion == Motion::None) {
+            if (!flow.ctl.active()) {
                 drops.swap(pending_drops);
             } else {
                 drop_budget = false;
@@ -1177,34 +943,20 @@ static int run()
             fstats.done(now_us());
         }
         if (!can_animate()) {
-            land(child.pid > 0 ? "child" : "hidden");
+            land_all(fnow, child.pid > 0 ? "child" : "hidden");
             settings_page.land();
-            scroll_t0 = -1000000000;
         }
         if (frame_req_at >= 0 && fnow - frame_req_at > kFrameWatchdogMs) {
             p.cancel_frame();
             frame_req_at = -1;
-            land("watchdog");
+            land_all(fnow, "watchdog");
             settings_page.land();
-            scroll_t0 = -1000000000;
             need_redraw = true;
         }
-        if (motion == Motion::Fold && fnow - fold_t0 >= fold_duration(fold)) {
-            motion = Motion::None;
-            fstats.end("done");
-            need_redraw = true;
-        }
-        if (motion == Motion::Page && !pm.running(fnow)) {
-            motion = Motion::None;
-            fstats.end("done");
-            need_redraw = true;
-        }
-        if (motion == Motion::Fold && need_redraw) {
-            to_dirty = true;
+        if (flow.ctl.active() && need_redraw) {
+            flow.redraw();
             need_redraw = false;
         }
-        if (motion != Motion::None && need_redraw)
-            need_redraw = false;
         bool anim = animating(fnow);
         if ((need_redraw || (anim && !p.frame_pending())) && child.pid <= 0 && p.claim()) {
             if (frame(fnow))
