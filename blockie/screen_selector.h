@@ -1,4 +1,5 @@
 #pragma once
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -11,7 +12,7 @@
 namespace fd {
 
 enum class Pane { Selector, Details };
-enum class ArtFit { Contain, Cover };
+enum class ArtFit { Cover };
 
 struct SelectorItem {
     std::string name;
@@ -31,7 +32,7 @@ struct SelectorModel {
     std::vector<MenuPose> poses;
     int grid_a256 = 256;
     int bar_a256 = 256;
-    std::vector<Image> tiles;
+    std::vector<std::shared_ptr<const Image>> tiles;
     std::string section_label;
     int tile_focus = -1;
     std::string game_system;

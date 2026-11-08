@@ -29,6 +29,10 @@ Page and menu motion reuse:
   page push and back timings.
 - funeOS d58193469, App::draw_warp in player/ui/app.cpp: turnstile rows and warp.
 
+Cover tiles:
+
+- funeOS d58193469, taps and bilinear in player/gfx/canvas.cpp: the tile size cover scale in blockie/image.cpp.
+
 The Bluetooth page ports logic from funeOS and MicroDAP:
 
 - funeOS fa88b2b85e39137aea02bb3055eb5bbb3ae7760c: player/bt/dbus.cpp, player/bt/core.cpp, player/ui/btpage.cpp,

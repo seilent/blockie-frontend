@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,7 @@
 #include <ctime>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,7 +40,9 @@
 #include "../ui/roles.h"
 #include "bt.h"
 #include "bus.h"
+#include "decodeq.h"
 #include "fold.h"
+#include "framestats.h"
 #include "image.h"
 #include "ink.h"
 #include "input_pad.h"
@@ -54,6 +58,7 @@
 #include "screen_settings.h"
 #include "theme.h"
 #include "theme_setting.h"
+#include "tile_grid.h"
 
 namespace fd {
 
@@ -61,8 +66,11 @@ namespace {
 
 enum class Motion { None, Fold, Page };
 
+using Art = std::shared_ptr<const Image>;
+
 constexpr int kFrameWatchdogMs = 100;
 constexpr int kThemeWaitMs = 300;
+constexpr int kCoverWaitMs = 300;
 
 void copy_surface(const Surface& src, const Surface& dst)
 {
@@ -81,6 +89,23 @@ int64_t now_ms()
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+int64_t now_us()
+{
+    using namespace std::chrono;
+    return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+const char* fold_name(FoldDir d)
+{
+    switch (d) {
+    case FoldDir::ToDetails: return "enter";
+    case FoldDir::ToSelector: return "exit";
+    case FoldDir::PagePush: return "push";
+    case FoldDir::PagePop: return "pop";
+    }
+    return "?";
 }
 
 const char* action_name(PadAction a)
@@ -105,8 +130,9 @@ struct ScrapeJob {
 
 struct ArtDrop {
     int64_t game_id;
-    int64_t epoch;
     std::string path;
+    Art img;
+    bool decoded = false;
 };
 
 class FnHost : public NavHost {
@@ -230,7 +256,7 @@ static int run()
     int& tile_focus = nav.tile_focus;
     bool& system_view = nav.system_view;
     std::vector<Game> sysgames;
-    std::vector<Image> recent_hold;
+    std::vector<Art> recent_hold;
     int& sys_focus = nav.sys_focus;
     int& sys_scroll = nav.sys_scroll;
     Repeat repeat;
@@ -251,7 +277,7 @@ static int run()
     int scroll_to = 0;
     int64_t scroll_t0 = -1000000000;
     std::string sys_name;
-    std::unordered_map<int64_t, Image> cover_cache;
+    std::unordered_map<int64_t, Art> cover_cache;
     Launcher::Child child;
     int64_t child_game_id = -1;
 
@@ -265,6 +291,16 @@ static int run()
     std::atomic<bool> scrape_pause{false};
     int art_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     int work_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    std::vector<ArtDrop> pending_drops;
+    DecodeQueue dq;
+    std::mutex dmutex;
+    std::condition_variable dcv;
+    bool decode_stop = false;
+    bool decode_pause = false;
+    int64_t win_gen = kRecentGen;
+    FrameStats fstats;
+    const char* fsenv = std::getenv("BLOCKIE_FRAMESTATS");
+    fstats.on = fsenv && std::strcmp(fsenv, "1") == 0;
 
     auto enqueue_scrape = [&](const Game& g, int64_t epoch, const std::string& folder) {
         bool added = false;
@@ -281,21 +317,31 @@ static int run()
             (void)w;
         }
     };
-    auto load_cover = [&](const Game& g) -> Image {
-        auto it = cover_cache.find(g.id);
-        if (it != cover_cache.end())
-            return it->second;
-        Image img;
+    std::unordered_set<int64_t> failed_covers;
+    auto queue_decode = [&](int64_t id, const std::string& path, int64_t gen) {
+        bool added;
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            added = dq.push({id, path, gen, now_ms()});
+        }
+        if (added)
+            dcv.notify_one();
+    };
+    auto cached = [&](int64_t id) {
+        auto it = cover_cache.find(id);
+        return it != cover_cache.end() ? it->second : Art();
+    };
+    auto request_cover = [&](const Game& g, int64_t gen) {
+        if (cover_cache.count(g.id))
+            return true;
+        if (failed_covers.count(g.id))
+            return false;
         for (const auto& m : lib.media(g.id))
             if (m.type == "covers") {
-                DecodedImage d;
-                if (load_png(m.path, d) && d.ok())
-                    img = Image::from_portrait(d.rgb.data(), d.w, d.h);
-                break;
+                queue_decode(g.id, m.path, gen);
+                return true;
             }
-        if (img.w > 0)
-            cover_cache[g.id] = img;
-        return img;
+        return false;
     };
     auto folder_of = [&](const std::string& system_id) {
         for (const auto& sc : lib.config())
@@ -304,17 +350,28 @@ static int run()
         return std::string();
     };
     auto deal_recent = [&]() {
+        std::vector<Art>& grid = system_view ? recent_hold : model.tiles;
+        std::unordered_map<int64_t, Art> had;
+        for (size_t k = 0; k < recent.size() && k < grid.size(); k++)
+            if (grid[k])
+                had[recent[k].id] = grid[k];
         recent = lib.recent_games(8);
-        std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
         grid.clear();
+        std::unordered_set<int64_t> ids;
         int queued = 0;
         for (const Game& g : recent) {
-            Image img = load_cover(g);
-            if (img.w <= 0) {
+            ids.insert(g.id);
+            auto it = had.find(g.id);
+            Art art = it != had.end() ? it->second : cached(g.id);
+            if (!art && !request_cover(g, kRecentGen)) {
                 enqueue_scrape(g, 0, folder_of(g.system_id));
                 queued++;
             }
-            grid.push_back(std::move(img));
+            grid.push_back(std::move(art));
+        }
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            dq.set_recent(std::move(ids));
         }
         return queued;
     };
@@ -378,6 +435,7 @@ static int run()
             return;
         std::fprintf(stderr, "blockie-frontend: motion landed (%s)\n", why);
         motion = Motion::None;
+        fstats.end(why);
         pm.land();
         if (p.frame_pending())
             p.cancel_frame();
@@ -395,6 +453,7 @@ static int run()
         end_ready = true;
     };
     auto frame = [&](int64_t now) -> bool {
+        int64_t t0 = now_us();
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
         Surface dst = p.draw_target();
@@ -403,12 +462,14 @@ static int run()
         sync_model(now);
         if (motion == Motion::Fold) {
             if (to_dirty) {
+                int64_t r0 = now_us();
                 Canvas tc(to_buf.surface());
                 if (nav.top() == Screen::Home)
                     render_home(tc);
                 else
                     render_page(tc, nav.top(), now);
                 to_dirty = false;
+                fstats.to((int)(now_us() - r0));
             }
             fold_compose(from_buf.surface(), to_buf.surface(), dst, fold, now - fold_t0);
         } else if (nav.top() == Screen::Home) {
@@ -421,6 +482,8 @@ static int run()
         if (more)
             p.request_frame();
         bool ok = p.flip();
+        if (ok && motion != Motion::None)
+            fstats.frame(t0, now_us());
         if (ok && more)
             frame_req_at = now;
         if (ok && motion != Motion::None)
@@ -433,18 +496,17 @@ static int run()
     auto start_fold = [&](FoldDir dir, int title_bottom, int64_t now) {
         if (!can_animate())
             return;
+        int64_t c0 = now_us();
         copy_surface(end_ready ? to_buf.surface() : p.draw_target(), from_buf.surface());
+        int from_us = (int)(now_us() - c0);
         end_ready = false;
         fold = fold_plan(dir, nav.focus - nav.menu_top, title_bottom);
         fold_t0 = now;
         to_dirty = true;
         motion = Motion::Fold;
+        fstats.begin(fold_name(dir));
+        fstats.from_us = from_us;
     };
-    if (can_animate()) {
-        pm.enter(now_ms(), visible_rows(), fx_round(tok::motion_homeEnterStagger));
-        motion = Motion::Page;
-    }
-    need_redraw = true;
 
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
@@ -476,6 +538,10 @@ static int run()
         repeat.release_all();
         bt.set_game_running(true, now_ms());
         scrape_pause.store(true);
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            decode_pause = true;
+        }
         std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
     };
 
@@ -501,6 +567,11 @@ static int run()
             child_game_id = -1;
             bt.set_game_running(false, now_ms());
             scrape_pause.store(false);
+            {
+                std::lock_guard<std::mutex> lk(dmutex);
+                decode_pause = false;
+            }
+            dcv.notify_one();
             if (work_evfd >= 0) {
                 uint64_t one = 1;
                 ssize_t w = write(work_evfd, &one, sizeof one);
@@ -525,7 +596,7 @@ static int run()
             if (end > (int)sysgames.size())
                 end = (int)sysgames.size();
             for (int i = start; i < end; i++)
-                model.tiles.push_back(load_cover(sysgames[i]));
+                model.tiles.push_back(cached(sysgames[i].id));
             model.section_label = sys_name;
             int lo = (sys_scroll - 1) * kCols;
             if (lo < 0)
@@ -542,16 +613,15 @@ static int run()
                 else
                     it = cover_cache.erase(it);
             }
+            {
+                std::lock_guard<std::mutex> lk(dmutex);
+                dq.set_window(++win_gen, std::move(keep));
+            }
             if (start < (int)sysgames.size()) {
                 std::string folder = folder_of(sysgames[start].system_id);
-                for (int i = start; i < hi; i++) {
-                    const Game& g = sysgames[i];
-                    if (cover_cache.count(g.id))
-                        continue;
-                    if (i >= end && load_cover(g).w > 0)
-                        continue;
-                    enqueue_scrape(g, sys_epoch, folder);
-                }
+                for (int i = start; i < hi; i++)
+                    if (!request_cover(sysgames[i], win_gen))
+                        enqueue_scrape(sysgames[i], sys_epoch, folder);
             }
         }
         model.game_system = sys_name;
@@ -579,11 +649,93 @@ static int run()
             }
             squeue.swap(keep);
         }
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            dq.set_window(kRecentGen, {});
+        }
         model.section_label.clear();
         model.game_system.clear();
         model.game_title.clear();
         pane = Pane::Selector;
         need_redraw = true;
+    };
+    auto show_tile = [&](int pos) {
+        if (child.pid > 0)
+            return;
+        if (motion != Motion::Fold) {
+            need_redraw = true;
+            return;
+        }
+        if (nav.top() != Screen::Home || to_dirty)
+            return;
+        Canvas tc(to_buf.surface());
+        tc.set_bound(grid_tile_rect(pos).grow(kTileFocusBorder));
+        render_home(tc);
+    };
+    auto place_art = [&](int64_t id, const Art& img) {
+        cover_cache[id] = img;
+        std::vector<Art>& grid = system_view ? recent_hold : model.tiles;
+        for (int k = 0; k < (int)recent.size() && k < (int)grid.size(); k++)
+            if (recent[k].id == id) {
+                grid[k] = img;
+                if (!system_view)
+                    show_tile(k);
+                break;
+            }
+        if (!system_view)
+            return;
+        int start = sys_scroll * kCols;
+        for (int i = 0; i < (int)model.tiles.size() && start + i < (int)sysgames.size(); i++)
+            if (sysgames[start + i].id == id) {
+                model.tiles[i] = img;
+                show_tile(i);
+                break;
+            }
+    };
+    auto take_drops = [&]() {
+        uint64_t cnt;
+        while (read(art_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
+        }
+        std::lock_guard<std::mutex> lk(art_mutex);
+        for (ArtDrop& a : art_drops)
+            pending_drops.push_back(std::move(a));
+        art_drops.clear();
+    };
+    auto apply_drop = [&](const ArtDrop& drp) {
+        bool want;
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            if (drp.decoded)
+                dq.done(drp.game_id);
+            want = dq.accept(drp.game_id);
+        }
+        if (!drp.decoded)
+            failed_covers.erase(drp.game_id);
+        if (!want)
+            return;
+        if (drp.decoded) {
+            if (drp.img) {
+                place_art(drp.game_id, drp.img);
+                return;
+            }
+            failed_covers.insert(drp.game_id);
+            for (const Game& g : recent)
+                if (g.id == drp.game_id) {
+                    enqueue_scrape(g, 0, folder_of(g.system_id));
+                    return;
+                }
+            for (const Game& g : sysgames)
+                if (g.id == drp.game_id) {
+                    enqueue_scrape(g, sys_epoch, folder_of(g.system_id));
+                    return;
+                }
+            return;
+        }
+        bool in_recent = false;
+        for (const Game& g : recent)
+            if (g.id == drp.game_id)
+                in_recent = true;
+        queue_decode(drp.game_id, drp.path, in_recent ? kRecentGen : win_gen);
     };
     FnHost host;
     host.count = [&]() { return (int)model.systems.size(); };
@@ -728,7 +880,7 @@ static int run()
     std::fprintf(stderr, "blockie-frontend: scrape worklist %d\n", recent_jobs);
     std::thread scrape_thread;
     if (art_evfd < 0 || work_evfd < 0)
-        std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape disabled\n");
+        std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape and covers disabled\n");
     else {
         scrape_thread = std::thread([data_root, art_evfd, work_evfd, &squeue, &qmutex, &art_mutex, &art_drops,
                                      &scrape_stop, &scrape_pause]() {
@@ -783,7 +935,7 @@ static int run()
                     if (o.cached && !o.path.empty()) {
                         {
                             std::lock_guard<std::mutex> lk(art_mutex);
-                            art_drops.push_back({j.game.id, j.epoch, o.path});
+                            art_drops.push_back({j.game.id, o.path});
                         }
                         uint64_t one = 1;
                         ssize_t w = write(art_evfd, &one, sizeof one);
@@ -794,10 +946,78 @@ static int run()
             std::fprintf(stderr, "blockie-frontend: scrape worker exit\n");
         });
     }
+    std::thread decode_thread;
+    if (art_evfd >= 0) {
+        decode_thread = std::thread([art_evfd, &dq, &dmutex, &dcv, &decode_stop, &decode_pause, &art_mutex,
+                                     &art_drops]() {
+            std::unique_lock<std::mutex> lk(dmutex);
+            for (;;) {
+                dcv.wait(lk, [&]() { return decode_stop || (!decode_pause && dq.size() > 0); });
+                if (decode_stop)
+                    break;
+                DecodeJob j;
+                if (!dq.pop(j))
+                    continue;
+                lk.unlock();
+                int64_t t0 = now_us();
+                DecodedImage dec;
+                bool ok = load_png(j.path, dec) && dec.ok();
+                int64_t t1 = now_us();
+                Art img;
+                if (ok)
+                    img = std::make_shared<const Image>(cover_tile(dec, kTileSide));
+                int64_t t2 = now_us();
+                std::fprintf(stderr, "blockie-frontend: decode %lld %s %dx%d wait %lld png %.1f tile %.1f ms\n",
+                             (long long)j.game_id, ok ? "ok" : "fail", dec.w, dec.h,
+                             (long long)(t0 / 1000 - j.queued_ms), (t1 - t0) / 1000.0, (t2 - t1) / 1000.0);
+                {
+                    std::lock_guard<std::mutex> ak(art_mutex);
+                    art_drops.push_back({j.game_id, std::string(), img, true});
+                }
+                uint64_t one = 1;
+                ssize_t w = write(art_evfd, &one, sizeof one);
+                (void)w;
+                lk.lock();
+            }
+        });
+    }
+
+    if (decode_thread.joinable()) {
+        int64_t t0 = now_ms();
+        int64_t until = t0 + kCoverWaitMs;
+        for (;;) {
+            take_drops();
+            std::vector<ArtDrop> drops;
+            drops.swap(pending_drops);
+            for (const ArtDrop& drp : drops)
+                apply_drop(drp);
+            bool waiting = false;
+            {
+                std::lock_guard<std::mutex> lk(dmutex);
+                for (size_t k = 0; k < recent.size() && k < model.tiles.size(); k++)
+                    if (!model.tiles[k] && dq.pending(recent[k].id))
+                        waiting = true;
+            }
+            int64_t left = until - now_ms();
+            if (!waiting || left <= 0)
+                break;
+            struct pollfd af;
+            af.fd = art_evfd;
+            af.events = POLLIN;
+            af.revents = 0;
+            poll(&af, 1, (int)left);
+        }
+        std::fprintf(stderr, "blockie-frontend: recent covers waited %lld ms\n", (long long)(now_ms() - t0));
+    }
+    if (can_animate()) {
+        pm.enter(now_ms(), visible_rows(), fx_round(tok::motion_homeEnterStagger));
+        motion = Motion::Page;
+        fstats.begin("t1");
+    }
+    need_redraw = true;
 
     wl_display* d = p.display();
     int wl_fd = p.event_fd();
-    std::vector<ArtDrop> pending_drops;
     while (p.ready()) {
         while (wl_display_prepare_read(d) != 0)
             wl_display_dispatch_pending(d);
@@ -925,17 +1145,8 @@ static int run()
             }
         }
 
-        if (ai >= 0 && (fds[ai].revents & POLLIN)) {
-            uint64_t cnt;
-            while (read(art_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
-            }
-            {
-                std::lock_guard<std::mutex> lk(art_mutex);
-                for (ArtDrop& a : art_drops)
-                    pending_drops.push_back(std::move(a));
-                art_drops.clear();
-            }
-        }
+        if (ai >= 0 && (fds[ai].revents & POLLIN))
+            take_drops();
         if (!pending_drops.empty() && (motion == Motion::None || drop_budget)) {
             std::vector<ArtDrop> drops;
             if (motion == Motion::None) {
@@ -945,44 +1156,8 @@ static int run()
                 drops.push_back(std::move(pending_drops.front()));
                 pending_drops.erase(pending_drops.begin());
             }
-            for (const ArtDrop& drp : drops) {
-                std::vector<Image>& grid = system_view ? recent_hold : model.tiles;
-                int rpos = -1;
-                for (int k = 0; k < (int)recent.size() && k < (int)grid.size(); k++)
-                    if (recent[k].id == drp.game_id) {
-                        rpos = k;
-                        break;
-                    }
-                int spos = -1;
-                if (system_view) {
-                    int start = sys_scroll * kCols;
-                    int end = std::min(start + kRows * kCols, (int)sysgames.size());
-                    for (int i = start; i < end; i++)
-                        if (sysgames[i].id == drp.game_id) {
-                            spos = i - start;
-                            break;
-                        }
-                }
-                bool cache = system_view && (spos >= 0 || drp.epoch == sys_epoch);
-                if (rpos < 0 && !cache)
-                    continue;
-                DecodedImage dec;
-                if (!(load_png(drp.path, dec) && dec.ok()))
-                    continue;
-                Image img = Image::from_portrait(dec.rgb.data(), dec.w, dec.h);
-                if (rpos >= 0) {
-                    grid[rpos] = img;
-                    if (!system_view && child.pid <= 0)
-                        need_redraw = true;
-                }
-                if (cache)
-                    cover_cache[drp.game_id] = img;
-                if (spos >= 0 && spos < (int)model.tiles.size()) {
-                    model.tiles[spos] = img;
-                    if (child.pid <= 0)
-                        need_redraw = true;
-                }
-            }
+            for (const ArtDrop& drp : drops)
+                apply_drop(drp);
         }
 
         if (!p.activated() || child.pid > 0)
@@ -997,8 +1172,10 @@ static int run()
         }
 
         int64_t fnow = now_ms();
-        if (p.take_frame_done())
+        if (p.take_frame_done()) {
             frame_req_at = -1;
+            fstats.done(now_us());
+        }
         if (!can_animate()) {
             land(child.pid > 0 ? "child" : "hidden");
             settings_page.land();
@@ -1014,10 +1191,12 @@ static int run()
         }
         if (motion == Motion::Fold && fnow - fold_t0 >= fold_duration(fold)) {
             motion = Motion::None;
+            fstats.end("done");
             need_redraw = true;
         }
         if (motion == Motion::Page && !pm.running(fnow)) {
             motion = Motion::None;
+            fstats.end("done");
             need_redraw = true;
         }
         if (motion == Motion::Fold && need_redraw) {
@@ -1042,8 +1221,15 @@ static int run()
         ssize_t w = write(work_evfd, &one, sizeof one);
         (void)w;
     }
+    {
+        std::lock_guard<std::mutex> lk(dmutex);
+        decode_stop = true;
+    }
+    dcv.notify_all();
     if (scrape_thread.joinable())
         scrape_thread.join();
+    if (decode_thread.joinable())
+        decode_thread.join();
     if (work_evfd >= 0)
         close(work_evfd);
     if (art_evfd >= 0)

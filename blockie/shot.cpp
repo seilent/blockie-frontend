@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "screen_selector.h"
 #include "screen_settings.h"
 #include "theme.h"
+#include "tile_grid.h"
 
 using namespace fd;
 
@@ -28,13 +30,12 @@ namespace {
 
 constexpr int kFrameMs = 1000 / 60;
 
-bool load_tile(const std::string& path, Image& out)
+std::shared_ptr<const Image> load_tile(const std::string& path)
 {
     DecodedImage d;
     if (!load_png(path, d) || !d.ok())
-        return false;
-    out = Image::from_portrait(d.rgb.data(), d.w, d.h);
-    return true;
+        return nullptr;
+    return std::make_shared<const Image>(cover_tile(d, kTileSide));
 }
 
 std::vector<std::string> pngs_in(const std::string& dir)
@@ -55,14 +56,13 @@ std::vector<std::string> pngs_in(const std::string& dir)
     return names;
 }
 
-std::vector<Image> load_tiles(const std::string& dir)
+std::vector<std::shared_ptr<const Image>> load_tiles(const std::string& dir)
 {
-    std::vector<Image> tiles;
+    std::vector<std::shared_ptr<const Image>> tiles;
     for (const std::string& p : pngs_in(dir)) {
         if (tiles.size() >= 8)
             break;
-        Image img;
-        if (load_tile(p, img))
+        if (std::shared_ptr<const Image> img = load_tile(p))
             tiles.push_back(std::move(img));
         else
             fprintf(stderr, "blockie-shot: skip %s\n", p.c_str());
@@ -177,8 +177,6 @@ int main(int argc, char** argv)
             tiles_dir = argv[++i];
         else if (a == "--recent" && i + 1 < argc)
             recent_dir = argv[++i];
-        else if (a == "--fit" && i + 1 < argc)
-            fit = std::string(argv[++i]) == "cover" ? ArtFit::Cover : ArtFit::Contain;
         else if (a == "--header" && i + 1 < argc)
             header = argv[++i];
         else if (a == "--tilefocus" && i + 1 < argc)
@@ -229,8 +227,8 @@ int main(int argc, char** argv)
     bool sequence = !fold_dir.empty() || !page_flip.empty();
     if ((out.empty() && !sequence) || (sequence && frames_dir.empty())) {
         fprintf(stderr,
-                "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--fit contain|cover]"
-                " [--header TEXT] [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
+                "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
+                " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
                 " [--light] [--page settings] [--sheet] [--sheetfocus N] [--scatter] [--gamedetail SYSTEM|TITLE]"
                 " [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
                 "       blockie-shot --fold ab|ba --frames DIR [--recent DIR] [same options]\n"

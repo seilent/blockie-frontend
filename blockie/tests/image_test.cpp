@@ -5,7 +5,10 @@
 
 #include <unistd.h>
 
+#include "../../core/fx.h"
+#include "../../ui/tokens.h"
 #include "../image.h"
+#include "../tile_grid.h"
 
 namespace {
 
@@ -55,6 +58,41 @@ std::string write_tmp(const void* data, size_t n)
     return path;
 }
 
+std::vector<uint32_t> noise(int w, int h, uint32_t seed)
+{
+    std::vector<uint32_t> px((size_t)w * h);
+    uint32_t s = seed;
+    for (uint32_t& p : px) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        p = s & 0xffffffu;
+    }
+    return px;
+}
+
+bool tile_matches_bilinear(int sw, int sh, int a256, int k)
+{
+    fd::DecodedImage d;
+    d.w = sw;
+    d.h = sh;
+    d.rgb = noise(sw, sh, 0x2545f491u);
+    fd::Image full = fd::Image::from_portrait(d.rgb.data(), sw, sh);
+    fd::Image tile = fd::cover_tile(d, fd::kTileSide);
+    fd::Rect tr = fd::grid_tile_rect(k);
+    fd::Buffer ref;
+    fd::Buffer got;
+    std::vector<uint32_t> ground = noise(ref.w, ref.h, 0x9e3779b9u);
+    for (size_t i = 0; i < ref.pix.size(); i++)
+        ref.pix[i] = got.pix[i] = fd::LiveF::pack(ground[i]);
+    fd::Canvas rc(ref.surface());
+    rc.set_clip(tr);
+    rc.blit_bilinear(full, fd::Rect64::of(fd::fit_rect(sw, sh, tr.x0, tr.y0, fd::kTileSide), fd::Zoom{}), a256, true);
+    fd::Canvas gc(got.surface());
+    gc.blit(tile, tr.x0 + (fd::kTileSide - tile.w) / 2, tr.y0 + (fd::kTileSide - tile.h) / 2, a256);
+    return tile.w == fd::kTileSide && tile.h == fd::kTileSide && ref.pix == got.pix;
+}
+
 }
 
 int main()
@@ -93,6 +131,19 @@ int main()
     check(!fd::load_png(truncated, trunc), "truncated png returns false");
     if (!truncated.empty())
         unlink(truncated.c_str());
+
+    int pane = fd::alpha256(fd::tok::motion_quickplayAlpha);
+    check(tile_matches_bilinear(512, 448, 256, 3), "a 512x448 cover tile equals blit_bilinear at full alpha");
+    check(tile_matches_bilinear(512, 448, pane, 3), "a 512x448 cover tile equals blit_bilinear at the pane alpha");
+    check(tile_matches_bilinear(300, 600, 256, 4), "a 300x600 cover tile equals blit_bilinear at full alpha");
+    check(tile_matches_bilinear(300, 600, pane, 4), "a 300x600 cover tile equals blit_bilinear at the pane alpha");
+    fd::Rect odd = fd::fit_rect(640, 480, 0, 0, fd::kTileSide);
+    check(odd.x0 == -25 && odd.x1 - odd.x0 == 205 && odd.y0 == 0 && odd.y1 == fd::kTileSide,
+          "a 640x480 cover is 205 wide at x offset -25");
+    check(tile_matches_bilinear(640, 480, 256, 7), "a 640x480 cover tile equals blit_bilinear at full alpha");
+    check(tile_matches_bilinear(640, 480, pane, 7), "a 640x480 cover tile equals blit_bilinear at the pane alpha");
+    fd::DecodedImage empty;
+    check(fd::cover_tile(empty, fd::kTileSide).w == 0, "an empty decode gives an empty tile");
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

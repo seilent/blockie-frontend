@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "../gfx/canvas.h"
+
 namespace fd {
 
 struct DecodedImage {
@@ -14,5 +16,7 @@ struct DecodedImage {
 };
 
 bool load_png(const std::string& path, DecodedImage& out);
+
+Image cover_tile(const DecodedImage& d, int side);
 
 }

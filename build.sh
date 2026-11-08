@@ -378,6 +378,7 @@ build_app() {
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
+    pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
     pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
     pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
@@ -392,8 +393,8 @@ build_app() {
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/library.o" "$appobj/image.o" \
-        "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/launch.o" "$appobj/scraper.o" \
-        "$appobj/present_wl.o" "$appobj/main.o" \
+        "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
+        "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
@@ -489,8 +490,6 @@ build_pad_test() {
     "$out/launch/blockie-pad-test"
 }
 
-imgflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers "${img_inc[@]}" -DSPNG_STATIC)
-
 build_image_test() {
     deps_img
     toolver=$("$cc" --version | head -n 1)
@@ -502,13 +501,14 @@ build_image_test() {
     drain
     ((fail)) && return 1
     toolver=$("$cxx" --version | head -n 1)
-    pool "$imgobj/image.o" "$cxx" "${imgflags[@]}" $appcflags "$root/blockie/image.cpp"
-    pool "$testobj/image_test.o" "$cxx" "${imgflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
+    pool "$genobj/gfx_canvas.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/gfx/canvas.cpp"
+    pool "$imgobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
+    pool "$testobj/image_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/image"
-    "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$depobj/spng.o" "$depobj"/zlib_*.o $appldflags -lpthread -lm \
-        -o "$out/image/blockie-image-test.tmp" || return 1
+    "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$genobj/gfx_canvas.cpp.o" "$depobj/spng.o" "$depobj"/zlib_*.o \
+        $appldflags -lpthread -lm -o "$out/image/blockie-image-test.tmp" || return 1
     mv "$out/image/blockie-image-test.tmp" "$out/image/blockie-image-test"
     echo "build.sh: $out/image/blockie-image-test"
     "$out/image/blockie-image-test"
@@ -604,6 +604,20 @@ build_wrap_test() {
     "$out/wrap/blockie-wrap-test"
 }
 
+build_decodeq_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/decodeq.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
+    pool "$testobj/decodeq_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/decodeq_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/decodeq"
+    "$cxx" "$testobj/decodeq.o" "$testobj/decodeq_test.o" $appldflags -o "$out/decodeq/blockie-decodeq-test.tmp" ||
+        return 1
+    mv "$out/decodeq/blockie-decodeq-test.tmp" "$out/decodeq/blockie-decodeq-test"
+    echo "build.sh: $out/decodeq/blockie-decodeq-test"
+    "$out/decodeq/blockie-decodeq-test"
+}
+
 build_shot() {
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -668,7 +682,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_input_test && build_motion_test && build_bt_model_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }

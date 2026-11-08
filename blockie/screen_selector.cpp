@@ -26,7 +26,6 @@ constexpr int kWatermarkBaseline = 688;
 constexpr const char* kWatermarkWord = "blockie";
 
 constexpr int kSectionBaseline = 70;
-constexpr int kTileFocusBorder = 4;
 constexpr const char* kSectionLabel = "Recent";
 
 constexpr int kDetailX = 512;
@@ -67,20 +66,6 @@ void draw_scatter_dots(Canvas& c, uint32_t ink)
 
 void count_line(char* out, size_t n, int games) { snprintf(out, n, games == 1 ? "%d game" : "%d games", games); }
 
-Rect fit_rect(int sw, int sh, int tx, int ty, int side, ArtFit fit)
-{
-    if (sw <= 0 || sh <= 0)
-        return {tx, ty, tx + side, ty + side};
-    double s = (double)side / sw;
-    double sy = (double)side / sh;
-    s = fit == ArtFit::Cover ? std::max(s, sy) : std::min(s, sy);
-    int w = (int)(sw * s + 0.5);
-    int h = (int)(sh * s + 0.5);
-    int x = tx + (side - w) / 2;
-    int y = ty + (side - h) / 2;
-    return {x, y, x + w, y + h};
-}
-
 std::vector<std::string> title_lines(Fonts& fonts, const std::string& title)
 {
     TextStyle ts = role::npTitle.style();
@@ -107,7 +92,7 @@ int detail_title_bottom(Fonts& fonts, const SelectorModel& model)
     return kDetailTitleBaseline + (n - 1) * pitch + fonts.descent(ts.px);
 }
 
-void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit fit, bool scatter,
+void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, ArtFit, bool scatter,
                    bool detail, const Theme& th)
 {
     bool on = focus_pane == Pane::Selector;
@@ -122,19 +107,11 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
     fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, th.ink,
                alpha256(fx_mul(role::quickplayHeader.alpha, pane)) * model.grid_a256 >> 8);
     for (int k = 0; k < kGridTiles && k < (int)model.tiles.size(); k++) {
-        const Image& art = model.tiles[k];
-        if (art.w <= 0 || art.h <= 0)
+        const Image* art = model.tiles[k].get();
+        if (!art || art->w <= 0 || art->h <= 0)
             continue;
         Rect tr = grid_tile_rect(k);
-        Rect fr = fit_rect(art.w, art.h, tr.x0, tr.y0, kTileSide, fit);
-        if (fit == ArtFit::Cover) {
-            Rect prev = c.clip();
-            c.set_clip(tr);
-            c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
-            c.set_clip(prev);
-        } else {
-            c.blit_bilinear(art, Rect64::of(fr, Zoom{}), tile_alpha, true);
-        }
+        c.blit(*art, tr.x0 + (kTileSide - art->w) / 2, tr.y0 + (kTileSide - art->h) / 2, tile_alpha);
     }
 
     if (!on && model.tile_focus >= 0 && model.tile_focus < kGridTiles) {

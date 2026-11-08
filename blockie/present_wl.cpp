@@ -4,6 +4,7 @@
 
 #include "present_wl.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -303,7 +304,8 @@ bool WaylandPresenter::open(const std::string&, bool)
     wl_region_add(rgn, 0, 0, w_, h_);
     wl_surface_set_opaque_region(surf_, rgn);
     wl_region_destroy(rgn);
-    inner_.open(PresentMode::Copy);
+    const char* copy = std::getenv("BLOCKIE_PRESENT_COPY");
+    inner_.open(copy && *copy == '1' ? PresentMode::Copy : PresentMode::Direct);
     return true;
 }
 
