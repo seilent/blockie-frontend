@@ -29,6 +29,7 @@ struct SheetView {
     int rows = 0;
     bool open = false;
     int level = 0;
+    bool opaque = false;
 };
 
 struct SheetGeom {

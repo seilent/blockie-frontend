@@ -69,3 +69,13 @@ The Bluetooth page ports logic from funeOS and MicroDAP:
 - MicroDAP cb78c744603f74f0d09b5bc22207c12897e06e65: screens/Bluetooth.qml, screens/PhoneAppPairing.qml,
   components/Sheet.qml, components/Dialog.qml, src/core/BluezModel.cpp, data/libexec/microdap-bt (search window,
   device sheet, code dialog).
+
+Power menu:
+
+- funeOS 35087dace, player/ui/app.cpp:5637-5651, :8044-8050, :8108-8118 and :19563-19568: the power dialog, the
+  reboot sheet and the android becomes default confirm, their words, order and focus at open.
+- funeOS 35087dace, player/ui/app.cpp:9912-9942 and :18945-18967: a Back during a dialog or sheet open closes it from
+  where it is.
+- MicroDAP cb78c74, components/Dialog.qml and components/Toast.qml, through the carved ui/overlay.cpp and ui/hud.cpp:
+  the dialog rows and focus bar, the toast in, hold, out and its text swap, and the out entered at the toast's current
+  value (exp_out6_inverse).

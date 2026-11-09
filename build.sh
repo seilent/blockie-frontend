@@ -763,6 +763,38 @@ build_vtext_test() {
         "$out/vtext/blockie-homeflow-test" "$fonts_dir"
 }
 
+build_powermenu_test() {
+    deps
+    build_deps_obj
+    ((fail)) && return 1
+    deps_fonts
+    toolver=$("$cxx" --version | head -n 1)
+    local s extra
+    local -a gobjs=() pobjs=()
+    while IFS= read -r s; do
+        extra=$(cpp_extra "$s")
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
+        gobjs+=("$genobj/${s//\//_}.o")
+    done < <(generic_srcs)
+    for s in powermenu powermenu_draw layer_present layer_mem pm_input pm_run input_pad repeat screen_settings theme ink \
+        zones; do
+        pool "$testobj/pm_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+        pobjs+=("$testobj/pm_$s.o")
+    done
+    pool "$testobj/powermenu_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/powermenu_test.cpp"
+    pool "$testobj/powermenu_main.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/powermenu_main.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/powermenu"
+    local -a dobjs=()
+    mapfile -t dobjs < <(dep_objs)
+    "$cxx" "${gobjs[@]}" "${pobjs[@]}" "$testobj/powermenu_test.o" "${dobjs[@]}" $appldflags -lpthread -lm \
+        -o "$out/powermenu/blockie-powermenu-test.tmp" || return 1
+    mv "$out/powermenu/blockie-powermenu-test.tmp" "$out/powermenu/blockie-powermenu-test"
+    echo "build.sh: $out/powermenu/blockie-powermenu-test"
+    "$out/powermenu/blockie-powermenu-test" "$fonts_dir"
+}
+
 build_shot() {
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -783,7 +815,8 @@ build_shot() {
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
-    for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops; do
+    for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops powermenu powermenu_draw layer_present \
+        layer_mem; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
@@ -796,7 +829,8 @@ build_shot() {
         "$shotobj/screen_settings.o" "$shotobj/zones.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
         "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/vtext.o" "$shotobj/nav.o" "$shotobj/home.o" \
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
-        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/shot.o" \
+        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
+        "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
@@ -833,7 +867,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }

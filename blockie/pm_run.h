@@ -1,0 +1,32 @@
+#pragma once
+#include <string>
+#include <sys/types.h>
+#include <vector>
+
+#include "../gfx/font.h"
+#include "layer_present.h"
+#include "pm_input.h"
+
+namespace fd {
+
+struct PmRunOpts {
+    std::string gates = "/run/blockie/boot/state";
+    std::string fifo;
+    std::vector<std::string> systemctl = {"systemctl"};
+    bool dark = false;
+    int idle_ms = 0;
+    int toast_in_ms = 0;
+    int toast_out_ms = 0;
+    int out = 1;
+};
+
+struct Spawned {
+    pid_t pid = -1;
+    int fd = -1;
+};
+
+Spawned spawn_capture(const std::vector<std::string>& argv);
+bool reap(pid_t pid, int& status);
+int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOpts& o);
+
+}

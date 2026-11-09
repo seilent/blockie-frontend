@@ -83,7 +83,7 @@ void draw_value_sheet(Canvas& c, Fonts& f, const SheetView& s, const Theme& th)
         return;
     Rect sr = c.surface().rect();
     Rect keep = c.clip();
-    int a = alpha256(s.progress);
+    int a = s.opaque ? 256 : alpha256(s.progress);
     c.blend(sr, th.scrim_sheet, th.scrim_sheet_a256 * a >> 8);
 
     int edge = px(tok::edge);

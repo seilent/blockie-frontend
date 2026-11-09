@@ -28,9 +28,11 @@
 #include "homeflow.h"
 #include "image.h"
 #include "ink.h"
+#include "layer_mem.h"
 #include "motion.h"
 #include "nav.h"
 #include "pops.h"
+#include "powermenu.h"
 #include "repeat.h"
 #include "screen_bt.h"
 #include "screen_selector.h"
@@ -229,7 +231,8 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         Step st;
         st.key = tok.substr(0, a);
         PadAction pa;
-        if (st.key != "ret" && st.key != "theme" && st.key != "fail" && st.key != "missing" && !action_of(st.key, pa))
+        if (st.key != "ret" && st.key != "theme" && st.key != "fail" && st.key != "missing" && st.key != "term" &&
+            !action_of(st.key, pa))
             return false;
         std::string ud = tok.substr(a + 1, b - a - 1);
         if (ud != "d" && ud != "u")
@@ -347,6 +350,7 @@ constexpr int kDriveGamesMax = 99;
 constexpr int kCoverCap = 40;
 constexpr int64_t kDriveCapMs = 20000;
 constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
+constexpr uint32_t kPlainPlate = 0x808080;
 
 bool same_px(const Surface& a, const Surface& b)
 {
@@ -1252,6 +1256,234 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
     return fails ? 1 : 0;
 }
 
+struct PmShotOpts {
+    std::string surface;
+    std::string gates;
+    std::string pick_gates;
+    std::string plate = "home";
+};
+
+const char* pm_surface_name(PmSurface s)
+{
+    switch (s) {
+    case PmSurface::Power: return "power";
+    case PmSurface::Sheet: return "sheet";
+    case PmSurface::Confirm: return "confirm";
+    case PmSurface::Toast: return "toast";
+    case PmSurface::None: break;
+    }
+    return "none";
+}
+
+struct PmStep {
+    int64_t t;
+    std::string key;
+    bool down;
+};
+
+int index_of(const std::vector<const char*>& v, const char* word)
+{
+    for (size_t i = 0; i < v.size(); i++)
+        if (std::strcmp(v[i], word) == 0)
+            return (int)i;
+    return -1;
+}
+
+int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Surface& plate,
+                const std::string& frames_dir, const std::string& out)
+{
+    std::vector<Step> steps;
+    if (!parse_script(o.script, steps)) {
+        fprintf(stderr, "blockie-shot: bad --script %s\n", o.script.c_str());
+        return 2;
+    }
+    BootGates g;
+    if (!po.gates.empty() && !(g = read_gates(po.gates)).read) {
+        fprintf(stderr, "blockie-shot: cannot read %s\n", po.gates.c_str());
+        return 1;
+    }
+    BootGates pick = g;
+    if (!po.pick_gates.empty() && !(pick = read_gates(po.pick_gates)).read) {
+        fprintf(stderr, "blockie-shot: cannot read %s\n", po.pick_gates.c_str());
+        return 1;
+    }
+    PowerMenu m;
+    m.reread = [&pick]() { return pick; };
+    int64_t a0 = std::max<int64_t>(0, o.arrive);
+    std::vector<PmStep> plan;
+    int64_t open_at = a0;
+    if (po.surface == "reboot" || po.surface == "confirm") {
+        PowerMenu probe;
+        probe.open(g, false, 0);
+        int reboot = index_of(probe.view(0).items, "reboot");
+        if (reboot < 0) {
+            fprintf(stderr, "blockie-shot: --powermenu %s needs --gates with state=default\n", po.surface.c_str());
+            return 2;
+        }
+        bool confirm = po.surface == "confirm";
+        if (confirm && g.android != "bootable") {
+            fprintf(stderr, "blockie-shot: --powermenu confirm needs --gates with android=bootable\n");
+            return 2;
+        }
+        open_at = a0 - (confirm ? 4000 : 2000);
+        auto tap = [&plan](int64_t t, const char* key) {
+            plan.push_back({t, key, true});
+            plan.push_back({t + 60, key, false});
+        };
+        for (int i = 0; i < reboot; i++)
+            tap(open_at + 500 + 100 * i, "down");
+        if (confirm) {
+            tap(a0 - 3000, "accept");
+            tap(a0 - 2000, "down");
+        }
+        tap(a0, "accept");
+    } else if (po.surface != "power") {
+        fprintf(stderr, "blockie-shot: --powermenu takes power, reboot or confirm\n");
+        return 2;
+    }
+    for (const Step& st : steps) {
+        if (st.pct >= 0) {
+            fprintf(stderr, "blockie-shot: the power menu frames take MS steps, not %d%%\n", st.pct);
+            return 2;
+        }
+        plan.push_back({st.ms, st.key, st.down});
+    }
+    std::stable_sort(plan.begin(), plan.end(), [](const PmStep& x, const PmStep& y) { return x.t < y.t; });
+
+    FILE* side = nullptr;
+    if (!frames_dir.empty() && !(side = fopen((frames_dir + "/frames.txt").c_str(), "w"))) {
+        fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    bool opened = false;
+    size_t next = 0;
+    Repeat rep;
+    std::string keys;
+    auto log_key = [&keys](const std::string& k) { keys += (keys.empty() ? "" : ",") + k; };
+    auto apply = [&](int64_t t, const std::string& key, bool down) {
+        log_key(key + (down ? ".d" : ".u"));
+        PadAction a = PadAction::Up;
+        if (key == "fail") {
+            if (down)
+                m.fail("exit-code", t);
+        } else if (key == "term") {
+            if (down)
+                m.term(t);
+        } else if (action_of(key, a)) {
+            if (down) {
+                m.action(a, false, t);
+                if (a == PadAction::Up || a == PadAction::Down)
+                    rep.press(a, kFromKeys, t);
+            } else if (a == PadAction::Up || a == PadAction::Down) {
+                rep.release(a, kFromKeys, t);
+            }
+        }
+    };
+    auto advance = [&](int64_t tf) {
+        for (;;) {
+            int64_t to = opened ? kNever : open_at;
+            int64_t te = next < plan.size() ? plan[next].t : kNever;
+            int64_t tr = rep.active() ? rep.deadline() : kNever;
+            int64_t t = std::min({to, te, tr});
+            if (t > tf || t == kNever)
+                break;
+            if (opened)
+                m.tick(t);
+            if (t == to) {
+                m.open(g, false, t);
+                opened = true;
+            } else if (t == te) {
+                const PmStep& st = plan[next++];
+                if (opened)
+                    apply(t, st.key, st.down);
+            } else {
+                PadAction a = PadAction::Up;
+                if (rep.due(t, a)) {
+                    log_key(a == PadAction::Down ? "down.r" : "up.r");
+                    m.action(a, true, t);
+                }
+            }
+            std::string ln;
+            while (m.take_line(ln))
+                fprintf(stderr, "blockie-shot: %lld ms line %s\n", (long long)t, ln.c_str());
+        }
+        if (opened)
+            m.tick(tf);
+        std::string ln;
+        while (m.take_line(ln))
+            fprintf(stderr, "blockie-shot: %lld ms line %s\n", (long long)tf, ln.c_str());
+    };
+    InkLayer ink;
+    Buffer layer, comp;
+    std::vector<uint32_t> argb((size_t)kPortraitW * kPortraitH);
+    std::vector<AlphaRegion> regions;
+    auto render = [&](int64_t tf) {
+        regions.clear();
+        Canvas c(layer.surface());
+        if (opened && !m.done())
+            draw_powermenu(c, fonts, ink, m.view(tf), theme(), regions);
+        write_argb(layer.surface(), regions, argb.data(), kPortraitW);
+        composite_argb(argb.data(), kPortraitW, plate, comp.surface());
+    };
+    int written = 0;
+    int tail = o.tail;
+    for (int n = 0;; n++) {
+        int64_t tf = o.at >= 0 && frames_dir.empty() ? o.at : frame_ms(n);
+        advance(tf);
+        render(tf);
+        if (side && tf >= o.from) {
+            if (!write_png(frame_path(frames_dir, written), comp.surface())) {
+                fprintf(stderr, "blockie-shot: cannot write %s\n", frame_path(frames_dir, written).c_str());
+                fclose(side);
+                return 1;
+            }
+            std::string line = std::to_string(written) + " " + std::to_string(tf) + " " +
+                               pm_surface_name(opened && !m.done() ? m.surface() : PmSurface::None);
+            for (const AlphaRegion& r : regions)
+                line += " " + std::to_string(r.r.x0) + "," + std::to_string(r.r.y0) + "," + std::to_string(r.r.x1) +
+                        "," + std::to_string(r.r.y1) + ":" + std::to_string(region_a8(r.a256));
+            PmView pv = m.view(tf);
+            int focus = pv.surface == PmSurface::Sheet                                       ? pv.sheet.focus
+                        : pv.surface == PmSurface::Power || pv.surface == PmSurface::Confirm ? pv.focus
+                                                                                              : -1;
+            line += " focus=" + std::to_string(focus);
+            if (!keys.empty())
+                line += " keys=" + keys;
+            if (fprintf(side, "%s\n", line.c_str()) < 0) {
+                fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+                fclose(side);
+                return 1;
+            }
+            written++;
+        }
+        if (o.at >= 0 && tf >= o.at)
+            break;
+        if (tf > kDriveCapMs) {
+            fprintf(stderr, "blockie-shot: the power menu frames passed the %lld ms cap\n", (long long)kDriveCapMs);
+            if (side)
+                fclose(side);
+            return 1;
+        }
+        keys.clear();
+        bool failing = m.surface() == PmSurface::Toast && !m.probing() && !m.done();
+        if (opened && next >= plan.size() && !rep.active() && !m.animating(tf) && !failing) {
+            if (tail-- > 0)
+                continue;
+            break;
+        }
+    }
+    if (side && fclose(side) != 0) {
+        fprintf(stderr, "blockie-shot: cannot close %s/frames.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    if (!out.empty() && !write_png(out, comp.surface())) {
+        fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    fprintf(stderr, "blockie-shot: power menu %s, %d frames\n", po.surface.c_str(), written);
+    return 0;
+}
+
 }
 
 int main(int argc, char** argv)
@@ -1285,6 +1517,7 @@ int main(int argc, char** argv)
     std::string pop_summary;
     std::string pop_case;
     bool menu_top_set = false;
+    PmShotOpts pm;
     if (const char* env = getenv("BLOCKIE_FONTS"))
         font_dir = env;
     for (int i = 1; i < argc; i++) {
@@ -1406,6 +1639,14 @@ int main(int argc, char** argv)
             drive.arrive = atoll(argv[++i]);
         else if (a == "--script" && i + 1 < argc)
             drive.script = argv[++i];
+        else if (a == "--powermenu" && i + 1 < argc)
+            pm.surface = argv[++i];
+        else if (a == "--gates" && i + 1 < argc)
+            pm.gates = argv[++i];
+        else if (a == "--pickgates" && i + 1 < argc)
+            pm.pick_gates = argv[++i];
+        else if (a == "--plate" && i + 1 < argc)
+            pm.plate = argv[++i];
         else if (a == "--from" && i + 1 < argc)
             drive.from = atoll(argv[++i]);
         else if (a == "--at" && i + 1 < argc)
@@ -1434,7 +1675,8 @@ int main(int argc, char** argv)
     bool sequence = !page_flip.empty();
     bool driven = drive.on && (!out.empty() || !frames_dir.empty());
     bool page_frames = !drive.on && !sequence && page == "settings" && !frames_dir.empty();
-    if (!driven && !page_frames && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
+    bool pm_shot = !drive.on && !pm.surface.empty() && (!out.empty() || !frames_dir.empty());
+    if (!driven && !page_frames && !pm_shot && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
@@ -1450,7 +1692,10 @@ int main(int argc, char** argv)
                 " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3]"
                 " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band] [--startup] [--arrive MS]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
-                "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n");
+                "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
+                "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"
+                " [--pickgates FILE] [--plate home|plain] [--script KEY|fail|term:d|u:MS,...] [--arrive MS] [--at MS]"
+                " [--from MS] [--tail N] [same options]\n");
         return 2;
     }
     if (font_dir.empty())
@@ -1494,6 +1739,20 @@ int main(int argc, char** argv)
     model.tile_focus = tile_focus;
     model.game_system = game_system;
     model.game_title = game_title;
+
+    if (pm_shot) {
+        if (pm.plate != "home" && pm.plate != "plain") {
+            fprintf(stderr, "blockie-shot: --plate takes home or plain\n");
+            return 2;
+        }
+        Buffer plate;
+        Canvas pc(plate.surface());
+        if (pm.plate == "plain")
+            pc.fill(kScreen, kPlainPlate);
+        else
+            draw_selector(pc, fonts, model, focus, scatter, detail);
+        return run_pm_shot(fonts, pm, drive, plate.surface(), frames_dir, out);
+    }
 
     InkLayer ink;
     SettingsPage sp;
