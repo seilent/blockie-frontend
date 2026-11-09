@@ -1,5 +1,6 @@
 #include "bus.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -148,6 +149,16 @@ void Bus::add_match(const std::string& rule)
     matches_.push_back(rule);
     if (connected())
         dbus_bus_add_match(conn_, rule.c_str(), nullptr);
+}
+
+void Bus::remove_match(const std::string& rule)
+{
+    auto it = std::find(matches_.begin(), matches_.end(), rule);
+    if (it == matches_.end())
+        return;
+    matches_.erase(it);
+    if (connected())
+        dbus_bus_remove_match(conn_, rule.c_str(), nullptr);
 }
 
 bool Bus::send(DBusMessage* m)

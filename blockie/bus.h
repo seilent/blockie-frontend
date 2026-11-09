@@ -37,6 +37,7 @@ public:
 
     void add_filter(Filter f) { filters_.push_back(std::move(f)); }
     void add_match(const std::string& rule);
+    void remove_match(const std::string& rule);
     void on_connect(Hook h) { hooks_.push_back(std::move(h)); }
     uint32_t call(DBusMessage* m, Reply r, int64_t now, int timeout_ms);
     bool send(DBusMessage* m);

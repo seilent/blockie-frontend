@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include "bus.h"
 #include "setd_key.h"
@@ -12,7 +13,7 @@ public:
     static constexpr const char* kKey = "frontend.theme";
 
     std::function<void(bool light)> on_value;
-    std::function<void()> on_fail;
+    std::function<void(const std::string& error, const std::string& text)> on_fail;
 
     ThemeSetting();
     ThemeSetting(const ThemeSetting&) = delete;

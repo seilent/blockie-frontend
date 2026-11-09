@@ -16,6 +16,8 @@ elif [[ -n $appcflags ]]; then
 else
     dep_harden=
 fi
+fe_commit=${BLOCKIE_FE_COMMIT:-}
+[[ $fe_commit =~ ^[0-9a-f]*$ ]] || { echo "build.sh: BLOCKIE_FE_COMMIT '$fe_commit' is not a hex commit" >&2; exit 2; }
 destdir=${DESTDIR:-}
 prefix=${PREFIX:-/usr}
 target=all
@@ -378,6 +380,10 @@ build_app() {
     pool "$appobj/bt.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/bt.cpp"
     pool "$appobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$appobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
+    pool "$appobj/children.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/children.cpp"
+    pool "$appobj/volume.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/volume.cpp"
+    pool "$appobj/sysinfo.o" "$cxx" "${gflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
+        "$root/blockie/sysinfo.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
@@ -401,6 +407,7 @@ build_app() {
     "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/vtext.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
+        "$appobj/children.o" "$appobj/volume.o" "$appobj/sysinfo.o" \
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
@@ -645,6 +652,41 @@ build_bt_model_test() {
     "$out/bt/blockie-bt-model-test"
 }
 
+build_sysinfo_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/sysinfo.o" "$cxx" "${launchflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
+        "$root/blockie/sysinfo.cpp"
+    pool "$testobj/sysinfo_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/sysinfo_test.cpp"
+    pool "$testobj/children.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/children.cpp"
+    pool "$testobj/volume.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/volume.cpp"
+    pool "$testobj/volume_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/volume_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/sysinfo"
+    "$cxx" "$testobj/sysinfo.o" "$testobj/sysinfo_test.o" $appldflags -lpthread \
+        -o "$out/sysinfo/blockie-sysinfo-test.tmp" || return 1
+    mv "$out/sysinfo/blockie-sysinfo-test.tmp" "$out/sysinfo/blockie-sysinfo-test"
+    "$cxx" "$testobj/children.o" "$testobj/volume.o" "$testobj/volume_test.o" $appldflags \
+        -o "$out/sysinfo/blockie-volume-test.tmp" || return 1
+    mv "$out/sysinfo/blockie-volume-test.tmp" "$out/sysinfo/blockie-volume-test"
+    echo "build.sh: $out/sysinfo/blockie-sysinfo-test $out/sysinfo/blockie-volume-test"
+    "$out/sysinfo/blockie-sysinfo-test" "$fe_commit" && "$out/sysinfo/blockie-volume-test"
+}
+
+build_wifi_model_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/wifi_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/wifi_model.cpp"
+    pool "$testobj/wifi_model_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/wifi_model_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/wifi"
+    "$cxx" "$testobj/wifi_model.o" "$testobj/wifi_model_test.o" $appldflags \
+        -o "$out/wifi/blockie-wifi-model-test.tmp" || return 1
+    mv "$out/wifi/blockie-wifi-model-test.tmp" "$out/wifi/blockie-wifi-model-test"
+    echo "build.sh: $out/wifi/blockie-wifi-model-test"
+    "$out/wifi/blockie-wifi-model-test"
+}
+
 build_test_dbus() {
     toolver=$("$cxx" --version | head -n 1)
     pkg-config --exists dbus-1 || { echo "build.sh: dbus-1 not found" >&2; return 1; }
@@ -660,6 +702,10 @@ build_test_dbus() {
     pool "$testobj/theme_setting.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/theme_setting.cpp"
     pool "$testobj/setd_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags \
         "$root/blockie/tests/setd_dbus_test.cpp"
+    pool "$testobj/wifi_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/wifi_model.cpp"
+    pool "$testobj/wifi.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/wifi.cpp"
+    pool "$testobj/wifi_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags \
+        "$root/blockie/tests/wifi_dbus_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/btdbus"
@@ -669,9 +715,14 @@ build_test_dbus() {
     "$cxx" "$testobj/setd_key.o" "$testobj/theme_setting.o" "$testobj/bus.o" "$testobj/setd_dbus_test.o" $appldflags \
         $dbus_libs -o "$out/btdbus/blockie-setd-dbus-test.tmp" || return 1
     mv "$out/btdbus/blockie-setd-dbus-test.tmp" "$out/btdbus/blockie-setd-dbus-test"
-    echo "build.sh: $out/btdbus/blockie-bt-dbus-test $out/btdbus/blockie-setd-dbus-test"
+    "$cxx" "$testobj/wifi_model.o" "$testobj/wifi.o" "$testobj/bus.o" "$testobj/wifi_dbus_test.o" $appldflags \
+        $dbus_libs -o "$out/btdbus/blockie-wifi-dbus-test.tmp" || return 1
+    mv "$out/btdbus/blockie-wifi-dbus-test.tmp" "$out/btdbus/blockie-wifi-dbus-test"
+    echo "build.sh: $out/btdbus/blockie-bt-dbus-test $out/btdbus/blockie-setd-dbus-test" \
+        "$out/btdbus/blockie-wifi-dbus-test"
     python3 "$root/blockie/tests/fake_bluez.py" "$out/btdbus/blockie-bt-dbus-test" &&
-        python3 "$root/blockie/tests/fake_setd.py" "$out/btdbus/blockie-setd-dbus-test"
+        python3 "$root/blockie/tests/fake_setd.py" "$out/btdbus/blockie-setd-dbus-test" &&
+        python3 "$root/blockie/tests/fake_nm.py" "$out/btdbus/blockie-wifi-dbus-test"
 }
 
 build_wrap_test() {
@@ -881,7 +932,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }

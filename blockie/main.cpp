@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -41,6 +42,7 @@
 #include "bench.h"
 #include "bt.h"
 #include "bus.h"
+#include "children.h"
 #include "decodeq.h"
 #include "framestats.h"
 #include "homeflow.h"
@@ -57,9 +59,11 @@
 #include "screen_selector.h"
 #include "screen_settings.h"
 #include "setd_key.h"
+#include "sysinfo.h"
 #include "theme.h"
 #include "theme_setting.h"
 #include "tile_grid.h"
+#include "volume.h"
 #include "zones.h"
 
 namespace fd {
@@ -134,6 +138,7 @@ struct ArtDrop {
 static int run()
 {
     std::fprintf(stderr, "blockie-frontend: started\n");
+    std::fprintf(stderr, "blockie-frontend: commit %s\n", *frontend_commit() ? frontend_commit() : "unknown");
     WaylandPresenter p;
     if (!p.open("", true)) {
         std::fprintf(stderr, "blockie-frontend: no wayland display, exiting\n");
@@ -214,6 +219,10 @@ static int run()
     kinds.push_back(MenuKind::Settings);
 
     Launcher launcher(data_root);
+    Children kids;
+    Volume volume(kids);
+    BatteryFeed battery;
+    Battery battery_now;
 
     PadReader pad;
     bool pad_ok = pad.open();
@@ -435,6 +444,8 @@ static int run()
         int status = 0;
         pid_t r;
         while ((r = waitpid(-1, &status, WNOHANG)) > 0) {
+            if (kids.reaped(r, status))
+                continue;
             if (child.pid <= 0 || r != child.pid)
                 continue;
             LaunchExit ex = Launcher::classify(status);
@@ -567,6 +578,7 @@ static int run()
             sync_zone();
             if (!zone_key.has_value())
                 zone_key.fetch(now);
+            battery.restart();
         }
         if (sc == Screen::Bluetooth) {
             btp.open(now);
@@ -616,7 +628,7 @@ static int run()
         }
         need_redraw = true;
     };
-    theme_set.on_fail = [&]() {
+    theme_set.on_fail = [&](const std::string&, const std::string&) {
         settings_page.set_light(theme().light);
         need_redraw = true;
     };
@@ -626,7 +638,7 @@ static int run()
         if (nav.top() == Screen::Settings)
             need_redraw = true;
     };
-    zone_key.on_fail = [&]() {
+    zone_key.on_fail = [&](const std::string&, const std::string&) {
         sync_zone();
         if (nav.top() == Screen::Settings)
             need_redraw = true;
@@ -763,12 +775,21 @@ static int run()
     std::thread decode_thread;
     if (art_evfd >= 0) {
         decode_thread = std::thread([art_evfd, &dq, &dmutex, &dcv, &decode_stop, &decode_pause, &art_mutex,
-                                     &art_drops]() {
+                                     &art_drops, &battery]() {
             std::unique_lock<std::mutex> lk(dmutex);
             for (;;) {
-                dcv.wait(lk, [&]() { return decode_stop || (!decode_pause && dq.size() > 0); });
+                dcv.wait(lk, [&]() { return decode_stop || battery.wanted() || (!decode_pause && dq.size() > 0); });
                 if (decode_stop)
                     break;
+                if (battery.wanted()) {
+                    lk.unlock();
+                    battery.run();
+                    uint64_t one = 1;
+                    ssize_t w = write(art_evfd, &one, sizeof one);
+                    (void)w;
+                    lk.lock();
+                    continue;
+                }
                 DecodeJob j;
                 if (!dq.pop(j))
                     continue;
@@ -895,38 +916,24 @@ static int run()
                 need_redraw = true;
         }
 
-        struct pollfd fds[5];
-        fds[0].fd = wl_fd;
-        fds[0].events = POLLIN | (wl_blocked ? POLLOUT : 0);
-        fds[0].revents = 0;
-        fds[1].fd = sfd;
-        fds[1].events = POLLIN;
-        fds[1].revents = 0;
-        int nfds = 2;
-        int pi = -1;
-        if (pad_ok) {
-            pi = nfds;
-            fds[pi].fd = pad.fd();
-            fds[pi].events = POLLIN;
-            fds[pi].revents = 0;
-            nfds++;
-        }
-        int ai = -1;
-        if (art_evfd >= 0) {
-            ai = nfds;
-            fds[ai].fd = art_evfd;
-            fds[ai].events = POLLIN;
-            fds[ai].revents = 0;
-            nfds++;
-        }
-        int bi = -1;
-        if (bus.fd() >= 0) {
-            bi = nfds;
-            fds[bi].fd = bus.fd();
-            fds[bi].events = POLLIN | (bus.wants_write() ? POLLOUT : 0);
-            fds[bi].revents = 0;
-            nfds++;
-        }
+        std::array<struct pollfd, 8> fds;
+        size_t nfds = 0;
+        auto watch = [&](int f, short events) {
+            if (nfds == fds.size()) {
+                std::fprintf(stderr, "blockie-frontend: poll set full\n");
+                std::abort();
+            }
+            fds[nfds].fd = f;
+            fds[nfds].events = events;
+            fds[nfds].revents = 0;
+            return (int)nfds++;
+        };
+        watch(wl_fd, POLLIN | (wl_blocked ? POLLOUT : 0));
+        watch(sfd, POLLIN);
+        int pi = pad_ok ? watch(pad.fd(), POLLIN) : -1;
+        int ai = art_evfd >= 0 ? watch(art_evfd, POLLIN) : -1;
+        int bi = bus.fd() >= 0 ? watch(bus.fd(), POLLIN | (bus.wants_write() ? POLLOUT : 0)) : -1;
+        int vi = volume.fd() >= 0 ? watch(volume.fd(), POLLIN) : -1;
         int64_t pnow = now_ms();
         int timeout = -1;
         auto until = [&](int64_t when) {
@@ -941,12 +948,22 @@ static int run()
         until(bt_tick_at(bt.state(), pnow));
         if (nav.top() == Screen::Bluetooth)
             until(btp.deadline(pnow));
+        if (nav.top() == Screen::Settings && art_evfd >= 0) {
+            if (battery.due(pnow)) {
+                {
+                    std::lock_guard<std::mutex> lk(dmutex);
+                    battery.request(pnow);
+                }
+                dcv.notify_one();
+            }
+            until(battery.deadline());
+        }
         if (frame_req_at >= 0)
             until(frame_req_at + kFrameWatchdogMs);
         bool want_frame = child.pid <= 0 && (need_redraw || (animating(pnow) && !p.frame_pending()));
         if ((want_frame && p.claim()) || bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty()))
             timeout = 0;
-        int pr = poll(fds, nfds, timeout);
+        int pr = poll(fds.data(), (nfds_t)nfds, timeout);
         if (pr < 0) {
             wl_display_cancel_read(d);
             if (errno == EINTR)
@@ -997,8 +1014,12 @@ static int run()
             }
         }
 
-        if (ai >= 0 && (fds[ai].revents & POLLIN))
+        if (ai >= 0 && (fds[ai].revents & POLLIN)) {
             take_drops();
+            battery.take(battery_now);
+        }
+        if (vi >= 0 && (fds[vi].revents & (POLLIN | POLLHUP | POLLERR)))
+            volume.readable();
         if (!pending_drops.empty() && (!flow.ctl.active() || drop_budget)) {
             std::vector<ArtDrop> drops;
             if (!flow.ctl.active()) {

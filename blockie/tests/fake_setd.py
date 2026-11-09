@@ -41,6 +41,12 @@ XML = f"""
 SET_ERRORS = {"invalid": "Invalid", "busy": "Busy", "failed": "Failed"}
 
 
+def shown(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 class Fake:
     def __init__(self, conn):
         self.conn = conn
@@ -51,7 +57,9 @@ class Fake:
         self.get_delay = 0
         self.owned = False
         self.held = []
-        self.values = {"frontend.theme": "dark", "system.timezone": "Asia/Tokyo"}
+        self.values = {"frontend.theme": "dark", "system.timezone": "Asia/Tokyo", "display.brightness": 40,
+                       "games.shader": True}
+        self.types = {"frontend.theme": "s", "system.timezone": "s", "display.brightness": "u", "games.shader": "b"}
         conn.register_object(PATH, self.info.lookup_interface(IFACE), self.on_call, None, None)
         conn.register_object(TEST_PATH, self.info.lookup_interface(TEST), self.on_call, None, None)
 
@@ -66,9 +74,19 @@ class Fake:
             self.owned = want
             self.name(NAME, want)
 
+    def variant(self, key):
+        return GLib.Variant(self.types.get(key, "s"), self.values[key])
+
+    def parse(self, key, text):
+        kind = self.types.get(key, "s")
+        if kind == "u":
+            return int(text)
+        if kind == "b":
+            return text == "true"
+        return text
+
     def changed(self, key):
-        self.conn.emit_signal(None, PATH, IFACE, "Changed",
-                              GLib.Variant("(sv)", (key, GLib.Variant("s", self.values[key]))))
+        self.conn.emit_signal(None, PATH, IFACE, "Changed", GLib.Variant("(sv)", (key, self.variant(key))))
 
     def write(self, key, value):
         if self.values.get(key) != value:
@@ -86,7 +104,7 @@ class Fake:
 
         def answer():
             if key in self.values:
-                inv.return_value(GLib.Variant("(v)", (GLib.Variant("s", self.values[key]),)))
+                inv.return_value(GLib.Variant("(v)", (self.variant(key),)))
             else:
                 inv.return_dbus_error(ERR + "UnknownKey", f"no key {key}")
             return False
@@ -96,10 +114,14 @@ class Fake:
         else:
             answer()
 
-    def set(self, key, value, inv):
-        self.log.append(f"Set {key} {value}")
+    def set(self, key, value, got, inv):
+        self.log.append(f"Set {key} {shown(value)}")
         if key not in self.values:
             inv.return_dbus_error(ERR + "UnknownKey", f"no key {key}")
+            return
+        want = self.types.get(key, "s")
+        if got != want:
+            inv.return_dbus_error(ERR + "Invalid", f"{key} takes {want}, not {got}")
             return
         mode = self.mode
         if mode in SET_ERRORS:
@@ -123,16 +145,17 @@ class Fake:
 
     def on_call(self, conn, sender, path, iface, method, params, inv):
         try:
-            self.dispatch(method, params.unpack(), inv)
+            self.dispatch(method, params, inv)
         except Exception as e:
             inv.return_dbus_error(ERR + "Failed", f"{type(e).__name__}: {e}")
 
-    def dispatch(self, method, args, inv):
+    def dispatch(self, method, params, inv):
+        args = params.unpack()
         if method == "Get":
             self.get(args[0], inv)
             return
         if method == "Set":
-            self.set(args[0], args[1], inv)
+            self.set(args[0], args[1], params.get_child_value(1).get_variant().get_type_string(), inv)
             return
         if method == "Log":
             inv.return_value(GLib.Variant("(as)", (self.log,)))
@@ -150,7 +173,7 @@ class Fake:
             self.own(False)
             GLib.timeout_add(100, lambda: self.own(True) or False)
         elif method == "Write":
-            self.write(args[0], args[1])
+            self.write(args[0], self.parse(args[0], args[1]))
         elif method == "Burst":
             for _ in range(args[1]):
                 self.changed(args[0])

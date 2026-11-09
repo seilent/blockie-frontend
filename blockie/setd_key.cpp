@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <dbus/dbus.h>
@@ -16,23 +17,75 @@ int64_t clock_ms()
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-bool variant_string(DBusMessageIter* it, std::string& out)
+bool variant_value(DBusMessageIter* it, SetdType type, std::string& out)
 {
     if (dbus_message_iter_get_arg_type(it) != DBUS_TYPE_VARIANT)
         return false;
     DBusMessageIter v;
     dbus_message_iter_recurse(it, &v);
-    if (dbus_message_iter_get_arg_type(&v) != DBUS_TYPE_STRING)
+    int t = dbus_message_iter_get_arg_type(&v);
+    if (type == SetdType::S && t == DBUS_TYPE_STRING) {
+        const char* s = nullptr;
+        dbus_message_iter_get_basic(&v, &s);
+        out = s ? s : "";
+        return true;
+    }
+    if (type == SetdType::U && t == DBUS_TYPE_UINT32) {
+        dbus_uint32_t u = 0;
+        dbus_message_iter_get_basic(&v, &u);
+        out = std::to_string(u);
+        return true;
+    }
+    if (type == SetdType::B && t == DBUS_TYPE_BOOLEAN) {
+        dbus_bool_t b = FALSE;
+        dbus_message_iter_get_basic(&v, &b);
+        out = b ? "true" : "false";
+        return true;
+    }
+    return false;
+}
+
+bool wire_value(SetdType type, const std::string& in, std::string& out)
+{
+    if (type == SetdType::S) {
+        out = in;
+        return true;
+    }
+    if (type == SetdType::B) {
+        if (in != "true" && in != "false")
+            return false;
+        out = in;
+        return true;
+    }
+    if (in.empty())
         return false;
-    const char* s = nullptr;
-    dbus_message_iter_get_basic(&v, &s);
-    out = s ? s : "";
+    uint64_t n = 0;
+    for (char c : in) {
+        if (c < '0' || c > '9')
+            return false;
+        n = n * 10 + (uint64_t)(c - '0');
+        if (n > 0xFFFFFFFFull)
+            return false;
+    }
+    out = std::to_string(n);
     return true;
 }
 
 const char* error_of(DBusMessage* r)
 {
     return r && dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR ? dbus_message_get_error_name(r) : nullptr;
+}
+
+std::string error_text(DBusMessage* r)
+{
+    DBusMessageIter it;
+    if (!r)
+        return "no reply";
+    if (!dbus_message_iter_init(r, &it) || dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_STRING)
+        return "";
+    const char* s = nullptr;
+    dbus_message_iter_get_basic(&it, &s);
+    return s ? s : "";
 }
 
 bool setd_error(const char* err, const char* kind)
@@ -49,29 +102,27 @@ bool no_reply(const char* err)
 
 }
 
-bool SetdKey::parse_value(DBusMessage* m, std::string& out)
+bool SetdKey::parse_value(DBusMessage* m, SetdType type, std::string& out)
 {
     if (!m || dbus_message_get_type(m) != DBUS_MESSAGE_TYPE_METHOD_RETURN)
         return false;
     DBusMessageIter it;
     if (!dbus_message_iter_init(m, &it))
         return false;
-    return variant_string(&it, out);
+    return variant_value(&it, type, out);
 }
 
-bool SetdKey::parse_changed(DBusMessage* m, std::string& key, std::string& value)
+bool SetdKey::parse_changed(DBusMessage* m, std::string& key)
 {
-    if (!m || !dbus_message_is_signal(m, kIface, "Changed"))
+    if (!m || !dbus_message_is_signal(m, kIface, "Changed") || !dbus_message_has_signature(m, "sv"))
         return false;
     DBusMessageIter it;
-    if (!dbus_message_iter_init(m, &it) || dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_STRING)
+    if (!dbus_message_iter_init(m, &it))
         return false;
     const char* k = nullptr;
     dbus_message_iter_get_basic(&it, &k);
     key = k ? k : "";
-    if (!dbus_message_iter_next(&it))
-        return false;
-    return variant_string(&it, value);
+    return true;
 }
 
 Bus::Reply SetdKey::guard(std::function<void(DBusMessage*)> f)
@@ -124,7 +175,7 @@ void SetdKey::got(DBusMessage* r)
     back_if_get_fails_ = false;
     std::string v;
     const char* err = error_of(r);
-    if (parse_value(r, v)) {
+    if (parse_value(r, type_, v)) {
         value_ = v;
         has_ = true;
         missing_ = false;
@@ -138,9 +189,10 @@ void SetdKey::got(DBusMessage* r)
         if (on_missing)
             on_missing();
     } else {
-        std::fprintf(stderr, "blockie-frontend: %s get failed (%s)\n", key_.c_str(), err ? err : "no reply");
+        std::fprintf(stderr, "blockie-frontend: %s get failed (%s)\n", key_.c_str(),
+                     err ? err : r ? "wrong type" : "no reply");
         if (back && !setting_ && on_fail)
-            on_fail();
+            on_fail(fail_error_, fail_text_);
     }
     if (again_) {
         again_ = false;
@@ -152,12 +204,20 @@ void SetdKey::set(const std::string& value, int64_t now)
 {
     if (!bus_)
         return;
+    std::string v;
+    if (!wire_value(type_, value, v)) {
+        std::string text = key_ + " takes " + (char)type_;
+        std::fprintf(stderr, "blockie-frontend: %s set %s refused (%s)\n", key_.c_str(), value.c_str(), text.c_str());
+        if (on_fail)
+            on_fail(std::string(kErr) + "Invalid", text);
+        return;
+    }
     if (setting_) {
-        next_ = value;
+        next_ = v;
         queued_ = true;
         return;
     }
-    send(value, now);
+    send(v, now);
 }
 
 void SetdKey::send(const std::string& value, int64_t now)
@@ -168,10 +228,20 @@ void SetdKey::send(const std::string& value, int64_t now)
         DBusMessageIter it, v;
         dbus_message_iter_init_append(m, &it);
         const char* key = key_.c_str();
-        const char* s = value.c_str();
         dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &key);
-        dbus_message_iter_open_container(&it, DBUS_TYPE_VARIANT, "s", &v);
-        dbus_message_iter_append_basic(&v, DBUS_TYPE_STRING, &s);
+        if (type_ == SetdType::U) {
+            dbus_uint32_t u = (dbus_uint32_t)std::strtoul(value.c_str(), nullptr, 10);
+            dbus_message_iter_open_container(&it, DBUS_TYPE_VARIANT, DBUS_TYPE_UINT32_AS_STRING, &v);
+            dbus_message_iter_append_basic(&v, DBUS_TYPE_UINT32, &u);
+        } else if (type_ == SetdType::B) {
+            dbus_bool_t b = value == "true" ? TRUE : FALSE;
+            dbus_message_iter_open_container(&it, DBUS_TYPE_VARIANT, DBUS_TYPE_BOOLEAN_AS_STRING, &v);
+            dbus_message_iter_append_basic(&v, DBUS_TYPE_BOOLEAN, &b);
+        } else {
+            const char* s = value.c_str();
+            dbus_message_iter_open_container(&it, DBUS_TYPE_VARIANT, DBUS_TYPE_STRING_AS_STRING, &v);
+            dbus_message_iter_append_basic(&v, DBUS_TYPE_STRING, &s);
+        }
         dbus_message_iter_close_container(&it, &v);
     }
     bus_->call(m, guard([this, value](DBusMessage* r) { sent(value, r); }), now, kTimeoutMs);
@@ -199,12 +269,14 @@ void SetdKey::sent(const std::string& value, DBusMessage* r)
     std::fprintf(stderr, "blockie-frontend: %s set %s failed (%s)\n", key_.c_str(), value.c_str(),
                  err ? err : "no reply");
     if (setd_error(err, "Timeout") || no_reply(err)) {
+        fail_error_ = err ? err : DBUS_ERROR_NO_REPLY;
+        fail_text_ = error_text(r);
         back_if_get_fails_ = true;
         fetch(clock_ms());
         return;
     }
     if (on_fail)
-        on_fail();
+        on_fail(err, error_text(r));
     fetch(clock_ms());
 }
 
@@ -220,8 +292,8 @@ bool SetdKey::on_signal(DBusMessage* m)
             fetch(clock_ms());
         return false;
     }
-    std::string key, value;
-    if (parse_changed(m, key, value) && key == key_)
+    std::string key;
+    if (parse_changed(m, key) && key == key_)
         fetch(clock_ms());
     return false;
 }
