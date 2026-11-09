@@ -7,9 +7,10 @@ namespace fd {
 
 namespace {
 
-constexpr int kFull = 64 * 64;
+constexpr int kSpan = 64;
+constexpr int kFull = kSpan * kSpan;
 
-int span64(int p, int a, int b) { return std::max(0, std::min(p + 64, b) - std::max(p, a)); }
+int span64(int p, int a, int b) { return std::max(0, std::min(p + kSpan, b) - std::max(p, a)); }
 
 uint32_t tap_channel(uint32_t p00, uint32_t p10, uint32_t p01, uint32_t p11, int wx, int wy)
 {
@@ -35,6 +36,13 @@ uint32_t tap_swar(uint32_t p00, uint32_t p10, uint32_t p01, uint32_t p11, uint32
     return rb | g;
 }
 
+void edge_px(uint32_t& o, const uint32_t* r0, const uint32_t* r1, const ScaleTap& x, const ScaleTap& y)
+{
+    int a = x.cov * y.cov * 255 / kFull;
+    if (a)
+        o = blend_px(o, tap_channel(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], x.w, y.w), a + 1);
+}
+
 template <Scaler K>
 void tile_rows(const Surface& dst, const Image& img, const ScaleAxis& xs, const ScaleAxis& ys, int i0, int i1, int j0,
                int j1)
@@ -42,6 +50,11 @@ void tile_rows(const Surface& dst, const Image& img, const ScaleAxis& xs, const 
     const ScaleTap* tx = xs.taps.data();
     const ScaleTap* ty = ys.taps.data();
     const uint32_t* px = img.mem.data();
+    int ia = i0, ib = i1;
+    while (ia < ib && tx[ia].cov < kSpan)
+        ia++;
+    while (ib > ia && tx[ib - 1].cov < kSpan)
+        ib--;
     for (int j = j0; j < j1; j++) {
         const ScaleTap& y = ty[j];
         if (!y.cov)
@@ -49,21 +62,19 @@ void tile_rows(const Surface& dst, const Image& img, const ScaleAxis& xs, const 
         const uint32_t* r0 = px + (size_t)y.i0 * img.w;
         const uint32_t* r1 = px + (size_t)y.i1 * img.w;
         uint32_t* d = dst.row(ys.p0 + j);
-        for (int i = i0; i < i1; i++) {
+        bool whole = y.cov == kSpan;
+        int a = whole ? ia : i1, b = whole ? ib : i1;
+        for (int i = i0; i < a; i++)
+            edge_px(d[xs.p0 + i], r0, r1, tx[i], y);
+        for (int i = a; i < b; i++) {
             const ScaleTap& x = tx[i];
-            uint32_t& o = d[xs.p0 + i];
-            int c = x.cov * y.cov;
-            if (c == kFull) {
-                if constexpr (K == Scaler::Swar)
-                    o = tap_swar(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], (uint32_t)x.w, (uint32_t)y.w);
-                else
-                    o = tap_channel(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], x.w, y.w);
-                continue;
-            }
-            int a = c * 255 / kFull;
-            if (a)
-                o = blend_px(o, tap_channel(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], x.w, y.w), a + 1);
+            if constexpr (K == Scaler::Swar)
+                d[xs.p0 + i] = tap_swar(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], (uint32_t)x.w, (uint32_t)y.w);
+            else
+                d[xs.p0 + i] = tap_channel(r0[x.i0], r0[x.i1], r1[x.i0], r1[x.i1], x.w, y.w);
         }
+        for (int i = b; i < i1; i++)
+            edge_px(d[xs.p0 + i], r0, r1, tx[i], y);
     }
 }
 

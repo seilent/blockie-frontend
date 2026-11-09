@@ -293,6 +293,7 @@ cpp_extra() {
         gfx/stb.cpp) echo "-w" ;;
         gfx/bidi.cpp) echo "-I$fb_dir/lib" ;;
         gfx/shape.cpp) echo "-I$hb_dir/src" ;;
+        blockie/scale.cpp) echo "-O3" ;;
     esac
 }
 
@@ -383,7 +384,7 @@ build_app() {
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     for s in homeflow home motion slide glide t9 scale bench; do
-        pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+        pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags $(cpp_extra "blockie/$s.cpp") "$root/blockie/$s.cpp"
     done
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
     pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
@@ -511,7 +512,7 @@ build_image_test() {
     pool "$genobj/gfx_canvas.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/gfx/canvas.cpp"
     pool "$imgobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$testobj/image_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
-    pool "$imgobj/scale.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/scale.cpp"
+    pool "$imgobj/scale.o" "$cxx" "${gflags[@]}" $appcflags $(cpp_extra blockie/scale.cpp) "$root/blockie/scale.cpp"
     pool "$testobj/scale_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/scale_test.cpp"
     drain
     ((fail)) && return 1
