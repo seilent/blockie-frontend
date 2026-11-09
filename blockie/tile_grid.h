@@ -25,6 +25,46 @@ constexpr int kBigGutter = std_px(tok::tileLGutter);
 constexpr int kBigPitch = kBigTileSide + kBigGutter;
 constexpr int kBigCols = 2;
 constexpr int kBigRows = 3;
+constexpr int kBandTop = kTileFirstTop - kTileFocusBorder;
+constexpr int kBandBottom = kTileFirstTop + (kGridRows - 1) * kGridRowPitch + kTileSide + kTileFocusBorder;
+
+enum class TileMode { Standard, Large };
+
+struct GridSpec {
+    int cols = 0;
+    int side = 0;
+    int gutter = 0;
+    int pitch = 0;
+    int focus_rows = 0;
+    int band_rows = 0;
+    int pad_rows = 0;
+    int right = 0;
+};
+
+constexpr GridSpec grid_spec(TileMode m)
+{
+    GridSpec g;
+    bool large = m == TileMode::Large;
+    g.cols = large ? kBigCols : kGridColsWide;
+    g.side = large ? kBigTileSide : kTileSide;
+    g.gutter = large ? kBigGutter : kGridGutter;
+    g.pitch = large ? kBigPitch : kGridRowPitch;
+    g.focus_rows = large ? 2 : kGridRows;
+    g.band_rows = large ? kBigRows : kGridRows;
+    g.pad_rows = 2;
+    g.right = kGridX + g.cols * g.side + (g.cols - 1) * g.gutter;
+    return g;
+}
+
+constexpr Rect64 grow_tile_rect(int k, fx g, int q)
+{
+    int side = kTileSide * 64 + (int)(((int64_t)(kBigTileSide - kTileSide) * 64 * g) >> kFxBits);
+    int pitch = kGridRowPitch * 64 + (int)(((int64_t)(kBigPitch - kGridRowPitch) * 64 * g) >> kFxBits);
+    int scroll = (int)(((int64_t)q * kBigPitch * 64 * g) >> kFxBits);
+    int x = kGridX * 64 + k % kBigCols * pitch;
+    int y = kTileFirstTop * 64 + k / kBigCols * pitch - scroll;
+    return Rect64{x, y, x + side, y + side};
+}
 
 constexpr Rect grid_tile_rect(int k, int cols)
 {

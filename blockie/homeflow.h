@@ -52,10 +52,12 @@ public:
     void startup(int64_t now);
     bool input(PadAction a, bool rep, int64_t now);
     bool frame(int64_t now, const Surface& dst);
-    bool art(int64_t id, int64_t epoch, const Art& img);
+    bool art(int64_t id, int side, int64_t epoch, const Art& img);
     std::vector<HomeGame> game_ran(const std::vector<HomeGame>& list);
     void redraw();
     void theme_changed();
+    void want_mode(TileMode m) { mode_wanted_ = m; }
+    TileMode wanted_mode() const { return mode_wanted_; }
     bool animating(int64_t now) const { return ctl.animating(now); }
     void land_all(int64_t now, const char* why) { ctl.land_all(now, why); }
     void at(int64_t now) { now_ = now; }
@@ -118,6 +120,7 @@ private:
     Rect art_rect_;
     bool step_in_ = false;
     Want want_ = Want::None;
+    TileMode mode_wanted_ = TileMode::Standard;
     std::shared_ptr<SlidePlan> plan_;
 };
 

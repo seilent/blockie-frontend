@@ -116,16 +116,23 @@ int main()
         h.pad_rows = 0;
         h.window(m, 2, 8, true);
 
-        check(h.drop(m, 109, h.epoch, solid(0xA9)) && px(m.tiles[3]) == 0xA9 && px(h.cache[109]) == 0xA9,
+        check(h.drop(m, 109, kTileSide, h.epoch, solid(0xA9)) && px(m.tiles[3]) == 0xA9 && px(h.cache[109]) == 0xA9,
               "a drop for a game on screen lands on its tile and in the cache");
-        check(!h.drop(m, 131, h.epoch, solid(0xB1)) && h.cache.count(131),
+        check(!h.drop(m, 131, kTileSide, h.epoch, solid(0xB1)) && h.cache.count(131),
               "a drop for the current system off screen is cached without a redraw");
-        bool stale = h.drop(m, 131, h.epoch - 1, solid(0xB2));
+        bool stale = h.drop(m, 131, kTileSide, h.epoch - 1, solid(0xB2));
         check(!stale && px(h.cache[131]) == 0xB1, "a drop from an older epoch off screen is ignored");
-        check(!h.drop(m, 9999, 0, solid(0xC1)) && !h.cache.count(9999), "a drop for an unknown game is dropped");
-        bool held = h.drop(m, 501, 0, solid(0x51));
+        check(!h.drop(m, 9999, kTileSide, 0, solid(0xC1)) && !h.cache.count(9999),
+              "a drop for an unknown game is dropped");
+        bool held = h.drop(m, 501, kTileSide, 0, solid(0x51));
         check(!held && px(h.recent_hold[1]) == 0x51 && !m.tiles[1] && px(m.tiles[3]) == 0xA9,
               "a recent drop in a system view lands in the held recent tiles, not on screen");
+        check(px(h.recent_art(m, 1, kTileSide)) == 0x51 && !h.recent_art(m, 1, kBigTileSide) &&
+                  !h.recent_art(m, -1, kTileSide) && !h.recent_art(m, (int)h.recent.size(), kTileSide),
+              "recent art by game and side reads the held 154 tiles in a system view and nothing at other sides");
+        bool big = h.drop(m, 502, kBigTileSide, 0, solid(0x52)) || h.drop(m, 109, kBigTileSide, h.epoch, solid(0x53));
+        check(!big && px(h.recent_hold[2]) == 502 && px(m.tiles[3]) == 0xA9 && px(h.cache[109]) == 0xA9,
+              "a drop at a side the grid does not use changes nothing");
         check(h.keeps_job(9999, 0) && h.keeps_job(502, 7) && !h.keeps_job(9999, 7),
               "jobs of epoch 0 and of recent games survive a system exit");
 
@@ -149,6 +156,9 @@ int main()
         check(!h.system_view && m.tiles.size() == 6 && h.recent_hold.empty() && h.cache.empty() &&
                   m.section_label.empty() && m.game_title.empty() && m.game_system.empty(),
               "leave brings the recent tiles back and clears the system state");
+        check(px(h.recent_art(m, 1, kTileSide)) == 500 && h.recent_art(m, 3, kTileSide) == m.tiles[3] &&
+                  !h.recent_art(m, 0, kTileSide) && !h.recent_art(m, 1, kBigTileSide),
+              "collapsed, recent art by game at 154 reads the recent tiles on screen");
 
         nav.system_view = false;
         nav.pane = Pane::Details;

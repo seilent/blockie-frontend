@@ -69,9 +69,9 @@ public:
     Rect damage() const { return damage_; }
     Surface from() { return from_.surface(); }
     Surface to() { return to_.surface(); }
+    void finish(int64_t now);
 
 private:
-    void finish(int64_t now);
     void land_channels(int64_t now, const char* why);
     void render_to();
     bool forward_dir() const;

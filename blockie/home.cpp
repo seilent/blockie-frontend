@@ -135,8 +135,18 @@ std::vector<HomeGame> HomeState::window(SelectorModel& m, int scroll, int focus,
     return want;
 }
 
-bool HomeState::drop(SelectorModel& m, int64_t id, int64_t drop_epoch, const Art& img)
+Art HomeState::recent_art(const SelectorModel& m, int k, int side) const
 {
+    const std::vector<Art>& grid = system_view ? recent_hold : m.tiles;
+    if (side != kTileSide || k < 0 || k >= (int)recent.size() || k >= (int)grid.size())
+        return nullptr;
+    return grid[k];
+}
+
+bool HomeState::drop(SelectorModel& m, int64_t id, int side, int64_t drop_epoch, const Art& img)
+{
+    if (side != kTileSide)
+        return false;
     std::vector<Art>& grid = system_view ? recent_hold : m.tiles;
     int rpos = -1;
     for (int k = 0; k < (int)recent.size() && k < (int)grid.size(); k++)

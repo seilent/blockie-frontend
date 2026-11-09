@@ -89,8 +89,6 @@ constexpr int kTurnWrap = kTurnStart - kTurnEnd;
 constexpr int kTurnTitleStep = 64;
 constexpr int kTurnTitleLines = 3;
 constexpr size_t kTurnWrapKeep = 4;
-constexpr int kBandTop = kTileFirstTop - kTileFocusBorder;
-constexpr int kBandBottom = kTileFirstTop + (kGridRows - 1) * kGridRowPitch + kTileSide + kTileFocusBorder;
 
 VText& turned_cache()
 {

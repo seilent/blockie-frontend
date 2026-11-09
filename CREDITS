@@ -40,6 +40,10 @@ Page and menu motion reuse:
   swapped with the title when the new one enters.
 - funeOS c319d2ef2, docs/DESIGN.md input during motion: a back reverses a running push or expand from where it is,
   every leg running back over the time it has run.
+- funeOS c60cb3ca1, CubicOut in player/core/curves.cpp and the T3m tile leg in player/ui/pagemove.cpp:440-443
+  (motion.t3mTile, player/ui/tokens.txt:660): the 595 ms grow clock of the large Recent tiles.
+- funeOS c60cb3ca1, player/ui/app.cpp:1018: the Quickplay pan on EaseOut over motion.quickplay, the 420 ms grow clock.
+- funeOS c60cb3ca1, motion.leave in player/ui/tokens.txt:616: the 133 ms header leave.
 
 Settings value sheet:
 
@@ -55,7 +59,8 @@ Settings value sheet:
 
 Cover tiles:
 
-- funeOS d58193469, taps and bilinear in player/gfx/canvas.cpp: the tile size cover scale in blockie/image.cpp.
+- funeOS d58193469, taps and bilinear in player/gfx/canvas.cpp: the tile size cover scale in blockie/image.cpp and
+  the grow tile scaler in blockie/scale.cpp.
 
 The Bluetooth page ports logic from funeOS and MicroDAP:
 

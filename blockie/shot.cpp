@@ -686,7 +686,7 @@ private:
         for (int64_t id : late_) {
             auto it = art.find(id);
             if (it != art.end())
-                flow.art(id, 0, it->second);
+                flow.art(id, kTileSide, 0, it->second);
         }
     }
 

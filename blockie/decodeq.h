@@ -4,6 +4,7 @@
 #include <deque>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace fd {
 
@@ -14,6 +15,7 @@ struct DecodeJob {
     std::string path;
     int64_t gen = kRecentGen;
     int64_t queued_ms = 0;
+    std::vector<int> sides;
 };
 
 class DecodeQueue {
@@ -26,6 +28,7 @@ public:
     bool accept(int64_t game_id) const;
     bool pending(int64_t game_id) const;
     size_t size() const { return q_.size(); }
+    size_t busy() const { return busy_.size(); }
 
 private:
     std::deque<DecodeJob> q_;

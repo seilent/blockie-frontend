@@ -22,6 +22,20 @@ void check(bool ok, const char* what)
 
 bool same(Rect a, Rect b) { return a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1; }
 
+bool same64(Rect64 a, Rect b)
+{
+    return a.x0 == b.x0 * 64 && a.y0 == b.y0 * 64 && a.x1 == b.x1 * 64 && a.y1 == b.y1 * 64;
+}
+
+bool rows_fit(const GridSpec& s)
+{
+    int focus_end = kTileFirstTop + (s.focus_rows - 1) * s.pitch + s.side + kTileFocusBorder;
+    int next_end = focus_end + s.pitch;
+    int band_top = kTileFirstTop + (s.band_rows - 1) * s.pitch;
+    return focus_end <= kBandBottom && next_end > kBandBottom && band_top < kBandBottom &&
+           band_top + s.pitch >= kBandBottom;
+}
+
 }
 
 int main()
@@ -48,6 +62,42 @@ int main()
           "the big grid sits at x 120 and 368 with its right edge at 600");
     check(big_tile_rect(2).y0 == 328 && big_tile_rect(4).y0 == 576 && big_tile_rect(4).y1 > 720,
           "big rows at 80, 328 and 576, the third cut by the canvas");
+
+    check(kBandTop == 76 && kBandBottom == 712, "the band runs from y 76 to 712");
+    GridSpec st = grid_spec(TileMode::Standard);
+    check(st.cols == kGridColsWide && st.side == kTileSide && st.gutter == kGridGutter && st.pitch == kGridRowPitch &&
+              st.focus_rows == 4 && st.band_rows == 4 && st.pad_rows == 2 && st.right == 590 &&
+              st.right == grid_tile_rect(st.cols - 1, st.cols).x1,
+          "standard: 3 columns of 154 at gutter 4 and pitch 158, 4 focus and band rows, pad 2, right edge 590");
+    GridSpec lg = grid_spec(TileMode::Large);
+    check(lg.cols == 2 && lg.side == 232 && lg.gutter == 16 && lg.pitch == 248 && lg.focus_rows == 2 &&
+              lg.band_rows == 3 && lg.pad_rows == 2 && lg.right == 600 && lg.right == big_tile_rect(lg.cols - 1).x1,
+          "large: 2 columns of 232 at gutter 16 and pitch 248, 2 focus rows, 3 band rows, pad 2, right edge 600");
+    check(rows_fit(st) && rows_fit(lg),
+          "focus rows are the whole rows inside the band, band rows the rows that meet it, in both modes");
+
+    bool ends = true;
+    for (int k = 0; k < 12; k++)
+        for (int q = 0; q <= 4; q++) {
+            Rect big = big_tile_rect(k);
+            big.y0 -= q * kBigPitch;
+            big.y1 -= q * kBigPitch;
+            if (!same64(grow_tile_rect(k, 0, q), grid_tile_rect(k, kGridCols)) ||
+                !same64(grow_tile_rect(k, kOne, q), big))
+                ends = false;
+        }
+    check(ends, "the grow pose is the collapsed rect at g 0 and the large rect at g 1, games 0 to 11, scroll 0 to 4");
+    bool grows = true;
+    int side = 0, pitch = 0;
+    for (fx g = 0; g <= kOne; g += kOne / 256) {
+        Rect64 a = grow_tile_rect(0, g, 0), b = grow_tile_rect(3, g, 0);
+        int s = a.x1 - a.x0, p = b.y0 - a.y0;
+        if (s < side || p < pitch || b.x0 - a.x0 != p || b.x1 - b.x0 != s)
+            grows = false;
+        side = s;
+        pitch = p;
+    }
+    check(grows, "the grow pose stays rigid and its side and pitch never shrink as g rises");
 
     bool rows = true;
     for (int k = 0; k < 40; k++)

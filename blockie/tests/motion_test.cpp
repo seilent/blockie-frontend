@@ -609,7 +609,7 @@ int main()
         Art drop = solid(0xABCDEF);
         h.art[101] = drop;
         Rect r = tile_slot_rect(h.model, 1, true);
-        if (h.home.drop(h.model, 101, h.home.epoch, drop))
+        if (h.home.drop(h.model, 101, kTileSide, h.home.epoch, drop))
             h.ctl.dirty(r);
         h.frame(16, out);
         bool inside = false, outside = true;

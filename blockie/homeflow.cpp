@@ -88,11 +88,11 @@ bool HomeFlow::frame(int64_t now, const Surface& dst)
     return more;
 }
 
-bool HomeFlow::art(int64_t id, int64_t epoch, const Art& img)
+bool HomeFlow::art(int64_t id, int side, int64_t epoch, const Art& img)
 {
     bool expanded = nav.pane == Pane::Details;
     std::vector<Art> before = model.tiles;
-    if (!home.drop(model, id, epoch, img))
+    if (!home.drop(model, id, side, epoch, img))
         return false;
     redraw_ = true;
     for (int k = 0; k < (int)model.tiles.size(); k++)

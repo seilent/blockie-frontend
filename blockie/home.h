@@ -44,7 +44,8 @@ public:
     std::vector<HomeGame> window(SelectorModel& m, int scroll, int focus, bool rebuild);
     std::unordered_set<int64_t> keep_set(int scroll) const;
     bool keeps_job(int64_t id, int64_t job_epoch) const;
-    bool drop(SelectorModel& m, int64_t id, int64_t drop_epoch, const Art& img);
+    Art recent_art(const SelectorModel& m, int k, int side) const;
+    bool drop(SelectorModel& m, int64_t id, int side, int64_t drop_epoch, const Art& img);
 };
 
 }

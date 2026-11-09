@@ -265,6 +265,50 @@ int main()
     check(slide_ease(0) == 0 && slide_ease(1) == 1 && slide_ease(0.5) > 0.5 && slide_ease(0.25) < slide_ease(0.5),
           "the bezier eases out and runs from 0 to 1");
 
+    check(grow_ms(GrowClock::G) == 595 && grow_ms(GrowClock::G6) == 420 && grow_ms(GrowClock::GS) == 400,
+          "the grow clocks run 595, 420 and 400 ms");
+    bool clocks = true;
+    for (GrowClock c : {GrowClock::G, GrowClock::G6, GrowClock::GS}) {
+        if (grow_at(c, -5) != 0 || grow_at(c, 0) != 0 || grow_at(c, grow_ms(c)) != kOne || grow_at(c, 900) != kOne)
+            clocks = false;
+        fx prev = 0;
+        for (int64_t t = 1; t <= grow_ms(c); t++) {
+            fx g = grow_at(c, t);
+            if (g < prev || g > kOne)
+                clocks = false;
+            prev = g;
+        }
+    }
+    check(clocks, "every grow clock runs from 0 to 1 and never back");
+    double cubic = 1 - std::pow(1 - 297.0 / 595, 3);
+    check(std::fabs(grow_at(GrowClock::G, 297) / (double)kOne - cubic) < 0.001 &&
+              grow_at(GrowClock::G6, 210) == 3 * kOne / 4 &&
+              grow_at(GrowClock::GS, 200) == (fx)std::lround(slide_ease(0.5) * kOne),
+          "G is cubicOut, G6 easeOut, GS the slide's bezier");
+
+    {
+        Buffer a, b, plain, grown;
+        draw_collapsed(a.surface(), kScreen, false);
+        draw_expanded(b.surface(), kScreen, false);
+        SlidePlan fade = slide_plan(648, LeftMove::Fade, 5, kHead);
+        SlidePlan grow = fade;
+        grow.moves.grow = GrowClock::G6;
+        bool kept = true;
+        for (int64_t t : {0, 100, 250, 399, 400, 500}) {
+            for (Pix& v : grown.pix)
+                v = LiveF::pack(kSentinel);
+            slide_compose(a.surface(), b.surface(), plain.surface(), fade, t, -1, kGround, SlideText());
+            slide_compose(a.surface(), b.surface(), grown.surface(), grow, t, -1, kGround, SlideText());
+            int bx = std::clamp(slide_pose(fade, t).boundary, kPaneSplit, kScreen.x1);
+            Surface gs = grown.surface(), ps = plain.surface();
+            for (int y = 0; y < gs.h; y++)
+                for (int x = 0; x < gs.w; x++)
+                    if (gs.at(x, y) != (x < bx ? LiveF::pack(kSentinel) : ps.at(x, y)))
+                        kept = false;
+        }
+        check(kept, "a planned grow leaves x < b to the grow composite and the rest of the frame as the fade's");
+    }
+
     SlidePlan sys5 = slide_plan(648, LeftMove::Cells, 5, kHead);
     SlidePlan sys0 = slide_plan(648, LeftMove::Fade, 5, kHead);
     {

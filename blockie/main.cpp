@@ -38,6 +38,7 @@
 #include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
 #include "../ui/roles.h"
+#include "bench.h"
 #include "bt.h"
 #include "bus.h"
 #include "decodeq.h"
@@ -70,6 +71,8 @@ using Art = std::shared_ptr<const Image>;
 constexpr int kFrameWatchdogMs = 100;
 constexpr int kThemeWaitMs = 300;
 constexpr int kCoverWaitMs = 300;
+constexpr int kBenchIdleMs = 5000;
+constexpr int kBenchPollMs = 50;
 constexpr const char* kZoneKey = "system.timezone";
 
 void copy_surface(const Surface& src, const Surface& dst)
@@ -122,6 +125,8 @@ struct ArtDrop {
     std::string path;
     Art img;
     bool decoded = false;
+    int side = kTileSide;
+    bool last = true;
 };
 
 }
@@ -244,6 +249,7 @@ static int run()
     std::vector<ArtDrop> art_drops;
     std::atomic<bool> scrape_stop{false};
     std::atomic<bool> scrape_pause{false};
+    std::atomic<bool> scrape_busy{false};
     int art_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     int work_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     std::vector<ArtDrop> pending_drops;
@@ -256,6 +262,8 @@ static int run()
     FrameStats fstats;
     const char* fsenv = std::getenv("BLOCKIE_FRAMESTATS");
     fstats.on = fsenv && std::strcmp(fsenv, "1") == 0;
+    const char* benv = std::getenv("BLOCKIE_BENCH");
+    bool bench = benv && std::strcmp(benv, "grow") == 0;
 
     auto enqueue_scrape = [&](const Game& g, int64_t epoch, const std::string& folder) {
         bool added = false;
@@ -277,7 +285,7 @@ static int run()
         bool added;
         {
             std::lock_guard<std::mutex> lk(dmutex);
-            added = dq.push({id, path, gen, now_ms()});
+            added = dq.push({id, path, gen, now_ms(), {kTileSide}});
         }
         if (added)
             dcv.notify_one();
@@ -475,7 +483,7 @@ static int run()
         bool want;
         {
             std::lock_guard<std::mutex> lk(dmutex);
-            if (drp.decoded)
+            if (drp.decoded && drp.last)
                 dq.done(drp.game_id);
             want = dq.accept(drp.game_id);
         }
@@ -489,7 +497,7 @@ static int run()
                 in_recent = true;
         if (drp.decoded) {
             if (drp.img) {
-                if (flow.art(drp.game_id, home.epoch, drp.img) && !flow.ctl.active() && child.pid <= 0)
+                if (flow.art(drp.game_id, drp.side, home.epoch, drp.img) && !flow.ctl.active() && child.pid <= 0)
                     need_redraw = true;
                 return;
             }
@@ -687,7 +695,7 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: eventfd failed, art scrape and covers disabled\n");
     else {
         scrape_thread = std::thread([data_root, art_evfd, work_evfd, &squeue, &qmutex, &art_mutex, &art_drops,
-                                     &scrape_stop, &scrape_pause]() {
+                                     &scrape_stop, &scrape_pause, &scrape_busy]() {
             Library wlib;
             if (!wlib.open(data_root)) {
                 std::fprintf(stderr, "blockie-frontend: scrape db open failed\n");
@@ -720,6 +728,7 @@ static int run()
                             break;
                         j = std::move(squeue.front());
                         squeue.pop_front();
+                        scrape_busy.store(true);
                     }
                     if (scrape_stop.load())
                         return;
@@ -745,6 +754,7 @@ static int run()
                         ssize_t w = write(art_evfd, &one, sizeof one);
                         (void)w;
                     }
+                    scrape_busy.store(false);
                 }
             }
             std::fprintf(stderr, "blockie-frontend: scrape worker exit\n");
@@ -767,20 +777,26 @@ static int run()
                 DecodedImage dec;
                 bool ok = load_png(j.path, dec) && dec.ok();
                 int64_t t1 = now_us();
-                Art img;
-                if (ok)
-                    img = std::make_shared<const Image>(cover_tile(dec, kTileSide));
-                int64_t t2 = now_us();
-                std::fprintf(stderr, "blockie-frontend: decode %lld %s %dx%d wait %lld png %.1f tile %.1f ms\n",
-                             (long long)j.game_id, ok ? "ok" : "fail", dec.w, dec.h,
-                             (long long)(t0 / 1000 - j.queued_ms), (t1 - t0) / 1000.0, (t2 - t1) / 1000.0);
-                {
-                    std::lock_guard<std::mutex> ak(art_mutex);
-                    art_drops.push_back({j.game_id, std::string(), img, true});
+                size_t n = ok ? std::max<size_t>(j.sides.size(), 1) : 1;
+                for (size_t s = 0; s < n; s++) {
+                    int side = s < j.sides.size() ? j.sides[s] : kTileSide;
+                    Art img;
+                    if (ok)
+                        img = std::make_shared<const Image>(cover_tile(dec, side));
+                    int64_t t2 = now_us();
+                    if (s == 0)
+                        std::fprintf(stderr,
+                                     "blockie-frontend: decode %lld %s %dx%d wait %lld png %.1f tile %.1f ms\n",
+                                     (long long)j.game_id, ok ? "ok" : "fail", dec.w, dec.h,
+                                     (long long)(t0 / 1000 - j.queued_ms), (t1 - t0) / 1000.0, (t2 - t1) / 1000.0);
+                    {
+                        std::lock_guard<std::mutex> ak(art_mutex);
+                        art_drops.push_back({j.game_id, std::string(), img, true, side, s + 1 == n});
+                    }
+                    uint64_t one = 1;
+                    ssize_t w = write(art_evfd, &one, sizeof one);
+                    (void)w;
                 }
-                uint64_t one = 1;
-                ssize_t w = write(art_evfd, &one, sizeof one);
-                (void)w;
                 lk.lock();
             }
         });
@@ -813,7 +829,35 @@ static int run()
         }
         std::fprintf(stderr, "blockie-frontend: recent covers waited %lld ms\n", (long long)(now_ms() - t0));
     }
-    if (can_animate()) {
+    if (bench) {
+        scrape_pause.store(true);
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            decode_pause = true;
+        }
+        int64_t w0 = now_ms();
+        bool idle = false;
+        for (;;) {
+            take_drops();
+            std::vector<ArtDrop> drops;
+            drops.swap(pending_drops);
+            for (const ArtDrop& drp : drops)
+                apply_drop(drp);
+            {
+                std::lock_guard<std::mutex> lk(dmutex);
+                idle = dq.busy() == 0 && !scrape_busy.load();
+            }
+            int64_t left = w0 + kBenchIdleMs - now_ms();
+            if (idle || left <= 0)
+                break;
+            struct pollfd af;
+            af.fd = art_evfd;
+            af.events = POLLIN;
+            af.revents = 0;
+            poll(&af, 1, (int)std::min<int64_t>(left, kBenchPollMs));
+        }
+        bench_grow(flow, fonts, lib, sys_ids, idle, now_ms() - w0);
+    } else if (can_animate()) {
         flow.startup(now_ms());
         fstats.begin("t1");
     }
@@ -821,7 +865,7 @@ static int run()
 
     wl_display* d = p.display();
     int wl_fd = p.event_fd();
-    while (p.ready()) {
+    while (!bench && p.ready()) {
         while (wl_display_prepare_read(d) != 0)
             wl_display_dispatch_pending(d);
         bool wl_blocked = wl_display_flush(d) < 0 && errno == EAGAIN;

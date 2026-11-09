@@ -29,6 +29,12 @@ int64_t right_ms() { return kSlideMs + text_ms(); }
 
 bool settled(int64_t t, int64_t prev, int64_t end) { return prev >= end && t >= end; }
 
+fx cubic_out(fx t)
+{
+    fx m = kOne - t;
+    return kOne - fx_mul(fx_mul(m, m), m);
+}
+
 }
 
 double slide_ease(double x)
@@ -46,6 +52,34 @@ double slide_ease(double x)
             hi = mid;
     }
     return cbez(kY1, kY2, (lo + hi) / 2);
+}
+
+int64_t grow_ms(GrowClock c)
+{
+    switch (c) {
+    case GrowClock::G: return fx_round(tok::motion_t3mTile);
+    case GrowClock::G6: return fx_round(tok::motion_quickplay);
+    case GrowClock::GS: return kSlideMs;
+    case GrowClock::None: break;
+    }
+    return 0;
+}
+
+fx grow_at(GrowClock c, int64_t t)
+{
+    int64_t d = grow_ms(c);
+    if (d <= 0 || t >= d)
+        return kOne;
+    if (t <= 0)
+        return 0;
+    fx u = (fx)(t * kOne / d);
+    switch (c) {
+    case GrowClock::G: return cubic_out(u);
+    case GrowClock::G6: return curve(Curve::EaseOut, u);
+    case GrowClock::GS: return (fx)std::lround(slide_ease((double)t / d) * kOne);
+    case GrowClock::None: break;
+    }
+    return kOne;
 }
 
 SlidePlan slide_plan(int target, LeftMove left, int ring_frames, Rect header)
@@ -100,7 +134,8 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
     bool skip_left = settled(t, prev, slide_left_ms(p));
     bool skip_mid = settled(t, prev, kSlideMs);
     bool skip_pane = settled(t, prev, right_ms());
-    if (!skip_left) {
+    bool grow = p.moves.grow != GrowClock::None;
+    if (!skip_left && !grow) {
         if (p.left == LeftMove::Cells)
             left_compose(a, b, dst, p.cells, t, s.left_a256);
         else
@@ -110,7 +145,7 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
     int shift = bx - kPaneSplit;
     int edge = std::min(w, bx + kTileFocusBorder);
     uint32_t g = LiveF::pack(bg);
-    int x_lo = skip_mid ? kPaneSplitWide : kPaneLeftEdge;
+    int x_lo = skip_mid ? kPaneSplitWide : grow ? bx : kPaneLeftEdge;
     int x_hi = skip_pane ? std::min(w, kPaneSplitWide) : w;
     int to_end = std::min(bx, x_hi);
     int g0 = std::max(x_lo, to_end), g1 = std::min(std::max(edge, x_lo), x_hi);

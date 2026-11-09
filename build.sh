@@ -382,7 +382,7 @@ build_app() {
     pool "$appobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
-    for s in homeflow home motion slide glide t9; do
+    for s in homeflow home motion slide glide t9 scale bench; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
@@ -401,7 +401,7 @@ build_app() {
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
-        "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
+        "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
         "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
@@ -511,14 +511,22 @@ build_image_test() {
     pool "$genobj/gfx_canvas.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/gfx/canvas.cpp"
     pool "$imgobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$testobj/image_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
+    pool "$imgobj/scale.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/scale.cpp"
+    pool "$testobj/scale_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/scale_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/image"
     "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$genobj/gfx_canvas.cpp.o" "$depobj/spng.o" "$depobj"/zlib_*.o \
         $appldflags -lpthread -lm -o "$out/image/blockie-image-test.tmp" || return 1
     mv "$out/image/blockie-image-test.tmp" "$out/image/blockie-image-test"
-    echo "build.sh: $out/image/blockie-image-test"
-    "$out/image/blockie-image-test"
+    "$cxx" "$imgobj/scale.o" "$testobj/scale_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
+        -o "$out/image/blockie-scale-test.tmp" || return 1
+    mv "$out/image/blockie-scale-test.tmp" "$out/image/blockie-scale-test"
+    echo "build.sh: $out/image/blockie-image-test $out/image/blockie-scale-test"
+    local rc=0
+    "$out/image/blockie-image-test" || rc=1
+    "$out/image/blockie-scale-test" || rc=1
+    return $rc
 }
 
 build_input_test() {
