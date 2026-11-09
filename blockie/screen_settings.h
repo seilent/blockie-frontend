@@ -57,7 +57,7 @@ void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, co
 
 class SettingsPage {
 public:
-    static constexpr int kSheetRows = 7;
+    static constexpr int kSheetRows = 6;
 
     std::function<void(bool light)> on_theme;
     std::function<void(const std::string& id)> on_zone;
@@ -120,5 +120,7 @@ private:
     fx bar_from_ = 0;
     int64_t bar_at_ = -kFar;
 };
+
+int sheet_rows(Fonts& f, int want = SettingsPage::kSheetRows);
 
 }

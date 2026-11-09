@@ -61,6 +61,8 @@ int value_sheet_rows(Fonts& f)
     return std::max(1, (kPortraitH - 2 * px(tok::edge) - title_h) / std::max(1, px(tok::settingsPitch)));
 }
 
+int sheet_rows(Fonts& f, int want) { return std::min(want, value_sheet_rows(f)); }
+
 SheetGeom sheet_geom(Fonts& f, const SheetView& s, Rect sr)
 {
     SheetGeom g;

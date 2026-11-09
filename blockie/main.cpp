@@ -224,7 +224,7 @@ static int run()
     HomeState& home = flow.home;
     Repeat repeat;
     SettingsPage settings_page;
-    settings_page.set_sheet_rows(value_sheet_rows(fonts));
+    settings_page.set_sheet_rows(sheet_rows(fonts));
     settings_page.reset(theme().light);
     auto sync_zone = [&]() {
         if (zone_key.has_value())

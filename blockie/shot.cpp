@@ -264,8 +264,7 @@ struct PageOpts {
 
 void page_base(SettingsPage& sp, Fonts& fonts, const PageOpts& o, const Zones& z)
 {
-    int fit = value_sheet_rows(fonts);
-    sp.set_sheet_rows(o.rows > 0 ? std::min(o.rows, fit) : fit);
+    sp.set_sheet_rows(sheet_rows(fonts, o.rows > 0 ? o.rows : SettingsPage::kSheetRows));
     sp.set_zones(z);
     sp.reset(theme().light);
     if (o.zone_set && !o.zone_missing)

@@ -398,7 +398,27 @@ int main(int argc, char** argv)
         return 1;
     }
     fonts.begin_frame(-1);
-    check(value_sheet_rows(fonts) == SettingsPage::kSheetRows, "the value sheet fits 7 rows at 720 px");
+    check(value_sheet_rows(fonts) == 7, "the value sheet fits 7 rows at 720 px");
+    check(sheet_rows(fonts) == 6 && sheet_rows(fonts, 7) == 7 && sheet_rows(fonts, 9) == 7,
+          "the app and the shot take 6 rows by default, a wider ask is capped at the 7 that fit");
+    {
+        SettingsPage p;
+        p.set_zones(parse_zones(std::string(kFixture) + "NZ\t-3652+17446\tPacific/Auckland\n"));
+        p.set_zone("Asia/Tokyo");
+        p.reset(false);
+        p.action(PadAction::Down, false, 0);
+        p.action(PadAction::Accept, false, 1000);
+        SheetView s = p.view(2000).sheet;
+        check(SettingsPage::kSheetRows == 6 && s.rows == 6 && s.count == 7 && sheet_geom(fonts, s, kScreen).shown == 6,
+              "a long sheet shows 6 rows by default");
+        Buffer b;
+        Canvas c(b.surface());
+        InkLayer ink;
+        draw_settings(c, fonts, ink, p.view(2000), theme_dark());
+        Surface sf = b.surface();
+        check(sf.at(500, 40) != sf.at(500, kPortraitH - 10) && sf.at(500, 87) == sf.at(500, kPortraitH - 10),
+              "by default the page top shows under the scrim above the 6 rows");
+    }
     for (int rows : {7, 6}) {
         SettingsPage p;
         p.set_sheet_rows(rows);
