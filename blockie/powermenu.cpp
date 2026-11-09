@@ -12,7 +12,6 @@ namespace fd {
 namespace {
 
 constexpr const char* kPowerTitle = "power";
-constexpr const char* kScreenOff = "screen off";
 constexpr const char* kPowerOff = "power off";
 constexpr const char* kReboot = "reboot";
 constexpr const char* kAndroid = "android";
@@ -20,7 +19,6 @@ constexpr const char* kRecovery = "recovery";
 constexpr const char* kConfirmTitle = "android becomes default";
 constexpr const char* kBootAndroid = "boot android";
 constexpr const char* kCancel = "cancel";
-constexpr const char* kHostLine = "back to blockie needs the computer";
 constexpr const char* kRestarting = "restarting";
 constexpr int kConfirmCancel = 1;
 
@@ -40,15 +38,19 @@ std::string failed_words(const std::string& t)
     return t + " failed";
 }
 
-bool gate_holds(const BootGates& g, const std::string& t)
+enum class Gate { None, State, Android, Return, Recovery };
+
+Gate refused(const BootGates& g, const std::string& t)
 {
     if (!g.read || g.state != "default")
-        return false;
-    if (t == kAndroid)
-        return g.android == "bootable";
-    if (t == kRecovery)
-        return g.recovery == "yes";
-    return t == kReboot;
+        return Gate::State;
+    if (t == kAndroid && g.android != "bootable")
+        return Gate::Android;
+    if (t == kAndroid && g.ret != "keys")
+        return Gate::Return;
+    if (t == kRecovery && g.recovery != "yes")
+        return Gate::Recovery;
+    return t == kReboot || t == kAndroid || t == kRecovery ? Gate::None : Gate::State;
 }
 
 fx progress(int64_t e, int d) { return e >= d || d <= 0 ? kOne : e <= 0 ? 0 : (fx)(e * kOne / d); }
@@ -138,11 +140,11 @@ UnitProbe parse_unit_show(const std::string& text)
 void PowerMenu::open(const BootGates& g, bool dark, int64_t now)
 {
     gates_ = g;
-    power_ = {kScreenOff, kPowerOff};
+    power_ = {kPowerOff};
     if (g.read && g.state == "default")
         power_.push_back(kReboot);
     sheet_ = {kReboot};
-    if (g.android == "bootable")
+    if (g.android == "bootable" && g.ret == "keys")
         sheet_.push_back(kAndroid);
     if (g.recovery == "yes")
         sheet_.push_back(kRecovery);
@@ -335,8 +337,9 @@ void PowerMenu::pick(const std::string& t, int64_t now)
     pick_ = t;
     pick_at_ = now;
     BootGates g = reread ? reread() : gates_;
-    pick_ok_ = gate_holds(g, t);
-    pick_reason_ = lower(g.reason);
+    Gate why = refused(g, t);
+    pick_ok_ = why == Gate::None;
+    pick_reason_ = why == Gate::State || why == Gate::Android ? lower(g.reason) : "";
 }
 
 void PowerMenu::start_pick(int64_t at)
@@ -357,9 +360,7 @@ void PowerMenu::accept(int64_t now)
 {
     const char* it = items()[(size_t)focus_];
     if (surf_ == PmSurface::Power) {
-        if (it == kScreenOff)
-            finish("screen-off", now);
-        else if (it == kPowerOff)
+        if (it == kPowerOff)
             finish("poweroff", now);
         else
             open_sheet(now);
@@ -572,7 +573,6 @@ PmView PowerMenu::view(int64_t now) const
         return v;
     v.title = v.surface == PmSurface::Confirm ? kConfirmTitle : kPowerTitle;
     v.items = items();
-    v.lead = v.surface == PmSurface::Confirm && gates_.ret == "host" ? kHostLine : nullptr;
     v.focus = focus_;
     v.bar = bar_.at(now);
     v.o = fade_.at(now);

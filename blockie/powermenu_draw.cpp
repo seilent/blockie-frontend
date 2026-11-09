@@ -22,25 +22,15 @@ bool draw_dialog(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Them
     k.set_clip(z.rect(Rect{sr.x0, sr.y0, sr.x1 - edge, top}).intersect(keep));
     bool ok = f.draw(k, ts, v.title, edge * 64, px(tok::pivotBaseline), kWhite, alpha256(role::dialogTitle.alpha), z);
     int asc = f.ascent(is.px), desc = f.descent(is.px);
-    int row = 0;
-    if (v.lead) {
-        TextStyle ls = is;
-        ls.tcase = Case::Mixed;
-        k.set_clip(z.rect(Rect{sr.x0, top, sr.x1 - edge, top + pitch}).intersect(keep));
-        ok = f.draw(k, ls, v.lead, edge * 64, top + (pitch - asc - desc) / 2 + asc, kWhite,
-                    alpha256(tok::type_dialogItem_alphaDim), z) && ok;
-        row = 1;
-    }
-    int items_top = top + row * pitch;
     for (size_t i = 0; i < v.items.size(); i++) {
-        int rt = items_top + (int)i * pitch;
+        int rt = top + (int)i * pitch;
         k.set_clip(z.rect(Rect{sr.x0, rt, sr.x1 - edge, rt + pitch}).intersect(keep));
         ok = f.draw(k, is, v.items[i], edge * 64, rt + (pitch - asc - desc) / 2 + asc, kWhite, alpha256(v.alpha[i]),
                     z) && ok;
     }
     k.set_clip(keep);
     if (!v.items.empty()) {
-        int bx = edge - px(tok::focus_barOffset), by = items_top + index_px(v.bar, pitch);
+        int bx = edge - px(tok::focus_barOffset), by = top + index_px(v.bar, pitch);
         k.fill_aa(Rect64::of({bx, by, bx + px(tok::focus_barWidth), by + pitch}, z), kWhite, 256);
     }
     ink.compose(c.surface(), th.ink);

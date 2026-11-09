@@ -1340,6 +1340,7 @@ struct PmShotOpts {
     std::string gates;
     std::string pick_gates;
     std::string plate = "home";
+    int idle = 0;
 };
 
 const char* pm_surface_name(PmSurface s)
@@ -1400,8 +1401,8 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
             return 2;
         }
         bool confirm = po.surface == "confirm";
-        if (confirm && g.android != "bootable") {
-            fprintf(stderr, "blockie-shot: --powermenu confirm needs --gates with android=bootable\n");
+        if (confirm && (g.android != "bootable" || g.ret != "keys")) {
+            fprintf(stderr, "blockie-shot: --powermenu confirm needs --gates with android=bootable and return=keys\n");
             return 2;
         }
         open_at = a0 - (confirm ? 4000 : 2000);
@@ -1470,6 +1471,8 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
                 m.tick(t);
             if (t == to) {
                 m.open(g, false, t);
+                if (po.idle > 0)
+                    m.set_idle_ms(po.idle);
                 opened = true;
             } else if (t == te) {
                 const PmStep& st = plan[next++];
@@ -1544,8 +1547,10 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
             return 1;
         }
         keys.clear();
-        bool failing = m.surface() == PmSurface::Toast && !m.probing() && !m.done();
-        if (opened && next >= plan.size() && !rep.active() && !m.animating(tf) && !failing) {
+        PmSurface ps = m.surface();
+        bool menu_up = ps == PmSurface::Power || ps == PmSurface::Sheet || ps == PmSurface::Confirm;
+        bool pending = !m.done() && ((ps == PmSurface::Toast && !m.probing()) || (po.idle > 0 && menu_up));
+        if (opened && next >= plan.size() && !rep.active() && !m.animating(tf) && !pending) {
             if (tail-- > 0)
                 continue;
             break;
@@ -1731,6 +1736,8 @@ int main(int argc, char** argv)
             pm.pick_gates = argv[++i];
         else if (a == "--plate" && i + 1 < argc)
             pm.plate = argv[++i];
+        else if (a == "--idle" && i + 1 < argc)
+            pm.idle = atoi(argv[++i]);
         else if (a == "--from" && i + 1 < argc)
             drive.from = atoll(argv[++i]);
         else if (a == "--at" && i + 1 < argc)
@@ -1778,7 +1785,8 @@ int main(int argc, char** argv)
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"
-                " [--pickgates FILE] [--plate home|plain] [--script KEY|fail|term:d|u:MS,...] [--arrive MS] [--at MS]"
+                " [--pickgates FILE] [--plate home|plain] [--idle MS] [--script KEY|fail|term:d|u:MS,...] [--arrive MS]"
+                " [--at MS]"
                 " [--from MS] [--tail N] [same options]\n");
         return 2;
     }

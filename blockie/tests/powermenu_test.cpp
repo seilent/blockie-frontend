@@ -96,7 +96,6 @@ struct Rig {
     {
         at(400);
         act(PadAction::Down);
-        act(PadAction::Down);
         act(PadAction::Accept);
         at(400);
     }
@@ -117,48 +116,49 @@ void gate_cases()
         PowerMenu m;
         m.open(none, false, 0);
         PmView v = m.view(0);
-        check(v.items.size() == 2 && std::string(v.items[0]) == "screen off" && std::string(v.items[1]) == "power off",
-              "no gate file: screen off and power off only");
+        check(v.items.size() == 1 && std::string(v.items[0]) == "power off", "no gate file: one row, power off");
     }
     for (const char* st : {"state=pending\n", "state=error\nreason=io\n"}) {
         Rig r(st);
-        check(r.items() == "screen off,power off",
-              st[6] == 'p' ? "state=pending hides reboot" : "state=error hides reboot");
+        check(r.items() == "power off", st[6] == 'p' ? "state=pending hides reboot" : "state=error hides reboot");
     }
     {
         Rig r("state=default\n");
-        check(r.items() == "screen off,power off,reboot", "state=default adds reboot last");
+        check(r.items() == "power off,reboot", "state=default: two rows, power off then reboot");
         r.to_sheet();
         check(r.v().surface == PmSurface::Sheet && r.items() == "reboot", "sheet holds reboot alone");
     }
     {
-        Rig r("state=default\nandroid=bootable\n");
+        Rig r("state=default\nandroid=bootable\nreturn=keys\n");
         r.to_sheet();
-        check(r.items() == "reboot,android", "android=bootable adds android");
+        check(r.items() == "reboot,android", "android=bootable with return=keys adds android");
     }
     {
-        Rig r("state=default\nandroid=bootable\nrecovery=yes\nfastboot=yes\n");
+        Rig r("state=default\nandroid=bootable\nrecovery=yes\nfastboot=yes\nreturn=keys\n");
         r.to_sheet();
         check(r.items() == "reboot,android,recovery", "recovery=yes adds recovery, fastboot=yes still hides fastboot");
     }
-    {
-        Rig r("state=default\nandroid=bootable\nreturn=host\n");
-        r.to_confirm();
-        PmView v = r.v();
-        check(v.surface == PmSurface::Confirm && v.lead && std::string(v.lead) == "back to blockie needs the computer",
-              "return=host: the confirm carries the read only line");
+    const char* const rets[][2] = {{"return=host\n", "return=host hides android"},
+                                   {"", "no return= line hides android"},
+                                   {"return=other\n", "return=other hides android"}};
+    for (const auto& c : rets) {
+        Rig r(std::string("state=default\nandroid=bootable\nrecovery=yes\n") + c[0]);
+        r.to_sheet();
+        check(r.items() == "reboot,recovery", c[1]);
     }
     {
         Rig r;
         r.to_confirm();
-        check(r.v().surface == PmSurface::Confirm && !r.v().lead, "return=keys: no extra line");
+        check(r.v().surface == PmSurface::Confirm && r.v().items.size() == 2,
+              "return=keys shows android and its confirm");
     }
 }
 
 void focus_cases()
 {
     Rig r;
-    check(r.v().surface == PmSurface::Power && r.v().focus == 0, "power dialog opens on screen off");
+    check(r.v().surface == PmSurface::Power && r.v().focus == 0 && std::string(r.v().items[0]) == "power off",
+          "power dialog opens on power off");
     check(std::string(r.v().title) == "power", "power dialog title");
     r.to_sheet();
     check(r.v().surface == PmSurface::Sheet && r.v().sheet.focus == 0 && std::string(r.v().sheet.title) == "reboot",
@@ -179,35 +179,37 @@ void key_cases()
         r.act(PadAction::Up);
         check(r.v().focus == 0, "dialog Up stops at the top");
         r.act(PadAction::Down);
+        check(r.v().focus == 1, "dialog Down moves to the last row");
         r.act(PadAction::Down);
-        r.act(PadAction::Down);
+        check(r.v().focus == 1, "dialog fresh Down at the end stops, no wrap");
         r.act(PadAction::Down, true);
-        check(r.v().focus == 2, "dialog Down stops at the end, held or not");
+        check(r.v().focus == 1, "dialog held Down at the end stops");
         r.act(PadAction::Left);
         r.act(PadAction::Right);
         r.act(PadAction::Context);
-        check(r.v().focus == 2 && r.lines.empty() && r.v().surface == PmSurface::Power,
+        check(r.v().focus == 1 && r.lines.empty() && r.v().surface == PmSurface::Power,
               "Left, Right and Context do nothing");
+        r.at(300);
         r.act(PadAction::Up);
         r.at(100);
-        check(r.v().alpha[1] < tok::type_dialogItem_alpha && r.v().alpha[1] > tok::type_dialogItem_alphaDim,
+        check(r.v().alpha[0] < tok::type_dialogItem_alpha && r.v().alpha[0] > tok::type_dialogItem_alphaDim,
               "dialog row alpha changes over 200");
         r.at(100);
-        check(r.v().alpha[1] == tok::type_dialogItem_alpha && r.v().alpha[2] == tok::type_dialogItem_alphaDim,
+        check(r.v().alpha[0] == tok::type_dialogItem_alpha && r.v().alpha[1] == tok::type_dialogItem_alphaDim,
               "dialog row alpha lands after 200");
     }
     {
         Rig r;
         r.at(400);
         r.act(PadAction::Accept);
-        check(r.lines.size() == 1 && r.lines[0] == "screen-off" && r.m.done(), "SCREEN OFF says screen-off and ends");
+        check(r.lines.size() == 1 && r.lines[0] == "poweroff" && r.m.done(), "POWER OFF says poweroff and ends");
     }
     {
         Rig r;
-        r.at(400);
-        r.act(PadAction::Down);
+        r.at(50);
         r.act(PadAction::Accept);
-        check(r.lines.size() == 1 && r.lines[0] == "poweroff" && r.m.done(), "POWER OFF says poweroff and ends");
+        check(r.lines.size() == 1 && r.lines[0] == "poweroff" && r.m.done(),
+              "an Accept during the open lands it and says poweroff");
     }
     {
         Rig r;
@@ -255,7 +257,6 @@ void key_cases()
     {
         Rig r;
         r.at(400);
-        r.act(PadAction::Down);
         r.act(PadAction::Down);
         r.act(PadAction::Accept);
         r.at(190);
@@ -421,6 +422,29 @@ void pick_cases()
         check(r.v().line1 == "boot android failed" && r.v().line2 == "no image" && !r.said("boot android"),
               "ANDROID with its gate gone: boot android failed");
     }
+    {
+        Rig r;
+        r.to_confirm();
+        r.now_gates = parse_gates("state=default\nandroid=bootable\nreturn=host\nreason=synthetic reason\n");
+        r.act(PadAction::Up);
+        r.act(PadAction::Accept);
+        PmView v = r.v();
+        check(v.surface == PmSurface::Toast && v.line1 == "boot android failed" && v.line2.empty() &&
+                  !r.said("boot android"),
+              "a pre-read without return=keys: boot android failed with no second line");
+        r.at(350 + 3500 + 250);
+        check(r.lines.size() == 1 && r.lines[0] == "failed gate" && r.m.done(), "then failed gate");
+    }
+    {
+        Rig r("state=default\nrecovery=yes\n");
+        r.to_sheet();
+        r.now_gates = parse_gates("state=default\nrecovery=no\nreason=synthetic reason\n");
+        r.act(PadAction::Down);
+        r.act(PadAction::Accept);
+        r.at(380);
+        PmView v = r.v();
+        check(v.line1 == "recovery failed" && v.line2.empty(), "a recovery= refusal has no second line");
+    }
 }
 
 void unit_cases()
@@ -577,7 +601,7 @@ void term_cases()
         q.at(400);
         q.m.action(PadAction::Accept, false, q.t);
         bool peeked = q.m.peek_line(ln, at, closing);
-        check(peeked && ln == "screen-off" && closing && at == q.t, "a closing line keeps its pick time");
+        check(peeked && ln == "poweroff" && closing && at == q.t, "a closing line keeps its pick time");
         Rig c;
         c.to_sheet();
         c.m.action(PadAction::Accept, false, c.t);
@@ -681,7 +705,6 @@ void alpha_cases(Fonts& f)
         Rig r;
         r.at(400);
         r.act(PadAction::Down);
-        r.act(PadAction::Down);
         r.act(PadAction::Accept);
         r.at(100);
         shot(r.v());
@@ -706,7 +729,6 @@ void alpha_cases(Fonts& f)
     {
         Rig r;
         r.at(400);
-        r.act(PadAction::Down);
         r.act(PadAction::Down);
         r.act(PadAction::Accept);
         r.at(400);
@@ -753,7 +775,6 @@ void alpha_cases(Fonts& f)
         uint32_t px = mp.argb_at(4, 4);
         check(a_of(px) == 245 && ch(px, 16) == 245, "light dialog scrim #FFFFFF at 0.96");
         r.act(PadAction::Down);
-        r.act(PadAction::Down);
         r.act(PadAction::Accept);
         r.at(400);
         shot(r.v());
@@ -790,7 +811,6 @@ void region_cap_cases(Fonts& f)
     };
     walk(400);
     r.act(PadAction::Down);
-    r.act(PadAction::Down);
     walk(200);
     r.act(PadAction::Accept);
     walk(500);
@@ -805,44 +825,6 @@ void region_cap_cases(Fonts& f)
     bool all = seen.size() == 5 && seen[0] == PmSurface::Power && seen[1] == PmSurface::Sheet &&
                seen[2] == PmSurface::Confirm && seen[3] == PmSurface::Toast && seen[4] == PmSurface::None;
     check(all && most > 0 && most <= 16, "every phase draws at most 16 regions");
-}
-
-void lead_cases(Fonts& f)
-{
-    Rig r("state=default\nandroid=bootable\nreturn=host\n");
-    r.to_confirm();
-    PmView v = r.v();
-    InkLayer ink;
-    std::vector<AlphaRegion> regions;
-    auto band = [&](const PmView& w, int row) {
-        Buffer buf;
-        Canvas c(buf.surface());
-        draw_powermenu(c, f, ink, w, theme(), regions);
-        int top = px(tok::contentTop) + row * px(tok::settingsPitch);
-        std::vector<uint32_t> out;
-        for (int y = top; y < top + px(tok::settingsPitch); y++)
-            for (int x = 0; x < kPortraitW; x++)
-                out.push_back(buf.surface().at(x, y));
-        return out;
-    };
-    PmView upper = v;
-    upper.lead = "BACK TO BLOCKIE NEEDS THE COMPUTER";
-    check(v.lead && band(v, 0) == band(v, 0) && band(v, 0) != band(upper, 0),
-          "the return=host line keeps its lowercase, not the UPPER item case");
-    auto bar_at = [&](int row) {
-        Buffer buf;
-        Canvas c(buf.surface());
-        draw_powermenu(c, f, ink, v, theme(), regions);
-        int y = px(tok::contentTop) + row * px(tok::settingsPitch) + px(tok::settingsPitch) / 2;
-        int x = px(tok::edge) - px(tok::focus_barOffset) + 1;
-        return buf.surface().at(x, y) != buf.surface().at(x + 8, y);
-    };
-    check(v.focus == 1 && !bar_at(0) && !bar_at(1) && bar_at(2),
-          "the line holds row slot 0, the items one pitch below, the focus bar on CANCEL");
-    r.act(PadAction::Up);
-    r.act(PadAction::Up);
-    r.act(PadAction::Up, true);
-    check(r.v().focus == 0, "Up stops at BOOT ANDROID, the line is never focused");
 }
 
 struct FakeDev {
@@ -1203,7 +1185,7 @@ void loop_cases(Fonts& f, const std::string& dir)
     std::string fifo = dir + "/input";
     mkfifo(fifo.c_str(), 0600);
     std::string gates = dir + "/state";
-    write_file(gates, "state=default\nandroid=bootable\n");
+    write_file(gates, "state=default\nandroid=bootable\nreturn=keys\n");
     std::string idle_unit = dir + "/systemctl-idle";
     write_file(idle_unit, "if [ \"$1\" = is-system-running ]; then echo running; exit 0; fi\n"
                           "printf 'LoadState=loaded\\nActiveState=inactive\\nResult=success\\n'\n"
@@ -1226,8 +1208,8 @@ void loop_cases(Fonts& f, const std::string& dir)
         std::string s;
         bool shown = l.line(s, 3000) && s == "shown";
         check(shown, "shown after the first presented frame with regions");
-        send("down\naccept\n");
-        check(l.line(s, 3000) && s == "poweroff", "FIFO down, accept: poweroff");
+        send("accept\n");
+        check(l.line(s, 3000) && s == "poweroff", "FIFO accept on the focused POWER OFF: poweroff");
         check(l.eof(3000), "the child exits after its result");
         check(l.end() == 0, "exit 0 after a result that is no failure");
     }
@@ -1310,7 +1292,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         Loop l = start_loop(f, mp, none, u);
         std::string s;
         l.line(s, 3000);
-        send("down\ndown\naccept\n");
+        send("down\naccept\n");
         usleep(500000);
         send("accept\n");
         bool boot = l.line(s, 3000) && s == "boot reboot";
@@ -1349,14 +1331,13 @@ void loop_cases(Fonts& f, const std::string& dir)
         int rc;
     };
     const CloseCase closes[] = {
-        {"SCREEN OFF", "accept\n", "screen-off", 0, 0},
-        {"POWER OFF", "down\naccept\n", "poweroff", 0, 0},
+        {"POWER OFF", "accept\n", "poweroff", 0, 0},
         {"Back", "back\n", "cancel", 0, 0},
         {"the idle timeout", "", "screen-off", 400, 0},
         {"failed gate", "", "failed gate", 0, 1},
     };
     for (const CloseCase& c : closes) {
-        write_file(gates, "state=default\nandroid=bootable\n");
+        write_file(gates, "state=default\nandroid=bootable\nreturn=keys\n");
         PmRunOpts u = o;
         u.idle_ms = c.idle;
         MemPresenter mp;
@@ -1364,7 +1345,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         std::string s;
         bool shown = l.line(s, 3000) && s == "shown";
         if (std::string(c.line) == "failed gate") {
-            send("down\ndown\naccept\n");
+            send("down\naccept\n");
             usleep(500000);
             write_file(gates, "state=pending\nreason=lock busy\n");
             send("accept\n");
@@ -1379,7 +1360,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         int k = l.find(c.line);
         check(k >= 0 && !l.visible_after((size_t)k) && !l.line_after((size_t)k + 1) && l.end() == c.rc, what.c_str());
     }
-    write_file(gates, "state=default\nandroid=bootable\n");
+    write_file(gates, "state=default\nandroid=bootable\nreturn=keys\n");
     {
         MemPresenter mp;
         mp.hold_notes();
@@ -1388,8 +1369,8 @@ void loop_cases(Fonts& f, const std::string& dir)
         int64_t sent_at = steady_ms();
         send("accept\n");
         std::string s;
-        bool said = l.line(s, 3000) && s == "screen-off";
-        int k = l.find("screen-off");
+        bool said = l.line(s, 3000) && s == "poweroff";
+        int k = l.find("poweroff");
         bool late = k >= 0 && l.at[(size_t)k] - sent_at >= PowerMenu::kCloseMs - 5;
         bool empty_before = false;
         Present pr;
@@ -1406,8 +1387,8 @@ void loop_cases(Fonts& f, const std::string& dir)
         std::string s;
         bool shown = l.line(s, 3000) && s == "shown";
         send("accept\n");
-        bool said = l.line(s, 3000) && s == "screen-off";
-        int k = l.find("screen-off");
+        bool said = l.line(s, 3000) && s == "poweroff";
+        int k = l.find("poweroff");
         bool gone = l.eof(3000);
         Present pr;
         bool empty_before = false;
@@ -1423,7 +1404,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         Loop l = start_loop(f, mp, none, o);
         std::string s;
         l.line(s, 3000);
-        send("down\ndown\naccept\n");
+        send("down\naccept\n");
         usleep(500000);
         send("accept\n");
         bool boot = l.line(s, 3000) && s == "boot reboot";
@@ -1469,8 +1450,40 @@ void loop_cases(Fonts& f, const std::string& dir)
             push(pp[1], EV_SYN, SYN_REPORT, 0);
             push(pp[1], EV_KEY, BTN_EAST, 0);
             push(pp[1], EV_SYN, SYN_REPORT, 0);
-            check(l.line(s, 3000) && s == "screen-off",
-                  "a fresh Accept after shown picks the row in focus, SCREEN OFF");
+            check(l.line(s, 3000) && s == "poweroff",
+                  "a fresh Accept after shown picks the row in focus, POWER OFF");
+            l.end();
+            close(pp[0]);
+            close(pp[1]);
+        }
+    }
+    {
+        int pp[2];
+        if (pipe(pp) == 0) {
+            fcntl(pp[0], F_SETFL, O_NONBLOCK);
+            EvdevOps pad;
+            pad.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+            pad.open = [&pp](const std::string&) { return dup(pp[0]); };
+            pad.info = [](int, DevInfo& d) {
+                d.id = {0x0019, 0x4001, 0x0428, "ayaneo-gamepad/input0", "AYANEO Controller"};
+                return true;
+            };
+            pad.grab = [](int) { return 0; };
+            pad.keys_down = [](int) { return false; };
+            pad.real = [](const std::string&) { return std::string("/sys/devices/virtual/input/input9/event9"); };
+            push(pp[1], EV_KEY, BTN_EAST, 1);
+            push(pp[1], EV_SYN, SYN_REPORT, 0);
+            MemPresenter mp;
+            Loop l = start_loop(f, mp, pad, o);
+            std::string s;
+            bool shown = l.line(s, 3000) && s == "shown";
+            usleep(400000);
+            push(pp[1], EV_KEY, BTN_EAST, 0);
+            push(pp[1], EV_SYN, SYN_REPORT, 0);
+            bool quiet = !l.line(s, 400);
+            send("back\n");
+            bool alive = l.line(s, 3000) && s == "cancel";
+            check(shown && quiet && alive, "a pad key down at the grab and released after the open prints nothing");
             l.end();
             close(pp[0]);
             close(pp[1]);
@@ -1484,7 +1497,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         Loop l = start_loop(f, mp, none, o);
         std::string s;
         l.line(s, 3000);
-        send("down\ndown\naccept\n");
+        send("down\naccept\n");
         usleep(500000);
         while (l.next(s, steady_ms() + 50)) {
         }
@@ -1518,7 +1531,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         Loop l = start_loop(f, mp, none, u, true);
         std::string s;
         l.line(s, 3000);
-        send("down\ndown\naccept\n");
+        send("down\naccept\n");
         usleep(500000);
         send("accept\n");
         bool boot = l.line(s, 3000) && s == "boot reboot";
@@ -1533,9 +1546,9 @@ void loop_cases(Fonts& f, const std::string& dir)
     };
     const TermCase terms[] = {
         {"the dialog", "", 0, false},
-        {"the sheet", "down\ndown\naccept\n", 500, false},
-        {"the confirm", "down\ndown\naccept\ndown\naccept\n", 1200, false},
-        {"restarting", "down\ndown\naccept\n", 500, true},
+        {"the sheet", "down\naccept\n", 500, false},
+        {"the confirm", "down\naccept\ndown\naccept\n", 1200, false},
+        {"restarting", "down\naccept\n", 500, true},
     };
     for (const TermCase& c : terms) {
         MemPresenter mp;
@@ -1567,7 +1580,7 @@ void loop_cases(Fonts& f, const std::string& dir)
     const OutCase outs[] = {{"in", 1500, 0, 12}, {"hold", 0, 0, 1}, {"out", 0, 1500, 1}};
     const int hold_a8 = region_a8(alpha256(tok::scrim_overlay_alpha));
     for (const OutCase& c : outs) {
-        write_file(gates, "state=default\nandroid=bootable\n");
+        write_file(gates, "state=default\nandroid=bootable\nreturn=keys\n");
         PmRunOpts u = o;
         u.toast_in_ms = c.in_ms;
         u.toast_out_ms = c.out_ms;
@@ -1575,7 +1588,7 @@ void loop_cases(Fonts& f, const std::string& dir)
         Loop l = start_loop(f, mp, none, u);
         std::string s;
         bool ok = l.line(s, 3000) && s == "shown";
-        send("down\ndown\naccept\n");
+        send("down\naccept\n");
         usleep(500000);
         write_file(gates, "state=pending\nreason=lock busy\n");
         send("accept\n");
@@ -1680,7 +1693,6 @@ int main(int argc, char** argv)
     f.begin_frame(-1);
     alpha_cases(f);
     region_cap_cases(f);
-    lead_cases(f);
     loop_cases(f, dir.path);
     std::printf("%d/%d passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;

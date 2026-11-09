@@ -41,7 +41,6 @@ struct PmView {
     PmSurface surface = PmSurface::None;
     const char* title = "";
     std::vector<const char*> items;
-    const char* lead = nullptr;
     int focus = 0;
     fx bar = 0;
     std::vector<fx> alpha;
