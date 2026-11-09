@@ -23,8 +23,8 @@ for a in "$@"; do
     case $a in
         DESTDIR=*) destdir=${a#DESTDIR=} ;;
         PREFIX=*) prefix=${a#PREFIX=} ;;
-        all | generic | app | scan | test | test-dbus | scraper | install | shot) target=$a ;;
-        *) echo "build.sh: arg $a, want a target (all generic app scan test test-dbus scraper install shot) or DESTDIR=/PREFIX=" >&2
+        all | generic | app | scan | test | test-dbus | test-tsan | scraper | install | shot) target=$a ;;
+        *) echo "build.sh: arg $a, want a target (all generic app scan test test-dbus test-tsan scraper install shot) or DESTDIR=/PREFIX=" >&2
             exit 2 ;;
     esac
 done
@@ -72,6 +72,7 @@ launchobj=$out/launch/obj
 testobj=$out/test/obj
 shotobj=$out/shot/obj
 imgobj=$out/image/obj
+tsanobj=$out/tsan/obj
 fonts_dir=$out/fonts
 
 fetch() {
@@ -530,6 +531,21 @@ build_image_test() {
     return $rc
 }
 
+build_tsan_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$genobj/gfx_canvas.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/gfx/canvas.cpp"
+    pool "$tsanobj/scale.o" "$cxx" "${gflags[@]}" -g -fsanitize=thread "$root/blockie/scale.cpp"
+    pool "$tsanobj/scale_test.o" "$cxx" "${gflags[@]}" -g -fsanitize=thread "$root/blockie/tests/scale_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/tsan"
+    "$cxx" "$tsanobj/scale.o" "$tsanobj/scale_test.o" "$genobj/gfx_canvas.cpp.o" -fsanitize=thread -lpthread -lm \
+        -o "$out/tsan/blockie-scale-tsan-test.tmp" || return 1
+    mv "$out/tsan/blockie-scale-tsan-test.tmp" "$out/tsan/blockie-scale-tsan-test"
+    echo "build.sh: $out/tsan/blockie-scale-tsan-test"
+    TSAN_OPTIONS=halt_on_error=1 "$out/tsan/blockie-scale-tsan-test"
+}
+
 build_input_test() {
     pool "$testobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$testobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
@@ -804,7 +820,7 @@ build_install() {
 
 fail=0
 mkdir -p "$out" "$gen" "$depobj" "$genobj" "$appobj" "$scanobj" "$scraperobj" "$launchobj" "$testobj" "$shotobj" \
-    "$imgobj"
+    "$imgobj" "$tsanobj"
 case $target in
     all | generic | app | shot)
         deps
@@ -819,6 +835,7 @@ esac
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
 [[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_vtext_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
+[[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }
 exit 0

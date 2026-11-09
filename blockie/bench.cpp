@@ -1,14 +1,19 @@
 #include "bench.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <unordered_set>
 
+#include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "framestats.h"
 #include "image.h"
@@ -28,6 +33,8 @@ constexpr int kPassScaleUs = 5000;
 constexpr int kPassFrameUs = 12000;
 constexpr int kSyntheticW = 512;
 constexpr int kSyntheticH = 448;
+constexpr const char* kFreqPaths[2] = {"/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq",
+                                       "/sys/devices/system/cpu/cpufreq/policy6/scaling_cur_freq"};
 
 struct Rig {
     Buffer from, to, dst, out;
@@ -37,11 +44,51 @@ struct Rig {
     Rect head;
     std::vector<ScaleAxis> xs, ys;
     uint32_t sum = 0;
+    ScaleHelper* helper = nullptr;
+    std::vector<ScaleJob> jobs;
+    uint32_t ui_cpus = 0;
+    uint32_t helper_cpus = 0;
+    int freq_fd[2] = {-1, -1};
+};
+
+struct Sample {
+    int scale_us = 0;
+    int ui_us = -1;
+    int helper_us = -1;
+    int wake_us = -1;
+    int chunks = 0;
+    int ui_chunks = 0;
+    int helper_chunks = 0;
+    bool same_cpu = false;
 };
 
 struct Times {
     std::vector<int> scale_us;
     std::vector<int> frame_us;
+    std::vector<int> ui_us;
+    std::vector<int> helper_us;
+    std::vector<int> wake_us;
+    std::vector<int> freq[2];
+    int same = 0;
+    int64_t chunks = 0;
+    int64_t ui_chunks = 0;
+    int64_t helper_chunks = 0;
+
+    void add(const Times& o)
+    {
+        auto cat = [](std::vector<int>& a, const std::vector<int>& b) { a.insert(a.end(), b.begin(), b.end()); };
+        cat(scale_us, o.scale_us);
+        cat(frame_us, o.frame_us);
+        cat(ui_us, o.ui_us);
+        cat(helper_us, o.helper_us);
+        cat(wake_us, o.wake_us);
+        cat(freq[0], o.freq[0]);
+        cat(freq[1], o.freq[1]);
+        same += o.same;
+        chunks += o.chunks;
+        ui_chunks += o.ui_chunks;
+        helper_chunks += o.helper_chunks;
+    }
 };
 
 int64_t bench_us()
@@ -96,7 +143,7 @@ std::vector<std::string> cover_paths(HomeFlow& flow, Library& lib, const std::ve
     return out;
 }
 
-Art synthetic(int k)
+DecodedImage noise_source(int k)
 {
     DecodedImage d;
     d.w = kSyntheticW;
@@ -109,7 +156,35 @@ Art synthetic(int k)
         s ^= s << 5;
         p = s & 0xffffffu;
     }
-    return std::make_shared<const Image>(cover_tile(d, kBigTileSide));
+    return d;
+}
+
+Art synthetic(int k) { return std::make_shared<const Image>(cover_tile(noise_source(k), kBigTileSide)); }
+
+uint32_t cpu_bit(int cpu) { return cpu >= 0 && cpu < 32 ? 1u << cpu : 0; }
+
+int read_khz(int fd)
+{
+    char b[32];
+    ssize_t n = fd >= 0 ? pread(fd, b, sizeof b - 1, 0) : -1;
+    if (n <= 0)
+        return -1;
+    b[n] = 0;
+    return std::atoi(b);
+}
+
+int mhz_p50(const std::vector<int>& khz)
+{
+    int v = pct_us(khz, 50);
+    return v < 0 ? -1 : v / 1000;
+}
+
+int mhz_min(const std::vector<int>& khz)
+{
+    if (khz.empty())
+        return -1;
+    int v = *std::min_element(khz.begin(), khz.end());
+    return v < 0 ? -1 : v / 1000;
 }
 
 const char* clock_name(GrowClock c)
@@ -123,7 +198,7 @@ const char* clock_name(GrowClock c)
     return "none";
 }
 
-int64_t grow_frame(Rig& r, Fonts& fonts, GrowClock c, Scaler k, int64_t t, int64_t prev, int& scale_us)
+int64_t grow_frame(Rig& r, Fonts& fonts, GrowClock c, Scaler k, int64_t t, int64_t prev, Sample& sm)
 {
     int64_t f0 = bench_us();
     fonts.begin_frame(-1);
@@ -155,8 +230,15 @@ int64_t grow_frame(Rig& r, Fonts& fonts, GrowClock c, Scaler k, int64_t t, int64
         Rect64 q = grow_tile_rect((int)row * kBigCols, gp, 0);
         scale_axis(r.ys[row], q.y0, q.y1, kBigTileSide, clip.y0, clip.y1);
     }
-    for (size_t i = 0; i < r.covers.size(); i++)
-        scale_tile(d, *r.covers[i], r.xs[i % kBigCols], r.ys[i / kBigCols], k);
+    if (r.helper) {
+        r.jobs.clear();
+        for (size_t i = 0; i < r.covers.size(); i++)
+            r.jobs.push_back({r.covers[i].get(), &r.xs[i % kBigCols], &r.ys[i / kBigCols]});
+        r.helper->run(d, r.jobs, k);
+    } else {
+        for (size_t i = 0; i < r.covers.size(); i++)
+            scale_tile(d, *r.covers[i], r.xs[i % kBigCols], r.ys[i / kBigCols], k);
+    }
     int64_t s1 = bench_us();
     Canvas cv(d);
     cv.set_clip(clip);
@@ -169,7 +251,19 @@ int64_t grow_frame(Rig& r, Fonts& fonts, GrowClock c, Scaler k, int64_t t, int64
     int64_t f1 = bench_us();
     for (int y : {150, 360, 600})
         r.sum = r.sum * 31 + o.row(y)[240] + o.row(y)[720];
-    scale_us = (int)(s1 - s0);
+    if (r.helper) {
+        ScaleSplit sp = r.helper->last();
+        r.ui_cpus |= cpu_bit(sp.ui_cpu);
+        r.helper_cpus |= cpu_bit(sp.helper_cpu);
+        sm.ui_us = sp.ui_us;
+        sm.helper_us = sp.helper_us;
+        sm.wake_us = sp.wake_us;
+        sm.chunks = sp.chunks;
+        sm.ui_chunks = sp.ui_chunks;
+        sm.helper_chunks = sp.helper_chunks;
+        sm.same_cpu = sp.ui_cpu >= 0 && sp.ui_cpu == sp.helper_cpu;
+    }
+    sm.scale_us = (int)(s1 - s0);
     return f1 - f0;
 }
 
@@ -183,13 +277,141 @@ Times run_clock(Rig& r, Fonts& fonts, GrowClock c, Scaler k, bool paced)
         if (paced)
             sleep_until_us(start + i * 1000000 / kFps);
         int64_t t = i * 1000 / kFps;
-        int su = 0;
-        int fu = (int)grow_frame(r, fonts, c, k, t, prev, su);
+        Sample sm;
+        int fu = (int)grow_frame(r, fonts, c, k, t, prev, sm);
         prev = t;
-        out.scale_us.push_back(su);
+        out.scale_us.push_back(sm.scale_us);
         out.frame_us.push_back(fu);
+        if (sm.ui_us >= 0) {
+            out.ui_us.push_back(sm.ui_us);
+            out.helper_us.push_back(sm.helper_us);
+            out.wake_us.push_back(sm.wake_us);
+            out.same += sm.same_cpu ? 1 : 0;
+            out.chunks += sm.chunks;
+            out.ui_chunks += sm.ui_chunks;
+            out.helper_chunks += sm.helper_chunks;
+        }
+        for (int q = 0; q < 2; q++)
+            out.freq[q].push_back(read_khz(r.freq_fd[q]));
     }
     return out;
+}
+
+void report_set(Rig& r, Fonts& fonts, GrowClock c, Scaler k, bool paced, const char* sc)
+{
+    auto ms = [](int us) { return us / 1000.0; };
+    r.plan.moves.grow = c;
+    const char* pace = paced ? "paced" : "unpaced";
+    Times all, trace;
+    for (int run = 0; run <= kRuns; run++) {
+        Times one = run_clock(r, fonts, c, k, paced);
+        if (run == 0)
+            continue;
+        if (run == 1)
+            trace = one;
+        all.add(one);
+    }
+    int sp95 = pct_us(all.scale_us, 95), fp95 = pct_us(all.frame_us, 95);
+    bool pass = sp95 >= 0 && sp95 <= kPassScaleUs && fp95 >= 0 && fp95 <= kPassFrameUs;
+    std::fprintf(stderr,
+                 "blockie-frontend: bench grow clock %s scaler %s pace %s runs %d frames %zu scale p50 %.2f"
+                 " p95 %.2f max %.2f frame p50 %.2f p95 %.2f max %.2f ms sum %08x %s\n",
+                 clock_name(c), sc, pace, kRuns, trace.frame_us.size(), ms(pct_us(all.scale_us, 50)), ms(sp95),
+                 ms(pct_us(all.scale_us, 100)), ms(pct_us(all.frame_us, 50)), ms(fp95), ms(pct_us(all.frame_us, 100)),
+                 (unsigned)r.sum, !paced ? "-" : pass ? "pass" : "fail");
+    if (paced)
+        std::fprintf(stderr,
+                     "blockie-frontend: bench grow trace clock %s scaler %s pace %s frames %zu scale %s"
+                     " frame %s ms\n",
+                     clock_name(c), sc, pace, trace.frame_us.size(), list_ms(trace.scale_us).c_str(),
+                     list_ms(trace.frame_us).c_str());
+    auto part = [](int us) { return us < 0 ? -1.0 : us / 1000.0; };
+    std::fprintf(stderr,
+                 "blockie-frontend: bench grow set clock %s scaler %s pace %s ui p50 %.2f p95 %.2f helper p50 %.2f"
+                 " p95 %.2f wake p50 %.2f p95 %.2f ms chunks ui %lld helper %lld of %lld same cpu %d of %zu"
+                 " policy0 p50 %d min %d policy6 p50 %d min %d MHz\n",
+                 clock_name(c), sc, pace, part(pct_us(all.ui_us, 50)), part(pct_us(all.ui_us, 95)),
+                 part(pct_us(all.helper_us, 50)), part(pct_us(all.helper_us, 95)), part(pct_us(all.wake_us, 50)),
+                 part(pct_us(all.wake_us, 95)), (long long)all.ui_chunks, (long long)all.helper_chunks,
+                 (long long)all.chunks, all.same, all.ui_us.size(), mhz_p50(all.freq[0]), mhz_min(all.freq[0]),
+                 mhz_p50(all.freq[1]), mhz_min(all.freq[1]));
+}
+
+class DecodeLoad {
+public:
+    explicit DecodeLoad(const std::vector<std::string>& paths) : paths_(paths), t0_(bench_us())
+    {
+        thread_ = std::thread([this]() { loop(); });
+    }
+    ~DecodeLoad() { finish(); }
+    DecodeLoad(const DecodeLoad&) = delete;
+    DecodeLoad& operator=(const DecodeLoad&) = delete;
+
+    void finish()
+    {
+        stop_.store(true);
+        if (!thread_.joinable())
+            return;
+        thread_.join();
+        span_us_ = bench_us() - t0_;
+    }
+    int decodes() const { return decodes_.load(); }
+    int pngs() const { return pngs_.load(); }
+    int64_t cpu_us() const { return cpu_us_.load(); }
+    int64_t span_us() const { return span_us_; }
+
+private:
+    void loop()
+    {
+        DecodedImage noise = noise_source(kCovers);
+        for (size_t i = 0; !stop_.load(); i++) {
+            DecodedImage d;
+            bool png = !paths_.empty() && load_png(paths_[i % paths_.size()], d) && d.ok();
+            Image img = cover_tile(png ? d : noise, kBigTileSide);
+            if (img.mem.empty())
+                continue;
+            decodes_.fetch_add(1);
+            if (png)
+                pngs_.fetch_add(1);
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        cpu_us_.store((int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
+    }
+
+    const std::vector<std::string>& paths_;
+    int64_t t0_ = 0;
+    int64_t span_us_ = 0;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> decodes_{0};
+    std::atomic<int> pngs_{0};
+    std::atomic<int64_t> cpu_us_{0};
+    std::thread thread_;
+};
+
+bool k3_equal(Rig& r, Fonts& fonts, ScaleHelper& helper)
+{
+    Buffer one;
+    bool same = true;
+    for (Scaler k : {Scaler::Channel, Scaler::Swar})
+        for (GrowClock c : {GrowClock::G, GrowClock::G6, GrowClock::GS}) {
+            r.plan.moves.grow = c;
+            int64_t prev = -1;
+            for (int64_t i = 1; i * 1000 / kFps < grow_ms(c); i++) {
+                int64_t t = i * 1000 / kFps;
+                Sample sm;
+                r.helper = nullptr;
+                grow_frame(r, fonts, c, k, t, prev, sm);
+                one.pix = r.dst.pix;
+                r.helper = &helper;
+                grow_frame(r, fonts, c, k, t, prev, sm);
+                if (one.pix != r.dst.pix)
+                    same = false;
+                prev = t;
+            }
+        }
+    r.helper = nullptr;
+    return same;
 }
 
 }
@@ -199,7 +421,8 @@ void bench_grow(HomeFlow& flow, Fonts& fonts, Library& lib, const std::vector<st
 {
     Rig r;
     int real = 0;
-    for (const std::string& p : cover_paths(flow, lib, sys_ids)) {
+    std::vector<std::string> paths = cover_paths(flow, lib, sys_ids);
+    for (const std::string& p : paths) {
         DecodedImage d;
         if (!load_png(p, d) || !d.ok())
             continue;
@@ -242,41 +465,42 @@ void bench_grow(HomeFlow& flow, Fonts& fonts, Library& lib, const std::vector<st
     r.plan = slide_plan(kPaneSplitWide, LeftMove::Fade, 0, r.head);
     r.xs.resize(kBigCols);
     r.ys.resize((r.covers.size() + kBigCols - 1) / kBigCols);
+    for (int q = 0; q < 2; q++)
+        r.freq_fd[q] = open(kFreqPaths[q], O_RDONLY | O_CLOEXEC);
 
     const Scaler scalers[] = {Scaler::Channel, Scaler::Swar};
     const GrowClock clocks[] = {GrowClock::G, GrowClock::G6, GrowClock::GS};
-    auto ms = [](int us) { return us / 1000.0; };
     for (bool paced : {true, false})
         for (Scaler k : scalers)
-            for (GrowClock c : clocks) {
-                r.plan.moves.grow = c;
-                const char* sc = k == Scaler::Swar ? "swar" : "channel";
-                const char* pace = paced ? "paced" : "unpaced";
-                Times all, trace;
-                for (int run = 0; run <= kRuns; run++) {
-                    Times one = run_clock(r, fonts, c, k, paced);
-                    if (run == 0)
-                        continue;
-                    if (run == 1)
-                        trace = one;
-                    all.scale_us.insert(all.scale_us.end(), one.scale_us.begin(), one.scale_us.end());
-                    all.frame_us.insert(all.frame_us.end(), one.frame_us.begin(), one.frame_us.end());
-                }
-                int sp95 = pct_us(all.scale_us, 95), fp95 = pct_us(all.frame_us, 95);
-                bool pass = sp95 >= 0 && sp95 <= kPassScaleUs && fp95 >= 0 && fp95 <= kPassFrameUs;
-                std::fprintf(stderr,
-                             "blockie-frontend: bench grow clock %s scaler %s pace %s runs %d frames %zu scale p50 %.2f"
-                             " p95 %.2f max %.2f frame p50 %.2f p95 %.2f max %.2f ms sum %08x %s\n",
-                             clock_name(c), sc, pace, kRuns, trace.frame_us.size(), ms(pct_us(all.scale_us, 50)),
-                             ms(sp95), ms(pct_us(all.scale_us, 100)), ms(pct_us(all.frame_us, 50)), ms(fp95),
-                             ms(pct_us(all.frame_us, 100)), (unsigned)r.sum, !paced ? "-" : pass ? "pass" : "fail");
-                if (paced)
-                    std::fprintf(stderr,
-                                 "blockie-frontend: bench grow trace clock %s scaler %s pace %s frames %zu scale %s"
-                                 " frame %s ms\n",
-                                 clock_name(c), sc, pace, trace.frame_us.size(), list_ms(trace.scale_us).c_str(),
-                                 list_ms(trace.frame_us).c_str());
-            }
+            for (GrowClock c : clocks)
+                report_set(r, fonts, c, k, paced, k == Scaler::Swar ? "swar" : "channel");
+
+    ScaleHelper helper;
+    r.helper = &helper;
+    r.sum = 0;
+    for (bool paced : {true, false})
+        for (Scaler k : scalers)
+            for (GrowClock c : clocks)
+                report_set(r, fonts, c, k, paced, k == Scaler::Swar ? "swar-k3" : "channel-k3");
+    DecodeLoad load(paths);
+    r.sum = 0;
+    for (bool paced : {true, false})
+        for (Scaler k : scalers)
+            for (GrowClock c : clocks)
+                report_set(r, fonts, c, k, paced, k == Scaler::Swar ? "swar-k3-load" : "channel-k3-load");
+    load.finish();
+    r.helper = nullptr;
+    uint32_t ui_cpus = r.ui_cpus, helper_cpus = r.helper_cpus;
+    bool equal = k3_equal(r, fonts, helper);
+    std::fprintf(stderr,
+                 "blockie-frontend: bench grow load decode %s decodes %d png %d load cpu %lld ms of span %lld ms ui"
+                 " cpus 0x%02x helper cpus 0x%02x k3 equal %s\n",
+                 load.decodes() > 0 ? "busy" : "idle", load.decodes(), load.pngs(), (long long)(load.cpu_us() / 1000),
+                 (long long)(load.span_us() / 1000), (unsigned)ui_cpus, (unsigned)helper_cpus,
+                 equal ? "yes" : "no");
+    for (int q = 0; q < 2; q++)
+        if (r.freq_fd[q] >= 0)
+            close(r.freq_fd[q]);
 }
 
 }

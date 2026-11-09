@@ -724,7 +724,7 @@ static int run()
                     ScrapeJob j;
                     {
                         std::lock_guard<std::mutex> lk(qmutex);
-                        if (squeue.empty())
+                        if (squeue.empty() || scrape_pause.load())
                             break;
                         j = std::move(squeue.front());
                         squeue.pop_front();
@@ -830,7 +830,10 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: recent covers waited %lld ms\n", (long long)(now_ms() - t0));
     }
     if (bench) {
-        scrape_pause.store(true);
+        {
+            std::lock_guard<std::mutex> lk(qmutex);
+            scrape_pause.store(true);
+        }
         {
             std::lock_guard<std::mutex> lk(dmutex);
             decode_pause = true;
