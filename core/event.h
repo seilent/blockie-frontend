@@ -42,6 +42,9 @@ enum class Ev {
     VolDownRelease,
     SelectDown,
     SelectUp,
+    HoldLocked,
+    PivotPrev,
+    PivotNext,
 };
 
 enum class Src : uint8_t { Board, Remote, Avrcp };

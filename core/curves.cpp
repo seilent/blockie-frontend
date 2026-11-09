@@ -64,7 +64,34 @@ constexpr double bezier(double x1, double y1, double x2, double y2, double t)
     return cbez(y1, y2, (lo + hi) / 2);
 }
 
-enum Tab { TExpOut6, TExpIn6, TExpIn1, TExpOut1, TExpIn15, TDecel, TStrip, TSine, TPop, TPowOut17, TCount };
+enum Tab {
+    TExpOut6,
+    TExpIn6,
+    TExpIn1,
+    TExpOut1,
+    TExpIn15,
+    TDecel,
+    TStrip,
+    TSine,
+    TPop,
+    TPowOut17,
+    TPowOut15,
+    TWordOpen,
+    TCount
+};
+
+constexpr double word_open(double u)
+{
+    constexpr double ku[] = {0, 0.0391, 0.0759, 0.2299, 0.3057}, kp[] = {0, 0.324, 0.360, 0.648, 0.720};
+    if (u >= ku[4]) {
+        double v = (u - ku[4]) / (1 - ku[4]), m = 1 - v;
+        return kp[4] + (1 - kp[4]) * (1 - m * m * m);
+    }
+    int i = 0;
+    while (i < 3 && u >= ku[i + 1])
+        i++;
+    return kp[i] + (kp[i + 1] - kp[i]) * (u - ku[i]) / (ku[i + 1] - ku[i]);
+}
 
 constexpr double eval(int k, double t)
 {
@@ -89,6 +116,10 @@ constexpr double eval(int k, double t)
         return 1 - cexp(-10 * t * 0.69314718055994530942);
     case TPowOut17:
         return t >= 1 ? 1 : 1 - cexp(1.7 * cln(1 - t));
+    case TPowOut15:
+        return t >= 1 ? 1 : 1 - cexp(1.5 * cln(1 - t));
+    case TWordOpen:
+        return word_open(t);
     }
     return t;
 }
@@ -112,6 +143,23 @@ constexpr Tables make_tables()
 }
 
 constexpr Tables kTables = make_tables();
+
+uint32_t isqrt(uint64_t v)
+{
+    uint64_t r = 0, b = 1ull << 62;
+    while (b > v)
+        b >>= 2;
+    while (b) {
+        if (v >= r + b) {
+            v -= r + b;
+            r = (r >> 1) + b;
+        } else {
+            r >>= 1;
+        }
+        b >>= 2;
+    }
+    return (uint32_t)r;
+}
 
 fx lookup(int k, fx t)
 {
@@ -161,6 +209,22 @@ fx curve(Curve c, fx t)
         return fx_mul(t, 2 * kOne - t);
     case Curve::PowOut17:
         return lookup(TPowOut17, t);
+    case Curve::CubicOut: {
+        fx m = kOne - t;
+        return kOne - fx_mul(fx_mul(m, m), m);
+    }
+    case Curve::SmoothStep:
+        return fx_mul(fx_mul(t, t), 3 * kOne - 2 * t);
+    case Curve::PowOut15:
+        return lookup(TPowOut15, t);
+    case Curve::WordOpen:
+        return lookup(TWordOpen, t);
+    case Curve::QuartOut: {
+        fx m = kOne - t, m2 = fx_mul(m, m);
+        return kOne - fx_mul(m2, m2);
+    }
+    case Curve::PowIn15:
+        return fx_mul(t, (fx)isqrt((uint64_t)t << kFxBits));
     }
     return t;
 }

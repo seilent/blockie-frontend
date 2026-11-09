@@ -26,17 +26,24 @@ private:
     int n_ = 0;
 };
 
+enum class ScrollKind : uint8_t { List, Quickplay, Grid };
+
 class Scroll {
 public:
+    explicit Scroll(ScrollKind k) : kind_(k) {}
+
+    ScrollKind kind() const { return kind_; }
     void set_limit(pos64 limit);
     pos64 limit() const { return limit_; }
     pos64 base() const { return base_; }
     pos64 pos() const { return pos_; }
+    pos64 pos_in() const { return pos_ < 0 ? 0 : pos_ > limit_ ? limit_ : pos_; }
     void set(pos64 p);
     void fit(pos64 limit, pos64 lo, pos64 hi);
 
     void begin(fx finger);
     void drag(fx finger);
+    void end_drag();
     void release(int64_t now, int64_t v_finger);
     void animate(int64_t now, pos64 to, int ms, Curve c);
     void lift(int64_t now, pos64 by, int ms, Curve c);
@@ -44,17 +51,23 @@ public:
     bool step(int64_t now);
     void stop();
     bool grab(int64_t at);
+    bool land();
 
     bool flinging() const { return fling_; }
     bool animating() const { return anim_; }
-    bool moving() const { return fling_ || anim_; }
+    bool returning() const { return back_; }
+    bool moving() const { return fling_ || anim_ || back_; }
     int64_t velocity() const { return v_; }
-    pos64 target() const { return anim_ ? to_ : pos_; }
+    pos64 target() const { return anim_ ? to_ : back_ ? end() : pos_; }
 
 private:
     bool write(pos64 p);
     bool settle();
+    bool ends() const;
+    pos64 end() const { return pos_ < 0 ? 0 : limit_; }
 
+    ScrollKind kind_;
+    bool back_ = false, held_ = false;
     pos64 pos_ = 0, limit_ = 0, base_ = 0, reach_ = 0, rest_ = 0, fit_at_ = -1;
     bool dropping_ = false;
     pos64 start_pos_ = 0;
@@ -68,6 +81,6 @@ private:
 };
 
 int64_t fling_velocity(int64_t v_finger);
-pos64 fling_travel(int64_t v0);
+pos64 fling_travel(int64_t v0, ScrollKind k);
 
 }

@@ -9,7 +9,8 @@
 #include <vector>
 
 #include "canvas.h"
-#ifdef FD_BOARD_A105
+#include "mempresent.h"
+#if defined(FD_BOARD_A105) || defined(FD_BOARD_PB)
 #include <deque>
 #include <memory>
 
@@ -21,7 +22,6 @@ struct drm_event_vblank;
 
 namespace fd {
 
-enum class PresentMode { Direct, Copy, Warp };
 enum class Pace { None, Kick, Wait, Te };
 
 constexpr unsigned long kFbSleep = 0x80044620;
@@ -34,15 +34,6 @@ using FbIoctl = int (*)(int fd, unsigned long req, void* arg);
 uint16_t rgb565(uint32_t rgb);
 
 extern std::atomic<uint32_t> g_present_check_fails;
-
-struct PanDone {
-    uint32_t seq;
-    int64_t write_ns, pan_ns, end_ns;
-    bool ok = true;
-#ifdef FD_BOARD_A105
-    int64_t gpu_ns = -1, ready_ns = -1, post_ns = -1;
-#endif
-};
 
 struct PaceSeam {
     int64_t (*now)(void* ctx) = nullptr;
@@ -64,8 +55,6 @@ struct PaceFrame {
     bool late = false, unlocked = false, missed = false, heavy = false, deferred = false;
     int risky = 0, gates = 0, dropped = 0;
 };
-
-template <class F, class L> class PresenterT;
 
 #ifdef FD_ROT
 template <> class PresenterT<X888, Rot> {
@@ -356,91 +345,27 @@ private:
     int64_t rest_est_ns_ = 4000000, show_call_ns_ = 0;
 };
 
-template <> class PresenterT<X888, Rows> {
-public:
-    using S = SurfaceT<X888, Rows>;
-
-    void open(PresentMode mode)
-    {
-        mode_ = mode;
-        if (mode_ != PresentMode::Direct) {
-            back_buf_.assign((size_t)kPortraitW * kPortraitH, 0);
-            back_ = {back_buf_.data(), kPortraitW};
-        }
-        mem_fb_.assign((size_t)kPortraitW * kPortraitH, 0);
-        fb_ = {mem_fb_.data(), kPortraitW};
-    }
-    PresentMode mode() const { return mode_; }
-    int64_t show_at(int64_t now_ms, bool = true) const { return now_ms + show_lead_ms_; }
-    int period_ms() const { return 16; }
-    void set_show_lead(int ms) { show_lead_ms_ = ms; }
-
-    S draw_target() const { return mode_ == PresentMode::Direct ? fb_ : back_; }
-    S warp_target() const { return mode_ == PresentMode::Copy ? back_ : fb_; }
-    S screen() const { return mode_ == PresentMode::Warp && !warped_ ? back_ : fb_; }
-    S last() const { return {}; }
-    uint32_t frame_presents() const { return frame_presents_; }
-    uint32_t fulls() const { return fulls_; }
-
-    void present(Rect dirty)
-    {
-        presents_++;
-        bool full = covers(dirty);
-        if (full)
-            fulls_++;
-        if (mode_ == PresentMode::Copy || (mode_ == PresentMode::Warp && warped_ && !full))
-            copy_rows(dirty);
-        if (full)
-            warped_ = false;
-    }
-    void present_warp()
-    {
-        presents_++;
-        fulls_++;
-        if (mode_ == PresentMode::Copy)
-            copy_rows(kScreen);
-        warped_ = true;
-    }
-    void flip()
-    {
-        frame_presents_ = presents_;
-        presents_ = 0;
-    }
-
-private:
-    static bool covers(Rect r) { return r.x0 <= 0 && r.y0 <= 0 && r.x1 >= kPortraitW && r.y1 >= kPortraitH; }
-    void copy_rows(Rect p)
-    {
-        p = p.intersect(kScreen);
-        if (p.empty())
-            return;
-        for (int y = p.y0; y < p.y1; y++)
-            copy_px(fb_.row(y) + p.x0, back_.row(y) + p.x0, p.x1 - p.x0);
-    }
-
-    PresentMode mode_ = PresentMode::Copy;
-    std::vector<uint32_t> back_buf_;
-    std::vector<uint32_t> mem_fb_;
-    uint32_t presents_ = 0;
-    uint32_t frame_presents_ = 0;
-    uint32_t fulls_ = 0;
-    int show_lead_ms_ = 0;
-    bool warped_ = false;
-    S back_;
-    S fb_;
-};
-
-#ifdef FD_BOARD_A105
+#if defined(FD_BOARD_A105) || defined(FD_BOARD_PB)
 struct GpuSlotSize {
     int w = 0, h = 0;
+    bool opaque = false;
+};
+
+struct GpuWrite {
+    uint32_t* px[2] = {};
+    Rect owed[2];
+    int n = 0, stride = 0;
 };
 
 struct GpuStats {
     bool up = false, gone = false;
     uint32_t frames = 0, flips = 0, drops = 0, skips = 0, late = 0, hung = 0, exits = 0, retries = 0, caps = 0;
     uint64_t upload = 0;
+    uint32_t mixed = 0;
     int fences = 0, ready = 0;
 };
+
+enum class GpuPost { Posted, Skip, Gone, Mixed, Unready };
 
 class DrmPresenter {
 public:
@@ -452,7 +377,11 @@ public:
     bool open_drm(const std::string& spec, int fd, DrmIoctl io, DrmMap map);
     void record(std::vector<PresentCall>* v) { rec_ = v; }
     void set_tefail(const std::string&) {}
-    void begin_frame(int64_t, int64_t) { scope_ = on_; }
+    void begin_frame(int64_t, int64_t)
+    {
+        scope_ = on_;
+        gscope_ = false;
+    }
     int64_t next_tick(int64_t, int64_t fallback) const { return fallback; }
     bool take_pace(PaceFrame&) { return false; }
     PresentMode mode() const { return mem_.mode(); }
@@ -502,16 +431,28 @@ public:
     void flush();
     void stop();
 
-    void gpu_open(const GlConfig& c, const std::vector<GpuSlotSize>& slots, bool nogpu);
+    void gpu_open(const GlConfig& c, const std::vector<GpuSlotSize>& slots, bool nogpu, bool depth2 = false);
+    void gpu_depth(int d);
+    int64_t gpu_due(int64_t now) const;
     bool gpu_up() const { return gpu_up_.load(); }
-    uint32_t* gpu_layer(int slot, int* stride);
-    bool gpu_layers(int slot, uint32_t** px, int* stride);
-    const uint32_t* gpu_layer_now(int slot, int* stride, bool other = false) const;
-    void gpu_layer_done(int slot, int64_t bytes = 0);
+    bool gpu_off() const;
+    bool gpu_after() const;
+    bool gpu_write(int slot, uint32_t layer, uint32_t version, bool both, GpuWrite& w);
+    void gpu_wrote(int slot, Rect dirty, bool whole, int64_t bytes = 0, const Rect* paid = nullptr);
+    const uint32_t* gpu_layer_now(int slot, int* stride, bool other = false, Rect* owed = nullptr,
+                                  uint32_t* version = nullptr) const;
     void gpu_files();
     void gpu_retry(int64_t now, bool idle);
     int64_t gpu_retry_at(bool idle) const;
-    bool gpu_present(const GlFrameCmd& cmd);
+    GpuPost gpu_present(const GlFrameCmd& cmd);
+    bool gpu_held(int slot, uint32_t layer, uint32_t version) const;
+    bool gpu_whole(int slot, uint32_t layer) const;
+    uint32_t gpu_lost_gen() const { return lost_gen_.load(std::memory_order_acquire); }
+#ifndef FD_ALSA
+    void gpu_keep_posted(bool on) { keep_posted_ = on; }
+    bool gpu_posted(GlFrameCmd& out) const;
+    bool gpu_buf(uint32_t id, uint32_t& layer, uint32_t& version) const;
+#endif
     GpuStats gpu_stats() const;
     int gpu_fails() const { return gl_ ? gl_->fail_count() : 0; }
 
@@ -527,11 +468,16 @@ private:
         uint32_t* px = nullptr;
         int fd = -1, w = 0, h = 0;
         uint32_t id = 0, last = 0;
+        bool dirty = false, whole = false, opaque = false;
+        uint32_t layer = 0, version = 0;
+        Rect owed;
     };
     enum class GState { Free, Gpu, Ready, Flipping, Shown };
     struct Slot {
         Buf b[2];
         int cur = -1, writing = -1;
+        bool both = false;
+        uint32_t wlayer = 0, wversion = 0;
     };
 
     bool drm_attach(const std::string& spec, int fd, DrmIoctl io, DrmMap map, bool own);
@@ -539,9 +485,15 @@ private:
     bool drm_buffer(Buf& b, int w, int h, bool scanout, bool prime);
     void drm_free(Buf& b);
     Buf& drm_buf(int i) { return i < 2 ? buf_[i] : gbuf_[i - 2]; }
+    void gpu_redirty(const GlFrameCmd& c);
+    void gpu_bump();
+    void gpu_mixed(const char* what);
     int drm_page(int b, uint32_t seq);
     void gpu_tick();
     bool gpu_kept(const GlClient& g) const;
+    int ntgt() const { return ngb_; }
+    int gpu_queued() const;
+    bool claimable() const;
     bool gpu_busy() const;
     void gpu_flip();
     void gpu_retire();
@@ -574,18 +526,29 @@ private:
     uint32_t crtc_ = 0, conn_ = 0, dpms_prop_ = 0;
     int64_t period_ns_ = 0;
     Buf buf_[2];
-    Buf gbuf_[2];
-    GState gst_[2] = {GState::Free, GState::Free};
-    uint32_t gseq_[2] = {};
-    int64_t gpost_[2] = {}, gready_[2] = {}, flip_gpu_ns_ = -1, flip_ready_ns_ = -1, flip_post_ns_ = -1;
+    Buf gbuf_[3];
+    int ngb_ = 0;
+    GState gst_[3] = {GState::Free, GState::Free, GState::Free};
+    uint32_t gseq_[3] = {};
+    uint32_t gpost_n_ = 0, gidx_[3] = {}, tlast_[3] = {};
+    bool tfull_[3] = {true, true, true};
+    int depth_ = 1;
+    int64_t vbl_ns_ = 0;
+    Rect thist_[8];
+    int64_t gpost_[3] = {}, gready_[3] = {}, flip_gpu_ns_ = -1, flip_ready_ns_ = -1, flip_post_ns_ = -1;
     std::vector<Slot> slots_;
     std::unique_ptr<GlClient> gl_;
     std::atomic<GlClient*> glp_{nullptr};
     int retry_buf_ = 1;
     int gfd_ = -1;
     std::vector<std::pair<uint32_t, GlFrameCmd>> mail_, mail_out_;
+#ifndef FD_ALSA
+    bool keep_posted_ = false, have_posted_ = false;
+    std::unique_ptr<GlFrameCmd> posted_;
+#endif
     std::string gpu_off_;
     std::atomic<bool> gpu_up_{false};
+    std::atomic<uint32_t> lost_gen_{0};
     bool gpu_gone_ = false, gpu_imported_ = false, gpu_keep_ = false, cpu_full_ = false;
     int64_t gpu_retry_at_ = -1;
     bool gpu_retry_wait_ = false, gpu_prepped_ = false;
@@ -606,7 +569,7 @@ private:
     uint32_t waits_ = 0;
     bool retry_ = false;
     bool dark_ = false;
-    bool scope_ = false, held_ = false;
+    bool scope_ = false, held_ = false, gscope_ = false, gafter_ = false, mixed_said_ = false;
     int scope_buf_ = 0;
     int last_err_ = 0;
     bool dthread_ = false;
@@ -619,10 +582,19 @@ private:
     std::atomic<uint32_t> pans_{0}, missed_{0}, busy_{0}, stale_{0}, failed_{0}, blind_{0};
 };
 
+#ifdef FD_BOARD_A105
 static_assert(board::kDisplay == board::Display::Drm, "the a105 presents through drm");
 using Presenter = DrmPresenter;
+#else
+class HostPresenter;
+using Presenter = HostPresenter;
+#endif
 #elif !defined(FD_BOARD_HEADER)
 using Presenter = PresenterT<LiveF, LiveL>;
 #endif
 
 }
+
+#ifdef FD_BOARD_PB
+#include "hostpresent.h"
+#endif

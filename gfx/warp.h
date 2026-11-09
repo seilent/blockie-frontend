@@ -36,7 +36,7 @@ struct SwivelCol {
 void turnstile_rows(fx angle_deg, int hinge_px, int d_px, WarpRow* rows);
 template <class F = LiveF, class L = LiveL>
 void warp(const SurfaceT<F, L>& src, const SurfaceT<F, L>& dst, const WarpRow* rows, uint32_t bg, int a256,
-          bool motion = false, int eye = 0);
+          bool motion = false, int eye = 0, int tx = 0, int ty = 0);
 Rect projected_bounds(Rect src, const Projection& pr);
 template <class F = LiveF, class L = LiveL>
 void project(const SurfaceT<F, L>& src, Rect src_rect, const SurfaceT<F, L>& dst, Rect clip, const Projection& pr,

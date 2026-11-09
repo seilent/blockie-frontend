@@ -6,10 +6,10 @@ namespace fd::board {
 
 enum class VolumeLaw { Attenuation, Index };
 enum class Gadget { AndroidUsb, Configfs };
-enum class UpdateKind { Ap80Iso, V1Ota, A105Ab };
+enum class UpdateKind { Ap80Iso, V1Ota, A105Ab, None };
 enum class KeyMap { Nav, Icons };
 enum class JackKind { None, Switch, Extcon };
-enum class Display { Fbdev, Drm };
+enum class Display { Fbdev, Drm, Wayland };
 enum class LedKind { Pattern, Pwm2 };
 
 struct EqCost {

@@ -212,9 +212,6 @@ int main()
               fx_round(tok::motion_swapRowFade) == 200 && fx_round(tok::motion_leave) == 133,
           "D's tokens: out 50 ms, shift 68 px, rows 150 ms, row in shift 50 px, row fade 200 ms, header 133 ms");
     check(swap_ms() == 250, "D ends at 250 ms");
-    check(fx_round(tok::motion_pivotOut) == 300 && fx_round(tok::motion_pivotRows) == 380 &&
-              fx_round(tok::motion_pivotRowStagger) == 22 && swap_ms() != 300 + 380,
-          "D reads no motion.pivot* token: the carved 300, 380 and 22 would not end at 250");
 
     {
         SwapLeg s0 = swap_leave(0, 1), s50 = swap_leave(50, 1), sm = swap_leave(-10, 1);

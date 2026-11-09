@@ -58,6 +58,14 @@ std::vector<std::pair<size_t, size_t>> wrap_ranges(std::string_view s, int width
     return out;
 }
 
+size_t cluster_next(const TextLayout& l, size_t p, size_t end)
+{
+    size_t i = (size_t)(std::lower_bound(l.g.begin(), l.g.end(), p + 1,
+                                         [](const TextLayout::G& g, size_t b) { return g.byte < b; }) -
+                        l.g.begin());
+    return std::max(p + 1, std::min(end, i < l.g.size() ? (size_t)l.g[i].byte : end));
+}
+
 std::vector<std::string> wrap_lines(Fonts& f, const TextStyle& st, const std::string& s, int width64, size_t max_lines)
 {
     std::vector<std::string> out;
@@ -90,21 +98,13 @@ std::vector<GlyphRun> wrap_runs(Fonts& f, const TextStyle& st, const std::string
         if (out.size() >= max_rows)
             break;
         std::shared_ptr<const TextLayout> l = f.layout(st, piece, d);
-        auto at = [&](size_t byte) {
-            return (size_t)(std::lower_bound(l->g.begin(), l->g.end(), byte,
-                                             [](const TextLayout::G& g, size_t b) { return g.byte < b; }) -
-                            l->g.begin());
-        };
         TextPrefix pre;
         f.prefix64(st, *l, pre);
         auto width = [&](size_t b, size_t e) {
             int w = 0;
             return pre.span64(*l, b, e, w) ? w : f.span64(st, *l, b, e);
         };
-        auto step = [&](size_t p, size_t end) {
-            size_t i = at(p + 1);
-            return std::max(p + 1, std::min(end, i < l->g.size() ? (size_t)l->g[i].byte : end));
-        };
+        auto step = [&](size_t p, size_t end) { return cluster_next(*l, p, end); };
         for (const std::pair<size_t, size_t>& r : wrap_ranges(piece, width64, max_rows - out.size(), width, step))
             out.push_back(f.run(st, *l, r.first, r.second));
     }

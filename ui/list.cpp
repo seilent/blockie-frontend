@@ -2,13 +2,18 @@
 
 #include <algorithm>
 
+#include "../core/curves.h"
 #include "../core/gesture.h"
+#include "../lib/util.h"
+#include "roles.h"
 
 namespace fd {
 
 namespace {
 
 constexpr int ms_of(fx t) { return t >> kFxBits; }
+
+int px64(pos64 u) { return (int)((((u * ppu()) >> kFxBits) + kHalf) >> kFxBits); }
 
 }
 
@@ -86,7 +91,7 @@ bool ListView::keep_motion(const ListModel* m, int was, uint64_t key)
 
 void ListView::reset_model(const ListModel* m, int64_t now, uint64_t key)
 {
-    pos64 screen = (pos64)row_ * pitch_ - scroll_.pos();
+    pos64 screen = (pos64)row_ * pitch_ - scroll_.pos_in();
     m_ = m;
     sync_limit();
     int r = 0, c = 0;
@@ -103,6 +108,7 @@ void ListView::reset_model(const ListModel* m, int64_t now, uint64_t key)
     bar_from_ = bar_to_ = (pos64)row_ * pitch_;
     bar_start_ = now - 1000000;
     press_.reset();
+    glow_.clear();
     invalidate();
 }
 
@@ -212,10 +218,12 @@ bool ListView::to_top(int64_t now)
 
 void ListView::ensure_visible(int64_t now) { scroll_into((pos64)row_ * pitch_, pitch_, now); }
 
-bool ListView::lift_focus(fx y, int64_t now)
+bool ListView::lift_focus(fx y, int64_t now, bool to_top)
 {
     pos64 top = (pos64)row_ * pitch_, off = scroll_.target();
     pos64 by = (pos64)top_ + top + pitch_ - off - y;
+    if (to_top)
+        by = std::min(by, top - off);
     if (!m_ || row_ >= m_->count() || by <= 0 || top - off < by)
         return false;
     pos64 to = (off + by + pitch_ - 1) / pitch_ * pitch_;
@@ -228,7 +236,7 @@ void ListView::focus_after_scroll(int64_t now)
     int n = m_ ? m_->count() : 0;
     if (n == 0)
         return;
-    pos64 off = scroll_.pos();
+    pos64 off = scroll_.pos_in();
     pos64 view = bottom_ - top_;
     pos64 top = (pos64)row_ * pitch_;
     pos64 band = off - lift_at(off);
@@ -265,7 +273,7 @@ void ListView::press(fx x, fx y, int64_t at, int64_t now)
     int n = m_ ? m_->count() : 0;
     if (caught || (pos64)y < (pos64)top_ - lift() || y >= bottom_ || n == 0)
         return;
-    pos64 c = (pos64)(y - top_) + scroll_.pos();
+    pos64 c = (pos64)(y - top_) + scroll_.pos_in();
     int r = (int)(c / pitch_);
     int col = col_at(x);
     if (r >= n || col < 0 || col >= m_->cells(r) || (cell_h && c - (pos64)r * pitch_ >= cell_h))
@@ -273,8 +281,11 @@ void ListView::press(fx x, fx y, int64_t at, int64_t now)
     down_row_ = r;
     down_col_ = col;
     set_focus(r, col, now, true);
-    if (press_rows && pressable(r, col))
+    if (press_rows && pressable(r, col)) {
         press_.down(item(r, col), now);
+        if (slot(r).kind == Row::Item)
+            glow_.down(r, now);
+    }
 }
 
 void ListView::move_touch(fx x, fx y, int64_t at, int64_t now)
@@ -292,6 +303,7 @@ void ListView::move_touch(fx x, fx y, int64_t at, int64_t now)
     if (dx * dx + dy * dy <= slop * slop)
         return;
     press_.cancel(now);
+    glow_.clear();
     if (axis_of(dx, dy) == Axis::Horizontal) {
         down_ = false;
         return;
@@ -315,6 +327,7 @@ bool ListView::release(fx x, fx y, int64_t at, int64_t now, int& tap_row, int& t
     int64_t slop = std_u(tok::touchSlop);
     if (dx * dx + dy * dy > slop * slop || down_row_ < 0) {
         press_.cancel(now);
+        glow_.clear();
         return false;
     }
     press_.tap(now);
@@ -378,8 +391,10 @@ void ListView::key_down(int64_t now)
 Row& ListView::slot(int row)
 {
     for (Row& r : slots_)
-        if (r.index == row && r.gen == gen_)
+        if (r.index == row && r.gen == gen_) {
+            r.hide = row == hide_title;
             return r;
+        }
     int lo = first_visible(), hi = last_visible();
     Row* pick = nullptr;
     int far = -1;
@@ -400,13 +415,117 @@ Row& ListView::slot(int row)
     pick->gen = gen_;
     pick->ncells = 0;
     pick->count_line = pick->accent = pick->bold = pick->ring = false;
+    pick->collection = pick->lib_sub = false;
+    pick->thumbs = nullptr;
     pick->primary.clear();
     pick->secondary.clear();
     pick->number.clear();
     pick->trailing.clear();
     m_->fill(row, *pick);
+    pick->hide = row == hide_title;
     fills_++;
     return *pick;
+}
+
+int ListView::row_at(fx y) const
+{
+    int n = m_ ? m_->count() : 0;
+    if (y < top_ || y >= bottom_ || n == 0)
+        return -1;
+    int r = (int)(((pos64)(y - top_) + scroll_.pos()) / pitch_);
+    return r < n ? r : -1;
+}
+
+int ListView::bands(int* y, int max) const
+{
+    int n = 0, first = first_visible(), last = last_visible();
+    y[n++] = px(top_);
+    for (int r = first + 1; r <= last && n < max; r++) {
+        int t = px64((pos64)top_ + (pos64)r * pitch_ - scroll_.pos());
+        if (t > y[n - 1])
+            y[n++] = t;
+    }
+    y[n] = std::max(px(bottom_), y[n - 1] + 1);
+    return n;
+}
+
+PressGlow* ListView::glow(int row, int64_t now)
+{
+    if (glow_.key() >= 0 && !press_.framed(item(glow_.key(), 0), now))
+        glow_.clear();
+    return row >= 0 && row == glow_.key() ? &glow_ : nullptr;
+}
+
+bool PressGlow::build(Fonts& f, const std::vector<GlowText>& t, Rect clip, const Zoom& z)
+{
+    int d = px(tok::pressGlowDilate), g = px(tok::pressGlow);
+    Rect box{};
+    for (const GlowText& l : t) {
+        int w64 = f.width64(l.st, l.s.c_str());
+        Rect r{l.x64 >> 6, l.base - f.ascent(l.st.px), ((l.x64 + w64 + 63) >> 6) + 1, l.base + f.descent(l.st.px)};
+        box = box.empty() ? r : Rect{std::min(box.x0, r.x0), std::min(box.y0, r.y0), std::max(box.x1, r.x1),
+                                     std::max(box.y1, r.y1)};
+    }
+    Rect zc = z.rect(clip);
+    box = z.rect(box).grow(1).intersect(zc);
+    mask_ = Coverage{};
+    if (box.empty())
+        return true;
+    box = box.grow(d);
+    Buffer b(box.x1 - box.x0, box.y1 - box.y0);
+    Canvas bc(b.surface());
+    bc.set_clip(Rect{zc.x0 - box.x0, zc.y0 - box.y0, zc.x1 - box.x0, zc.y1 - box.y0}.intersect(bc.clip()));
+    Zoom bz{z.s, z.x64 - box.x0 * 64, z.y64 - box.y0 * 64};
+    bool ok = true;
+    for (const GlowText& l : t)
+        ok = f.draw(bc, l.st, l.s.c_str(), l.x64 - box.x0 * 64, l.base - box.y0, kWhite, 256, bz) && ok;
+    Coverage src, dil;
+    src.w = b.w;
+    src.h = b.h;
+    src.rot.resize((size_t)src.w * src.h);
+    Surface sf = b.surface();
+    for (int y = 0; y < src.h; y++)
+        for (int x = 0; x < src.w; x++) {
+            uint32_t v = LiveF::unpack(sf.at(x, y));
+            src.rot[src.index(x, y)] = (uint8_t)std::max({v >> 16 & 255, v >> 8 & 255, v & 255});
+        }
+    dilate_coverage(src, d, dil);
+    glow_coverage(dil, g, mask_, 0, g);
+    x_ = box.x0 - g;
+    y_ = box.y0 - g;
+    return ok;
+}
+
+bool PressGlow::draw(Canvas& c, Fonts& f, const std::vector<GlowText>& t, Rect clip, const Zoom& z, int64_t now)
+{
+    if (key_ < 0 || t.empty())
+        return true;
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    for (const GlowText& l : t)
+        for (uint64_t v : {hash64(l.s), (uint64_t)l.x64, (uint64_t)l.base, (uint64_t)l.st.px, (uint64_t)l.st.weight,
+                           (uint64_t)l.st.track64, (uint64_t)l.st.tcase})
+            mix(v);
+    for (int v : {clip.x0, clip.y0, clip.x1, clip.y1, z.s, z.x64, z.y64})
+        mix((uint64_t)(uint32_t)v);
+    h |= 1;
+    bool ok = true;
+    if (h != sig_) {
+        uint32_t owed = f.owed_epoch();
+        ok = build(f, t, clip, z);
+        sig_ = ok && f.owed_epoch() == owed ? h : 0;
+    }
+    if (mask_.w <= 0)
+        return ok;
+    int ms = tok::motion_pressGlow >> kFxBits;
+    fx p = (fx)std::clamp<int64_t>((now - at_) * kOne / std::max(1, ms), 0, kOne);
+    int pad = px(tok::pressGlowDilate) + px(tok::pressGlow);
+    Rect zc = z.rect(clip), keep = c.clip();
+    c.set_clip(Rect{zc.x0 - pad, zc.y0, zc.x1, zc.y1}.intersect(keep));
+    c.coverage(mask_.rot.data(), mask_.w, mask_.h, x_, y_, kWhite,
+               alpha256(fx_mul(tok::pressGlowAlpha, curve(Curve::CubicOut, p))));
+    c.set_clip(keep);
+    return ok;
 }
 
 }

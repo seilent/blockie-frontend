@@ -1,11 +1,13 @@
 #include "compose.h"
 
 #include <algorithm>
+#include <cmath>
 #include <type_traits>
 #include <vector>
 
 #include "../core/prof.h"
 #include "pairs.h"
+#include "xform.h"
 
 namespace fd {
 
@@ -172,13 +174,15 @@ void blend_scaled_impl(const SurfaceT<F, L>& layer, const uint8_t* mask, const S
                 if (sc < 0)
                     continue;
                 T v = s[sc];
-                if constexpr (std::is_same_v<F, R565>) {
-                    if (m) {
-                        if (m[sc])
+                if (m) {
+                    if (m[sc]) {
+                        if constexpr (std::is_same_v<F, R565>)
                             row[x] = motion && a < 256 ? over_ground5(row[x], v, m[sc], key, alpha5(a))
-                                            : over_ground(row[x], v, m[sc], g, a);
-                        continue;
+                                                       : over_ground(row[x], v, m[sc], g, a);
+                        else
+                            row[x] = over_ground256(row[x], v, m[sc], key, a);
                     }
+                    continue;
                 }
                 if (v == key)
                     continue;
@@ -740,12 +744,27 @@ template <bool Motion> uint16_t shifted_px(uint16_t d, uint16_t s, int k)
         return blend565(d, s, k);
 }
 
+template <class F, class L>
+const typename F::T* shift_row(const SurfaceT<F, L>& page, const PageShift<F, L>& sh, int y,
+                               std::vector<typename F::T>& fill)
+{
+    int y1 = std::min(sh.y1, page.h);
+    if (!sh.ground || sh.dy <= 0 || y < sh.y0 || y >= y1)
+        return page.row(y);
+    if (y + sh.dy < y1)
+        return page.row(y + sh.dy);
+    fill.assign((size_t)page.w, sh.ground->at(0, y));
+    return fill.data();
+}
+
 template <bool Motion>
 void scrim_shifted565(const SurfaceT<R565, Rows>& page, const SurfaceT<R565, Rows>& layer,
-                      const SurfaceT<R565, Rows>& dst, uint16_t v, int sa, int la, Rect q, int y0, int y1, int dy)
+                      const SurfaceT<R565, Rows>& dst, uint16_t v, int sa, int la, Rect q, int y0, int y1, int dy,
+                      const PageShift<R565, Rows>& sh)
 {
+    std::vector<uint16_t> fill;
     for (int y = 0; y < dst.h; y++) {
-        const uint16_t* s = page.row(y);
+        const uint16_t* s = shift_row(page, sh, y, fill);
         uint16_t* d = dst.row(y);
         int x0 = y >= y0 && y < y1 ? q.x0 : dst.w, x1 = x0 < dst.w ? q.x1 : dst.w;
         for (int x = 0; x < x0; x++)
@@ -952,7 +971,8 @@ inline uint32_t scrim_px(uint32_t s, uint32_t color, int a) { return a <= 0 ? s 
 
 template <class F, class L>
 void scrim_shifted_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst,
-                        uint32_t color, int scrim_a, Rect p, int dy, int a, int r0, int r1)
+                        uint32_t color, int scrim_a, Rect p, int dy, int a, int r0, int r1,
+                        const PageShift<F, L>& shift)
 {
     if constexpr (std::is_same_v<L, Rot>) {
         prof::Scope ps(prof::ScrimShifted);
@@ -960,8 +980,16 @@ void scrim_shifted_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer,
         int j0 = std::max(m.x0 + dy, 0), j1 = std::min(m.x1 + dy, dst.h);
         r0 = std::max(r0, 0);
         r1 = std::min(r1, dst.w);
+        std::vector<uint32_t> tmp(shift.ground && shift.dy > 0 ? (size_t)dst.h : 0);
         for (int r = r0; r < r1; r++) {
             const uint32_t* s = page.mem_row(r);
+            if (!tmp.empty()) {
+                std::copy(s, s + dst.h, tmp.begin());
+                int y1 = std::min(shift.y1, dst.h);
+                for (int j = std::max(shift.y0, 0); j < y1; j++)
+                    tmp[(size_t)j] = j + shift.dy < y1 ? s[j + shift.dy] : shift.ground->at(0, j);
+                s = tmp.data();
+            }
             uint32_t* d = dst.mem_row(r);
             if (a <= 0 || r < m.y0 || r >= m.y1 || j1 <= j0) {
                 scrim_row(s, d, 0, dst.h, color, scrim_a);
@@ -977,7 +1005,7 @@ void scrim_shifted_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer,
             scrim_row(s, d, j1, dst.h, color, scrim_a);
         }
     } else {
-        scrim_shifted(page, layer, dst, color, scrim_a, p, dy, a);
+        scrim_shifted(page, layer, dst, color, scrim_a, p, dy, a, false, shift);
     }
 }
 
@@ -1035,13 +1063,25 @@ void scrim_coverage_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer
 
 template <class F, class L>
 void scrim_shifted(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, uint32_t color,
-                   int scrim_a, Rect p, int dy, int a, bool motion)
+                   int scrim_a, Rect p, int dy, int a, bool motion, const PageShift<F, L>& shift)
 {
     if constexpr (std::is_same_v<L, Rot>) {
-        scrim_shifted_rows(page, layer, dst, color, scrim_a, p, dy, a, 0, dst.w);
+        scrim_shifted_rows(page, layer, dst, color, scrim_a, p, dy, a, 0, dst.w, shift);
     } else if constexpr (!std::is_same_v<F, R565>) {
         prof::Scope ps(prof::ScrimShifted);
-        scrim(page, dst, color, scrim_a);
+        if (shift.ground && shift.dy > 0) {
+            using T = typename F::T;
+            T v = F::pack(color);
+            std::vector<T> fill;
+            for (int y = 0; y < dst.h; y++) {
+                const T* s = shift_row(page, shift, y, fill);
+                T* d = dst.row(y);
+                for (int x = 0; x < dst.w; x++)
+                    d[x] = scrim_a <= 0 ? s[x] : scrim_a >= 256 ? v : F::blend(s[x], v, scrim_a);
+            }
+        } else {
+            scrim(page, dst, color, scrim_a);
+        }
         blend_shifted(layer, dst, p, dy, a);
     } else {
         prof::Scope ps(prof::ScrimShifted);
@@ -1055,9 +1095,9 @@ void scrim_shifted(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, cons
         int y0 = q.empty() || a <= 0 ? 0 : std::max(q.y0 + dy, 0);
         int y1 = q.empty() || a <= 0 ? 0 : std::min(q.y1 + dy, dst.h);
         if (motion)
-            scrim_shifted565<true>(page, layer, dst, v, sa, la, q, y0, y1, dy);
+            scrim_shifted565<true>(page, layer, dst, v, sa, la, q, y0, y1, dy, shift);
         else
-            scrim_shifted565<false>(page, layer, dst, v, sa, la, q, y0, y1, dy);
+            scrim_shifted565<false>(page, layer, dst, v, sa, la, q, y0, y1, dy, shift);
     }
 }
 
@@ -1074,7 +1114,222 @@ void coverage_scaled(const SurfaceT<F, L>& layer, const uint8_t* mask, const Sur
                      int cx, int cy, uint32_t color, int a, bool motion)
 {
     prof::Scope ps(prof::Coverage);
-    coverage_impl(layer, std::is_same_v<F, R565> ? mask : nullptr, dst, p, scale, cx, cy, color, a, motion);
+    coverage_impl(layer, mask, dst, p, scale, cx, cy, color, a, motion);
+}
+
+bool homography_fx(const double* inv, HomographyFx& out)
+{
+    double s = 0;
+    for (int x : {0, kPortraitW})
+        for (int y : {0, kPortraitH})
+            s = std::max(s, std::fabs(inv[6] * x + inv[7] * y + inv[8]));
+    if (!(s > 0))
+        return false;
+    for (int i = 0; i < 9; i++) {
+        double v = inv[i] / s * (double)(1 << 30);
+        if (!(std::fabs(v) < 1e17))
+            return false;
+        out.m[i] = std::llround(v);
+    }
+    return true;
+}
+
+namespace {
+
+void homography_at(int64_t U, int64_t V, int64_t W, int& u, int& v)
+{
+    constexpr int64_t kFar = (int64_t)1 << 30;
+    if (W <= 0) {
+        u = v = (int)-kFar;
+        return;
+    }
+    u = (int)std::clamp(U * 65536 / W, -kFar, kFar);
+    v = (int)std::clamp(V * 65536 / W, -kFar, kFar);
+}
+
+Rect homography_bounds(const double* h, Rect r)
+{
+    double x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
+    for (int px : {r.x0, r.x1})
+        for (int py : {r.y0, r.y1}) {
+            double w = h[6] * px + h[7] * py + h[8];
+            if (!(w > 0))
+                return kScreen;
+            double u = (h[0] * px + h[1] * py + h[2]) / w, v = (h[3] * px + h[4] * py + h[5]) / w;
+            x0 = std::min(x0, u);
+            y0 = std::min(y0, v);
+            x1 = std::max(x1, u);
+            y1 = std::max(y1, v);
+        }
+    auto clamp = [](double v) { return std::clamp(v, -1e6, 1e6); };
+    return Rect{(int)std::floor(clamp(x0)), (int)std::floor(clamp(y0)), (int)std::ceil(clamp(x1)),
+                (int)std::ceil(clamp(y1))}
+        .grow(1);
+}
+
+}
+
+void homography_span(const HomographyFx& h, int y, int x0, int n, int* u, int* v)
+{
+    const int64_t* m = h.m;
+    int64_t yy = 2 * (int64_t)y + 1, xx = 2 * (int64_t)x0 + 1;
+    int64_t U = m[0] * xx + m[1] * yy + 2 * m[2], V = m[3] * xx + m[4] * yy + 2 * m[5],
+            W = m[6] * xx + m[7] * yy + 2 * m[8];
+    int ua, va;
+    homography_at(U, V, W, ua, va);
+    for (int i = 0; i < n; i += 16) {
+        U += m[0] * 32;
+        V += m[3] * 32;
+        W += m[6] * 32;
+        int ub, vb;
+        homography_at(U, V, W, ub, vb);
+        int k = std::min(16, n - i);
+        for (int j = 0; j < k; j++) {
+            u[i + j] = ua + (int)(((int64_t)(ub - ua) * j) >> 4);
+            v[i + j] = va + (int)(((int64_t)(vb - va) * j) >> 4);
+        }
+        ua = ub;
+        va = vb;
+    }
+}
+
+namespace {
+
+template <bool Green, class F, class L>
+void homography_impl(const SurfaceT<F, L>& layer, const uint8_t* mask, const SurfaceT<F, L>& dst, Rect p,
+                     const HomographyFx& hf, Rect b, uint32_t color, int a, bool nearest, bool motion)
+{
+    using T = typename F::T;
+    auto green = [](T v) -> uint32_t { return F::unpack(v) >> 8 & 0xFF; };
+    auto tap = [&](int x, int y) -> uint32_t {
+        if (x < p.x0 || x >= p.x1 || y < p.y0 || y >= p.y1)
+            return 0;
+        if constexpr (Green)
+            return green(layer.row(y)[x]);
+        else
+            return mask[layer.index(x, y)];
+    };
+    T c = F::pack(color);
+    int ax = b.x0 & ~15, n = b.x1 - ax;
+    size_t rs = layer.index(0, 1) - layer.index(0, 0);
+    Taps us(n), vs(n);
+    for (int y = b.y0; y < b.y1; y++) {
+        homography_span(hf, y, ax, n, &us[0], &vs[0]);
+        T* row = dst.row(y) + ax;
+        for (int i = b.x0 - ax; i < n; i++) {
+            int cov;
+            if (nearest) {
+                cov = (int)tap(us[i] >> 16, vs[i] >> 16);
+            } else {
+                int uu = us[i] - 32768, vv = vs[i] - 32768, si = uu >> 16, sj = vv >> 16;
+                if (si < p.x0 - 1 || si >= p.x1 || sj < p.y0 - 1 || sj >= p.y1)
+                    continue;
+                uint32_t c00, c10, c01, c11;
+                if (si >= p.x0 && si + 1 < p.x1 && sj >= p.y0 && sj + 1 < p.y1) {
+                    if constexpr (Green) {
+                        const T* r0 = layer.row(sj) + si;
+                        const T* r1 = layer.row(sj + 1) + si;
+                        c00 = green(r0[0]);
+                        c10 = green(r0[1]);
+                        c01 = green(r1[0]);
+                        c11 = green(r1[1]);
+                    } else {
+                        const uint8_t* m0 = mask + layer.index(si, sj);
+                        c00 = m0[0];
+                        c10 = m0[1];
+                        c01 = m0[rs];
+                        c11 = m0[rs + 1];
+                    }
+                } else {
+                    c00 = tap(si, sj);
+                    c10 = tap(si + 1, sj);
+                    c01 = tap(si, sj + 1);
+                    c11 = tap(si + 1, sj + 1);
+                }
+                if (!(c00 | c10 | c01 | c11))
+                    continue;
+                uint32_t fu = ((uint32_t)(uu & 0xFFFF) + 8) >> 4, fv = ((uint32_t)(vv & 0xFFFF) + 8) >> 4;
+                cov = (int)(((c00 * (4096 - fu) + c10 * fu) * (4096 - fv) + (c01 * (4096 - fu) + c11 * fu) * fv +
+                             (1u << 23)) >>
+                            24);
+            }
+            if (!cov)
+                continue;
+            int aa = (cov + 1) * a >> 8;
+            if constexpr (std::is_same_v<F, R565>)
+                row[i] = motion ? lerp565(row[i], c, alpha5(aa)) : blend565(row[i], c, aa);
+            else
+                row[i] = F::blend(row[i], c, aa);
+        }
+    }
+}
+
+}
+
+template <class F, class L>
+void coverage_homography(const SurfaceT<F, L>& layer, const uint8_t* mask, const SurfaceT<F, L>& dst, Rect p,
+                         const double* h, uint32_t color, int a, bool nearest, bool motion)
+{
+    static_assert(!std::is_same_v<L, Rot>);
+    prof::Scope ps(prof::Coverage);
+    p = p.intersect(layer.rect());
+    if (p.empty() || a <= 0)
+        return;
+    double inv[9];
+    HomographyFx hf;
+    if (!mat3_invert(h, inv) || !homography_fx(inv, hf))
+        return;
+    Rect b = homography_bounds(h, nearest ? p : p.grow(1)).intersect(dst.rect());
+    if (b.empty())
+        return;
+    if (mask)
+        homography_impl<false>(layer, mask, dst, p, hf, b, color, a, nearest, motion);
+    else
+        homography_impl<true>(layer, mask, dst, p, hf, b, color, a, nearest, motion);
+}
+
+template <class F, class L>
+void image_homography(const ImageT<F, L>& img, Rect at, const SurfaceT<F, L>& dst, Rect clip, const double* h,
+                      bool nearest)
+{
+    static_assert(!std::is_same_v<L, Rot>);
+    if (at.empty() || img.w != at.x1 - at.x0 || img.h != at.y1 - at.y0)
+        return;
+    double inv[9];
+    HomographyFx hf;
+    if (!mat3_invert(h, inv) || !homography_fx(inv, hf))
+        return;
+    Rect b = homography_bounds(h, at).intersect(clip).intersect(dst.rect());
+    if (b.empty())
+        return;
+    using T = typename F::T;
+    auto tap = [&](int x, int y) -> uint32_t { return F::unpack(img.at(x - at.x0, y - at.y0)); };
+    int ax = b.x0 & ~15, n = b.x1 - ax;
+    Taps us(n), vs(n);
+    for (int y = b.y0; y < b.y1; y++) {
+        homography_span(hf, y, ax, n, &us[0], &vs[0]);
+        T* row = dst.row(y) + ax;
+        for (int i = b.x0 - ax; i < n; i++) {
+            int pu = us[i] >> 16, pv = vs[i] >> 16;
+            if (pu < at.x0 || pu >= at.x1 || pv < at.y0 || pv >= at.y1)
+                continue;
+            if (nearest || at.x1 - at.x0 < 2 || at.y1 - at.y0 < 2) {
+                row[i] = F::pack(tap(pu, pv));
+                continue;
+            }
+            int uu = us[i] - 32768, vv = vs[i] - 32768;
+            int si = std::clamp(uu >> 16, at.x0, at.x1 - 2), sj = std::clamp(vv >> 16, at.y0, at.y1 - 2);
+            uint32_t fu = uu >> 16 < at.x0 ? 0 : uu >> 16 >= at.x1 - 1 ? 4096 : ((uint32_t)(uu & 0xFFFF) + 8) >> 4;
+            uint32_t fv = vv >> 16 < at.y0 ? 0 : vv >> 16 >= at.y1 - 1 ? 4096 : ((uint32_t)(vv & 0xFFFF) + 8) >> 4;
+            uint32_t c00 = tap(si, sj), c10 = tap(si + 1, sj), c01 = tap(si, sj + 1), c11 = tap(si + 1, sj + 1);
+            auto mix = [&](int sh) -> uint32_t {
+                uint32_t p00 = c00 >> sh & 0xFF, p10 = c10 >> sh & 0xFF, p01 = c01 >> sh & 0xFF, p11 = c11 >> sh & 0xFF;
+                return ((p00 * (4096 - fu) + p10 * fu) * (4096 - fv) + (p01 * (4096 - fu) + p11 * fu) * fv + (1u << 23)) >>
+                       24;
+            };
+            row[i] = F::pack(mix(16) << 16 | mix(8) << 8 | mix(0));
+        }
+    }
 }
 
 template <class F, class L>
@@ -1090,7 +1345,7 @@ void blend_scaled(const SurfaceT<F, L>& layer, const uint8_t* mask, const Surfac
                   int cy, uint32_t ground, int a, bool motion)
 {
     prof::Scope ps(prof::BlendScaled);
-    blend_scaled_impl(layer, std::is_same_v<F, R565> ? mask : nullptr, dst, scale, cx, cy, ground, a, motion);
+    blend_scaled_impl(layer, mask, dst, scale, cx, cy, ground, a, motion);
 }
 
 template <class F, class L>
@@ -1361,7 +1616,7 @@ void blend_band(const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, Rect b, 
     template void scrim<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, Rect, uint32_t, int, bool);               \
     template void blend_shifted<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, Rect, int, int, bool);            \
     template void scrim_shifted<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, const SurfaceT<F, L>&, uint32_t,  \
-                                      int, Rect, int, int, bool);                                                     \
+                                      int, Rect, int, int, bool, const PageShift<F, L>&);                             \
     template void coverage_scaled<F, L>(const SurfaceT<F, L>&, const uint8_t*, const SurfaceT<F, L>&, Rect, fx, int,  \
                                         int, uint32_t, int, bool);                                                    \
     template void blend_scaled<F, L>(const SurfaceT<F, L>&, const uint8_t*, const SurfaceT<F, L>&, fx, int, int,      \
@@ -1381,7 +1636,7 @@ void blend_band(const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, Rect b, 
                                    int, bool);                                                                        \
     template void blend_band<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, Rect, int, int);                   \
     template void scrim_shifted_rows<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, const SurfaceT<F, L>&,       \
-                                           uint32_t, int, Rect, int, int, int, int);                                  \
+                                           uint32_t, int, Rect, int, int, int, int, const PageShift<F, L>&);          \
     template void scrim_coverage_rows<F, L>(const SurfaceT<F, L>&, const SurfaceT<F, L>&, const SurfaceT<F, L>&,      \
                                             uint32_t, int, Rect, fx, int, int, uint32_t, int, int, int);
 
@@ -1398,5 +1653,13 @@ FD_COMPOSE(X888, Rows)
 FD_COMPOSE(R565, Rows)
 FD_COMPOSE_KEYED(X888, Rot)
 FD_COMPOSE_KEYED(X888, Rows)
+
+#define FD_COMPOSE_ROWS(F, L)                                                                                         \
+    template void coverage_homography<F, L>(const SurfaceT<F, L>&, const uint8_t*, const SurfaceT<F, L>&, Rect,       \
+                                            const double*, uint32_t, int, bool, bool);                              \
+    template void image_homography<F, L>(const ImageT<F, L>&, Rect, const SurfaceT<F, L>&, Rect, const double*, bool);
+
+FD_COMPOSE_ROWS(X888, Rows)
+FD_COMPOSE_ROWS(R565, Rows)
 
 }

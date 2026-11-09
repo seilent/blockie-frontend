@@ -12,6 +12,7 @@ namespace fd {
 
 constexpr Rect kNoClip{-(1 << 28), -(1 << 28), 1 << 28, 1 << 28};
 constexpr int kFrameDepth = 4;
+constexpr size_t kScratchCap = 2 * (size_t)kPortraitW * kPortraitH * (sizeof(Pix) + 1);
 
 enum class OpKind : uint8_t { Quad, Fill, Strip, Group, End, Paint };
 enum class Sample : uint8_t { Nearest, Linear };
@@ -93,12 +94,29 @@ struct LayerRef {
     const MipLayer* mip = nullptr;
 };
 
+struct RetainedOps {
+    static constexpr int kMax = 8;
+    Op ops[kMax];
+    int n = 0;
+
+    Op* add(OpKind k)
+    {
+        if (n >= kMax)
+            return nullptr;
+        Op& o = ops[n++];
+        o = Op{};
+        o.kind = k;
+        return &o;
+    }
+};
+
 struct FrameSources {
     virtual ~FrameSources() = default;
     virtual bool layer(uint16_t, LayerRef&) const { return false; }
     virtual bool strip(uint16_t, int, uint32_t&, int&) const { return false; }
     virtual bool damage(uint16_t, uint32_t, uint32_t, Rect&) const { return false; }
     virtual bool paint(const Op&, Canvas&) const { return false; }
+    virtual bool retained(const Op&, RetainedOps&) const { return false; }
 };
 
 struct FrameScratch {
@@ -115,6 +133,8 @@ struct FrameScratch {
 };
 
 Rect op_bounds(const Op& o);
+int frame_group_end(const Frame& f, int i, int i1);
+bool frame_over_scratch(const Frame& f);
 Rect frame_damage(const Frame& prev, const Frame& next, const FrameSources& src);
 bool frame_draw(const Frame& f, Canvas& c, const FrameSources& src, FrameScratch& sc);
 

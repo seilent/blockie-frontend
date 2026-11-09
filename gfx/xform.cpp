@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "../core/curves.h"
+
 namespace fd {
 
 void mat3_mul(const double* a, const double* b, double* out)
@@ -27,10 +29,14 @@ bool mat3_invert(const double* a, double* out)
     return true;
 }
 
-void Xform::inverse(double* m) const
+void Xform::inverse(double* m, bool kernel) const
 {
     const double kPi = 3.14159265358979323846;
     double ang = angle / 65536.0 * kPi / 180.0, c = std::cos(ang), s = std::sin(ang);
+    if (kernel) {
+        c = cos_deg(angle) / 65536.0;
+        s = sin_deg(angle) / 65536.0;
+    }
     double h = hinge, dd = d ? d : 1, sc = scale / 65536.0, px = x / 65536.0, py = y / 65536.0, es = eye * s / dd;
     double sm[9] = {1 / sc, 0, -px / sc, 0, 1 / sc, -py / sc, 0, 0, 1};
     double ay[9] = {1 - h * s / dd, 0, h * c - h + h * h * s / dd, -es, c, es * h, -s / dd, 0, c + h * s / dd};
@@ -38,10 +44,10 @@ void Xform::inverse(double* m) const
     mat3_mul(swivel ? ax : ay, sm, m);
 }
 
-void Xform::forward(double* m) const
+void Xform::forward(double* m, bool kernel) const
 {
     double i[9];
-    inverse(i);
+    inverse(i, kernel);
     if (!mat3_invert(i, m))
         std::fill(m, m + 9, 0.0);
 }

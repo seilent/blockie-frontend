@@ -137,13 +137,17 @@ public:
         clip_ = clip_.intersect(bound_);
     }
     Rect bound() const { return bound_; }
+    void set_keyed(bool on) { keyed_ = on; }
 
     void fill(Rect r, uint32_t rgb);
     void ground(Rect r, uint32_t rgb);
     void blend(Rect r, uint32_t rgb, int a256);
     void vgradient(Rect r, uint32_t base, uint32_t over, int a_top, int a_bottom, int y_top, int y_bottom);
     void blit(const ImageT<F, L>& img, int x, int y, int a256 = 256);
+    void blit_cov(const ImageT<F, L>& img, const uint8_t* cov, int x, int y, int a256);
     void coverage(const uint8_t* cov, int w, int h, int x, int y, uint32_t rgb, int a256);
+    void spans(const uint8_t* rows, int h, int x, int y, uint32_t rgb, int a256);
+    void coverage_turn(const uint8_t* cov, int w, int h, int x, int y, uint32_t rgb, int a256);
     void fill_aa(Rect64 r, uint32_t rgb, int a256);
     void frame_aa(Rect64 outer, Rect64 inner, uint32_t rgb, int a256);
     void blit_bilinear(const ImageT<F, L>& img, Rect64 r, int a256, bool keep = false);
@@ -160,7 +164,11 @@ private:
     uint8_t* mask_ = nullptr;
     Rect bound_ = kScreen;
     Rect clip_ = kScreen;
+    bool keyed_ = false;
 };
+
+template <class F, class L>
+void tile_into(const ImageT<F, L>& src, int w, int h, int angle, ImageT<F, L>& out, std::vector<uint8_t>& cov);
 
 #ifdef FD_ROT
 Rect mem_rect(Rect portrait);

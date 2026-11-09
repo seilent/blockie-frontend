@@ -51,6 +51,10 @@ hb_url=https://github.com/harfbuzz/harfbuzz/releases/download/${hb_ver}/harfbuzz
 hb_sha=16070d77cfc4ba1f1e7327e83bf9b3f55898081cabdb94e56a33e04fc8874eae
 xdg_url=https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/1.41/stable/xdg-shell/xdg-shell.xml
 xdg_sha=f241ab95c262eb45af6507bf0178b8dcd88d5e1cc8fc6ec4a9944d9e5b15ac98
+wlr_rev=1106a4a1c57562ddd438c547da4c0d6dc150d624
+wlr_url=https://gitlab.freedesktop.org/wlroots/wlr-protocols/-/raw/$wlr_rev/unstable/wlr-layer-shell-unstable-v1.xml
+wlr_sha=87e0b9c837aecd6977f76f3c47d73088b7159871f5d979dc1840f6cadb5e2ed8
+wl_proto=(xdg-shell wlr-layer-shell-unstable-v1)
 sqlite_ver=3540100
 sqlite_year=2026
 sqlite_url=https://www.sqlite.org/$sqlite_year/sqlite-amalgamation-$sqlite_ver.zip
@@ -76,6 +80,8 @@ shotobj=$out/shot/obj
 imgobj=$out/image/obj
 tsanobj=$out/tsan/obj
 fonts_dir=$out/fonts
+wl_cflags=
+wl_libs=
 
 fetch() {
     local url=$1 dst=$2 sha=$3
@@ -166,6 +172,8 @@ BEGIN { n = 0 }
 NF == 0 { next }
 NF != 3 { printf "build.sh: tokens-blockie.txt bad line %s\n", $0 > "/dev/stderr"; bad = 1; exit 1 }
 {
+    if ($1 in seen) { printf "build.sh: tokens-blockie.txt duplicate %s\n", $1 > "/dev/stderr"; bad = 1; exit 1 }
+    seen[$1] = 1
     name[n] = $1; value[n] = $2; unit[n] = $3
     if ($2 ~ /^-?[0-9]+(\.[0-9]+)?$/) {
         v = $2 * 65536
@@ -213,7 +221,7 @@ END {
     print ""
     print "}"
 }
-' "$root/ui/tokens-blockie.txt" > "$gen/tokens-blockie.h.tmp"
+' "$root/ui/tokens-blockie.txt" > "$gen/tokens-blockie.h.tmp" || { rm -f "$gen/tokens-blockie.h.tmp"; exit 1; }
     if ! cmp -s "$gen/tokens-blockie.h.tmp" "$root/ui/tokens-blockie.h"; then
         cp "$gen/tokens-blockie.h.tmp" "$root/ui/tokens-blockie.h"
     fi
@@ -289,6 +297,40 @@ build_deps_obj() {
 
 dep_objs() {
     printf '%s\n' "$depobj/harfbuzz.o" "$depobj"/fb_*.o "$depobj/spng.o" "$depobj"/zlib_*.o "$depobj/qrcodegen.o"
+    local p
+    for p in "${wl_proto[@]}"; do
+        echo "$depobj/wl_$p.o"
+    done
+}
+
+wl_gen() {
+    command -v wayland-scanner > /dev/null || { echo "build.sh: wayland-scanner not found" >&2; exit 1; }
+    pkg-config --exists wayland-client || { echo "build.sh: wayland-client not found" >&2; exit 1; }
+    mkdir -p "$gen" "$cache"
+    fetch "$xdg_url" "$cache/xdg-shell-1.41.xml" "$xdg_sha"
+    fetch "$wlr_url" "$cache/wlr-layer-shell-${wlr_rev:0:8}.xml" "$wlr_sha"
+    cp "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell.xml"
+    sed 's/<arg name="namespace"/<arg name="layer_namespace"/' "$cache/wlr-layer-shell-${wlr_rev:0:8}.xml" \
+        > "$gen/wlr-layer-shell-unstable-v1.xml"
+    wl_cflags=$(pkg-config --cflags wayland-client)
+    wl_libs=$(pkg-config --libs wayland-client)
+    local p f
+    for p in "${wl_proto[@]}"; do
+        wayland-scanner client-header "$gen/$p.xml" "$gen/$p-client-protocol.h.tmp" &&
+            wayland-scanner private-code "$gen/$p.xml" "$gen/$p-protocol.c.tmp" ||
+            { echo "build.sh: wayland-scanner $p failed" >&2; exit 1; }
+        for f in "$gen/$p-client-protocol.h" "$gen/$p-protocol.c"; do
+            cmp -s "$f.tmp" "$f" || cp "$f.tmp" "$f"
+            rm -f "$f.tmp"
+        done
+    done
+    toolver=$("$cc" --version | head -n 1)
+    for p in "${wl_proto[@]}"; do
+        pool "$depobj/wl_$p.o" "$cc" -O2 -w $wl_cflags $appcflags "$gen/$p-protocol.c"
+    done
+    drain
+    ((fail)) && { echo "build.sh: wayland protocol objects failed" >&2; exit 1; }
+    return 0
 }
 
 cpp_extra() {
@@ -296,6 +338,7 @@ cpp_extra() {
         gfx/stb.cpp) echo "-w" ;;
         gfx/bidi.cpp) echo "-I$fb_dir/lib" ;;
         gfx/shape.cpp) echo "-I$hb_dir/src" ;;
+        gfx/wayland.cpp) echo "-I$gen $wl_cflags" ;;
         blockie/scale.cpp) echo "-O3" ;;
     esac
 }
@@ -323,26 +366,19 @@ build_generic() {
     mkdir -p "$out/generic"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/generic/blockie-generic.tmp" || return 1
+    "$cxx" "${gobjs[@]}" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/generic/blockie-generic.tmp" ||
+        return 1
     mv "$out/generic/blockie-generic.tmp" "$out/generic/blockie-generic"
     echo "build.sh: $out/generic/blockie-generic"
 }
 
 build_app() {
-    command -v wayland-scanner > /dev/null || { echo "build.sh: wayland-scanner not found" >&2; exit 1; }
-    pkg-config --exists wayland-client || { echo "build.sh: wayland-client not found" >&2; exit 1; }
     build_sqlite_obj || return 1
-    mkdir -p "$gen"
-    fetch "$xdg_url" "$cache/xdg-shell-1.41.xml" "$xdg_sha"
-    wayland-scanner client-header "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-client-protocol.h"
-    wayland-scanner private-code "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell-protocol.c"
     pkg-config --exists libcurl || { echo "build.sh: libcurl not found" >&2; return 1; }
     pkg-config --exists dbus-1 || { echo "build.sh: dbus-1 not found" >&2; return 1; }
-    local wl_cflags wl_libs xkb_cflags xkb_libs curl_cflags curl_libs dbus_cflags dbus_libs
+    local xkb_cflags xkb_libs curl_cflags curl_libs dbus_cflags dbus_libs
     dbus_cflags=$(pkg-config --cflags dbus-1)
     dbus_libs=$(pkg-config --libs dbus-1)
-    wl_cflags=$(pkg-config --cflags wayland-client)
-    wl_libs=$(pkg-config --libs wayland-client)
     curl_cflags=$(pkg-config --cflags libcurl)
     curl_libs=$(pkg-config --libs libcurl)
     xkb_cflags=
@@ -354,9 +390,6 @@ build_app() {
     else
         echo "build.sh: keyboard via raw evdev keycodes (xkbcommon not found)"
     fi
-    toolver=$("$cc" --version | head -n 1)
-    pool "$appobj/xdg-shell-protocol.o" "$cc" -O2 -w $wl_cflags $appcflags "$gen/xdg-shell-protocol.c"
-    drain
     toolver=$("$cxx" --version | head -n 1)
     local s extra
     local -a gobjs=()
@@ -396,9 +429,9 @@ build_app() {
     done
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
     pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
-    pool "$appobj/present_wl.o" "$cxx" "${gflags[@]}" $wl_cflags $xkb_cflags $appcflags -I"$gen" \
-        "$root/blockie/present_wl.cpp"
-    pool "$appobj/main.o" "$cxx" "${gflags[@]}" -pthread $wl_cflags $xkb_cflags $appcflags -I"$gen" "$root/blockie/main.cpp"
+    pool "$appobj/wl_keys.o" "$cxx" "${gflags[@]}" $xkb_cflags $appcflags "$root/blockie/wl_keys.cpp"
+    pool "$appobj/frame_gate.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/frame_gate.cpp"
+    pool "$appobj/main.o" "$cxx" "${gflags[@]}" -pthread $appcflags "$root/blockie/main.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/app"
@@ -412,8 +445,8 @@ build_app() {
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
         "$appobj/leftmove.o" \
-        "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/present_wl.o" "$appobj/main.o" \
-        "$appobj/xdg-shell-protocol.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
+        "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/wl_keys.o" "$appobj/frame_gate.o" \
+        "$appobj/main.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
@@ -587,6 +620,10 @@ build_input_test() {
 }
 
 build_motion_test() {
+    if grep -n 'motion_pivot' "$root/blockie/leftmove.cpp" "$root/blockie/leftmove.h"; then
+        echo "build.sh: leftmove reads a motion.pivot token" >&2
+        return 1
+    fi
     toolver=$("$cxx" --version | head -n 1)
     local s
     for s in core/curves.cpp gfx/canvas.cpp; do
@@ -637,6 +674,35 @@ build_motion_test() {
         "$out/motion/blockie-motion-test" && "$out/motion/blockie-glide-test" && "$out/motion/blockie-slide-test" &&
         "$out/motion/blockie-leftmove-test" &&
         "$out/motion/blockie-pops-test"
+}
+
+build_gate_test() {
+    toolver=$("$cxx" --version | head -n 1)
+    local xkb_cflags= xkb_libs= xkb_test=
+    if pkg-config --exists xkbcommon; then
+        xkb_cflags="-DBLOCKIE_HAVE_XKB $(pkg-config --cflags xkbcommon)"
+        xkb_test="-DBLOCKIE_KEYS_XKB $(pkg-config --cflags xkbcommon)"
+        xkb_libs=$(pkg-config --libs xkbcommon)
+        echo "build.sh: key test via xkbcommon"
+    else
+        echo "build.sh: key test via raw evdev keycodes (xkbcommon not found)"
+    fi
+    pool "$testobj/frame_gate.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/frame_gate.cpp"
+    pool "$testobj/frame_gate_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/frame_gate_test.cpp"
+    pool "$testobj/wl_keys.o" "$cxx" "${launchflags[@]}" $xkb_cflags $appcflags "$root/blockie/wl_keys.cpp"
+    pool "$testobj/wl_keys_test.o" "$cxx" "${launchflags[@]}" $xkb_test $appcflags \
+        "$root/blockie/tests/wl_keys_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/gate"
+    "$cxx" "$testobj/frame_gate.o" "$testobj/frame_gate_test.o" $appldflags -o "$out/gate/blockie-gate-test.tmp" ||
+        return 1
+    mv "$out/gate/blockie-gate-test.tmp" "$out/gate/blockie-gate-test"
+    "$cxx" "$testobj/wl_keys.o" "$testobj/wl_keys_test.o" $appldflags $xkb_libs -o "$out/gate/blockie-keys-test.tmp" ||
+        return 1
+    mv "$out/gate/blockie-keys-test.tmp" "$out/gate/blockie-keys-test"
+    echo "build.sh: $out/gate/blockie-gate-test $out/gate/blockie-keys-test"
+    "$out/gate/blockie-gate-test" && "$out/gate/blockie-keys-test"
 }
 
 build_bt_model_test() {
@@ -794,26 +860,26 @@ build_vtext_test() {
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
     "$cxx" "${gobjs[@]}" "$testobj/vtext.o" "$testobj/theme.o" "$testobj/vtext_test.o" "${dobjs[@]}" $appldflags \
-        -lpthread -lm -o "$out/vtext/blockie-vtext-test.tmp" || return 1
+        $wl_libs -lpthread -lm -o "$out/vtext/blockie-vtext-test.tmp" || return 1
     mv "$out/vtext/blockie-vtext-test.tmp" "$out/vtext/blockie-vtext-test"
     "$cxx" "${gobjs[@]}" "$testobj/t9.o" "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" \
-        "$testobj/theme.o" "$testobj/t9_test.o" "${dobjs[@]}" $appldflags -lpthread -lm \
+        "$testobj/theme.o" "$testobj/t9_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
         -o "$out/vtext/blockie-t9-test.tmp" || return 1
     mv "$out/vtext/blockie-t9-test.tmp" "$out/vtext/blockie-t9-test"
     "$cxx" "${gobjs[@]}" "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
-        "$testobj/selector_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-selector-test.tmp" ||
-        return 1
+        "$testobj/selector_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/vtext/blockie-selector-test.tmp" || return 1
     mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
     "$cxx" "${gobjs[@]}" "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/theme.o" "$testobj/zones_g.o" \
-        "$testobj/settings_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" ||
-        return 1
+        "$testobj/settings_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/vtext/blockie-settings-test.tmp" || return 1
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
     "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
         "$testobj/leftmove.o" \
         "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
-        "$testobj/homeflow_test.o" "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/vtext/blockie-homeflow-test.tmp" ||
-        return 1
+        "$testobj/homeflow_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/vtext/blockie-homeflow-test.tmp" || return 1
     mv "$out/vtext/blockie-homeflow-test.tmp" "$out/vtext/blockie-homeflow-test"
     echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test" \
         "$out/vtext/blockie-settings-test $out/vtext/blockie-homeflow-test"
@@ -851,7 +917,7 @@ build_powermenu_test() {
     mkdir -p "$out/powermenu"
     local -a dobjs=()
     mapfile -t dobjs < <(dep_objs)
-    "$cxx" "${gobjs[@]}" "${pobjs[@]}" "$testobj/powermenu_test.o" "${dobjs[@]}" $appldflags -lpthread -lm \
+    "$cxx" "${gobjs[@]}" "${pobjs[@]}" "$testobj/powermenu_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
         -o "$out/powermenu/blockie-powermenu-test.tmp" || return 1
     mv "$out/powermenu/blockie-powermenu-test.tmp" "$out/powermenu/blockie-powermenu-test"
     echo "build.sh: $out/powermenu/blockie-powermenu-test"
@@ -896,7 +962,7 @@ build_shot() {
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
         "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
         "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/shot.o" \
-        "${dobjs[@]}" $appldflags -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
+        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
     echo "build.sh: fonts $fonts_dir"
@@ -924,15 +990,20 @@ case $target in
     all | generic | app | shot)
         deps
         gen_tokens
+        wl_gen
         build_deps_obj
         ((fail)) && { echo "build.sh: dependency objects failed" >&2; exit 1; }
+        ;;
+    test)
+        gen_tokens
+        wl_gen
         ;;
 esac
 [[ $target == generic || $target == all ]] && { build_generic || { echo "build.sh: generic profile failed" >&2; exit 1; }; }
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }

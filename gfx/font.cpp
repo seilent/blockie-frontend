@@ -27,6 +27,7 @@
 #include "../lib/util.h"
 #include "fontkey.h"
 #include "shape.h"
+#include "turn.h"
 
 namespace fd {
 
@@ -37,6 +38,8 @@ namespace {
 constexpr size_t kJobCap = 256;
 constexpr size_t kJobGrow = 256;
 constexpr int kDirect = 0xFE;
+constexpr int kTurnCw = 0xFD;
+constexpr int kTurnCcw = 0xFC;
 constexpr int kWarmNice = 10;
 constexpr int kPuts = 96;
 constexpr unsigned long kSquashfsMagic = 0x73717368;
@@ -78,6 +81,8 @@ uint32_t next_cp(const char*& s)
 int key_face(uint64_t k) { return (int)((k >> 40) & 0xFFFF); }
 int key_px(uint64_t k) { return (int)((k >> 24) & 0xFFFF); }
 int key_gid(uint64_t k) { return (int)(k & 0xFFFFFF); }
+
+int direct_bucket(int angle) { return angle > 0 ? kTurnCw : angle < 0 ? kTurnCcw : kDirect; }
 
 bool printable(const char* s)
 {
@@ -573,11 +578,19 @@ Fonts::Glyph Fonts::make(int fi, int px, int gid, float factor)
     return g;
 }
 
-GlyphRaster Fonts::direct(int fi, int px, int gid)
+Fonts::Glyph Fonts::turned(int fi, int px, int gid, int angle)
+{
+    Glyph g;
+    if (!turn_glyph(face(fi).info, px, gid, angle, g.w, g.h, g.xoff, g.yoff, g.rot))
+        g.w = g.h = 0;
+    return g;
+}
+
+GlyphRaster Fonts::direct(int fi, int px, int gid, int angle)
 {
     direct_rasters_++;
-    Glyph g = make(fi, px, gid, 1.0f);
-    return {g.w, g.h, g.xoff, g.yoff, std::move(g.rot)};
+    Glyph g = angle ? turned(fi, px, gid, angle) : make(fi, px, gid, 1.0f);
+    return {g.w, g.h, g.xoff, g.yoff, std::move(g.rot), angle != 0};
 }
 
 bool Fonts::glyph_box(int fi, int px, int gid, Rect& box)
@@ -592,33 +605,39 @@ bool Fonts::glyph_box(int fi, int px, int gid, Rect& box)
     return true;
 }
 
-void Fonts::ask_direct(int fi, int px, int gid)
+bool Fonts::direct_key(uint64_t key)
 {
-    if (th_.joinable())
-        ask(key_of(kDirect, fi, px, gid), Need::Predicted, false, false, -1, -1);
+    int b = key_bucket(key);
+    return b >= kTurnCcw && b <= kDirect;
 }
 
-bool Fonts::take_direct(int fi, int px, int gid, GlyphRaster& out)
+void Fonts::ask_direct(int fi, int px, int gid, int angle, Need n)
+{
+    if (th_.joinable())
+        ask(key_of(direct_bucket(angle), fi, px, gid), n, false, false, -1, -1);
+}
+
+bool Fonts::take_direct(int fi, int px, int gid, GlyphRaster& out, int angle)
 {
     if (!th_.joinable())
         return false;
-    uint64_t key = key_of(kDirect, fi, px, gid);
+    uint64_t key = key_of(direct_bucket(angle), fi, px, gid);
     std::lock_guard<std::mutex> lk(mu_);
     for (size_t i = 0; i < direct_done_.size(); i++)
         if (direct_done_[i].job.key == key) {
             Glyph& g = direct_done_[i].g;
-            out = {g.w, g.h, g.xoff, g.yoff, std::move(g.rot)};
+            out = {g.w, g.h, g.xoff, g.yoff, std::move(g.rot), angle != 0};
             direct_done_.erase(direct_done_.begin() + (long)i);
             return true;
         }
     return false;
 }
 
-void Fonts::drop_direct(int fi, int px, int gid)
+void Fonts::drop_direct(int fi, int px, int gid, int angle)
 {
     if (!th_.joinable())
         return;
-    uint64_t key = key_of(kDirect, fi, px, gid);
+    uint64_t key = key_of(direct_bucket(angle), fi, px, gid);
     std::lock_guard<std::mutex> lk(mu_);
     auto is = [key](const auto& v) { return v.key == key; };
     jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), is), jobs_.end());
@@ -695,7 +714,7 @@ Fonts::Glyph* Fonts::raster(Cache& c, uint64_t key, int fi, int px, int gid, flo
     return insert(c, key, make(fi, px, gid, factor), true);
 }
 
-Fonts::Glyph* Fonts::claim(Cache& c, uint64_t key, int fi, int px, int gid, float factor)
+Fonts::Glyph* Fonts::claim(Cache& c, uint64_t key, int fi, int px, int gid, float factor, bool* busy)
 {
     if (!th_.joinable())
         return raster(c, key, fi, px, gid, factor);
@@ -703,6 +722,10 @@ Fonts::Glyph* Fonts::claim(Cache& c, uint64_t key, int fi, int px, int gid, floa
     {
         std::unique_lock<std::mutex> lk(mu_);
         if (busy_on_ && busy_.key == key) {
+            if (busy) {
+                *busy = true;
+                return nullptr;
+            }
             waits_++;
             busy_nice_ = false;
             boost();
@@ -751,9 +774,16 @@ Fonts::Glyph* Fonts::glyph(int fi, int px, int gid, int x, int y, bool& pending,
         deferrals_++;
         return nullptr;
     }
+    bool busy = false;
+    Glyph* g = claim(plain_, key, fi, px, gid, 1.0f, budget_ > 0 ? &busy : nullptr);
+    if (busy) {
+        pending = true;
+        deferrals_++;
+        return nullptr;
+    }
     if (budget_ > 0)
         budget_--;
-    return claim(plain_, key, fi, px, gid, 1.0f);
+    return g;
 }
 
 int Fonts::press_buckets(int px)
@@ -784,15 +814,20 @@ Fonts::Glyph* Fonts::scaled(int fi, int px, int gid, int b, int x, int y, bool& 
         ask(got, whole ? Need::Visible : need_, whole || need_ == Need::Visible, whole, x, y);
         subst = true;
     } else {
+        bool busy = false;
         if (b != n && press_budget_ != 0 && !find(scaled_, key(n))) {
             if (press_budget_ > 0)
                 press_budget_--;
-            claim(scaled_, key(n), fi, px, gid, factor(px, n));
+            claim(scaled_, key(n), fi, px, gid, factor(px, n), press_budget_ >= 0 ? &busy : nullptr);
+            busy = false;
         }
         if (press_budget_ != 0) {
-            if (press_budget_ > 0)
-                press_budget_--;
-            return claim(scaled_, got, fi, px, gid, factor(px, b));
+            Glyph* g = claim(scaled_, got, fi, px, gid, factor(px, b), press_budget_ > 0 ? &busy : nullptr);
+            if (!busy) {
+                if (press_budget_ > 0)
+                    press_budget_--;
+                return g;
+            }
         }
         pending = true;
         deferrals_++;
@@ -874,6 +909,35 @@ void Fonts::ink64(const TextStyle& st, const char* s, int& left64, int& right64)
     }
     if (!any)
         right64 = pen;
+}
+
+void Fonts::ink_rows(const TextStyle& st, const char* s, int& top, int& bottom)
+{
+    top = -ascent(st.px);
+    bottom = descent(st.px);
+    if (runs_ && !printable(s) && !bidi_plain(s, Dir::Auto))
+        return;
+    int t = 0, b = 0;
+    bool any = false;
+    while (*s) {
+        uint32_t cp = apply_case(next_cp(s), st.tcase);
+        if (bidi_ignorable(cp))
+            continue;
+        int fi, gid;
+        resolve(st.weight, cp, fi, gid);
+        if (fi < 0)
+            continue;
+        Rect r;
+        if (!glyph_box(fi, st.px, gid, r))
+            return;
+        if (r.empty())
+            continue;
+        t = any ? std::min(t, r.y0) : r.y0;
+        b = any ? std::max(b, r.y1) : r.y1;
+        any = true;
+    }
+    top = t;
+    bottom = b;
 }
 
 bool Fonts::draw(Canvas& c, const TextStyle& st, const char* s, int x64, int baseline, uint32_t rgb, int a)
@@ -1113,6 +1177,17 @@ void Fonts::boost()
         setpriority(PRIO_PROCESS, (id_t)t, 0);
 }
 
+void Fonts::post(std::function<void()> task)
+{
+    if (!th_.joinable()) {
+        task();
+        return;
+    }
+    std::lock_guard<std::mutex> lk(mu_);
+    tasks_.push_back(std::move(task));
+    cv_.notify_all();
+}
+
 void Fonts::signal()
 {
     uint64_t one = 1;
@@ -1286,7 +1361,7 @@ void Fonts::unhold()
         return;
     std::lock_guard<std::mutex> lk(mu_);
     auto drop = [](Job& j) {
-        if (j.need == Need::Hold)
+        if (j.need == Need::Hold && !direct_key(j.key))
             j.need = j.owed ? Need::Visible : Need::Predicted;
     };
     for (Job& j : jobs_)
@@ -1403,6 +1478,17 @@ void Fonts::run()
             signal();
             continue;
         }
+        if (!tasks_.empty()) {
+            std::function<void()> task = std::move(tasks_.front());
+            tasks_.pop_front();
+            lk.unlock();
+            setpriority(PRIO_PROCESS, (id_t)tid_.load(), 0);
+            task();
+            tasks_run_++;
+            lk.lock();
+            signal();
+            continue;
+        }
         int64_t until, now = mono_ms();
         int i = pick(now, until);
         if (i < 0) {
@@ -1439,8 +1525,11 @@ void Fonts::run()
         }
         if (gate_)
             gate_(k);
-        bool direct = key_bucket(k) == kDirect;
-        Glyph g = make(key_face(k), key_px(k), key_gid(k), direct ? 1.0f : factor(key_px(k), key_bucket(k)));
+        int b = key_bucket(k);
+        bool direct = b >= kTurnCcw && b <= kDirect;
+        Glyph g = b == kTurnCw || b == kTurnCcw
+                      ? turned(key_face(k), key_px(k), key_gid(k), b == kTurnCw ? 45 : -45)
+                      : make(key_face(k), key_px(k), key_gid(k), direct ? 1.0f : factor(key_px(k), b));
         (direct ? ahead_rasters_ : worker_rasters_)++;
         lk.lock();
         if (!direct)

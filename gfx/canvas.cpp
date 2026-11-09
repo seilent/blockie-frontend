@@ -1,6 +1,7 @@
 #include "canvas.h"
 
 #include <algorithm>
+#include <cstddef>
 
 #include "../core/prof.h"
 #include "pairs.h"
@@ -107,6 +108,10 @@ template <class F, class L> void CanvasT<F, L>::blend(Rect r, uint32_t rgb, int 
 template <class F, class L>
 void CanvasT<F, L>::vgradient(Rect r, uint32_t base, uint32_t over, int a_top, int a_bottom, int y_top, int y_bottom)
 {
+    if (keyed_) {
+        ground(r, base);
+        return;
+    }
     Rect p = r.intersect(clip_);
     if (p.empty())
         return;
@@ -214,6 +219,129 @@ void CanvasT<F, L>::coverage(const uint8_t* cov, int w, int h, int x, int y, uin
                     put(d[i], s_.index(pr.x0 + i, py), s[i]);
         }
     }
+}
+
+template <class F, class L>
+void CanvasT<F, L>::spans(const uint8_t* rows, int h, int x, int y, uint32_t rgb, int a)
+{
+    if (a <= 0 || y >= clip_.y1 || y + h <= clip_.y0)
+        return;
+    T v = F::pack(rgb);
+    const ptrdiff_t step = (ptrdiff_t)s_.index(1, 0) - (ptrdiff_t)s_.index(0, 0);
+    const uint8_t* run = rows + (size_t)h * 4;
+    for (int r = 0; r < h; r++) {
+        const uint8_t* hd = rows + (size_t)r * 4;
+        int py = y + r, c0 = x + (hd[0] | hd[1] << 8), n = hd[2] | hd[3] << 8;
+        int x0 = std::max(c0, clip_.x0), x1 = std::min(c0 + n, clip_.x1);
+        if (py >= clip_.y0 && py < clip_.y1 && x0 < x1) {
+            ptrdiff_t i = (ptrdiff_t)s_.index(x0, py);
+            for (int px = x0; px < x1; px++, i += step) {
+                int c = run[px - c0];
+                if (!c)
+                    continue;
+                int aa = (c + 1) * a >> 8;
+                s_.px[(size_t)i] = aa >= 256 ? v : F::blend(s_.px[(size_t)i], v, aa);
+                cover((size_t)i, aa);
+            }
+        }
+        run += n;
+    }
+}
+
+template <class F, class L>
+void CanvasT<F, L>::blit_cov(const ImageT<F, L>& img, const uint8_t* cov, int x, int y, int a)
+{
+    Rect pr = Rect{x, y, x + img.w, y + img.h}.intersect(clip_);
+    if (pr.empty() || a <= 0)
+        return;
+    for (int py = pr.y0; py < pr.y1; py++)
+        for (int px = pr.x0; px < pr.x1; px++) {
+            size_t k = img.index(px - x, py - y);
+            int c = cov[k];
+            if (!c)
+                continue;
+            size_t i = s_.index(px, py);
+            int aa = (c + 1) * a >> 8;
+            s_.px[i] = aa >= 256 ? img.mem[k] : F::blend(s_.px[i], img.mem[k], aa);
+            cover(i, aa);
+        }
+}
+
+template <class F, class L>
+void tile_into(const ImageT<F, L>& src, int w, int h, int angle, ImageT<F, L>& out, std::vector<uint8_t>& cov)
+{
+    constexpr int64_t kR = 46341;
+    const int64_t half = (int64_t)w << 15, full = (int64_t)w << 16;
+    if (angle)
+        h = w;
+    int bw = angle ? (int)(((int64_t)w * 92682 + 65535) >> 16) : w, bh = angle ? bw : h;
+    out.w = bw;
+    out.h = bh;
+    out.mem.assign((size_t)bw * bh, F::pack(0));
+    cov.assign(angle ? (size_t)bw * bh : 0, 0);
+    int64_t dx = kR, dy = angle > 0 ? kR : -kR, center = (int64_t)bw << 15;
+    auto edge = [&](int64_t e) -> int64_t {
+        if (e >= kR)
+            return 65536;
+        if (e <= -kR)
+            return 0;
+        return e >= 0 ? 65536 - ((kR - e) * (kR - e) >> 16) : (kR + e) * (kR + e) >> 16;
+    };
+    const int64_t kx = ((int64_t)src.w << 16) / w, ky = ((int64_t)src.h << 16) / h;
+    auto tap = [&](int64_t t, int n, int64_t k, int& i0, int& i1, int& f) {
+        int64_t s = std::clamp<int64_t>((t * k >> 16) - 32768, 0, (int64_t)(n - 1) << 16);
+        i0 = (int)(s >> 16);
+        i1 = std::min(i0 + 1, n - 1);
+        f = (int)(s >> 8 & 255);
+    };
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            int64_t tx = ((int64_t)x << 16) + 32768, ty = ((int64_t)y << 16) + 32768;
+            size_t k = out.index(x, y);
+            if (angle) {
+                int64_t px = tx - center, py = ty - center;
+                tx = ((px * dx + py * dy) >> 16) + half;
+                ty = ((py * dx - px * dy) >> 16) + half;
+                int64_t c = edge(std::min(tx, full - tx)) * edge(std::min(ty, full - ty)) >> 16;
+                cov[k] = (uint8_t)std::min<int64_t>(255, (c * 255 + 32768) >> 16);
+                if (!cov[k])
+                    continue;
+            }
+            int x0, x1, wx, y0, y1, wy;
+            tap(tx, src.w, kx, x0, x1, wx);
+            tap(ty, src.h, ky, y0, y1, wy);
+            uint32_t p00 = F::unpack(src.at(x0, y0)), p10 = F::unpack(src.at(x1, y0)), p01 = F::unpack(src.at(x0, y1)),
+                     p11 = F::unpack(src.at(x1, y1)), o = 0;
+            for (int sh = 0; sh < 24; sh += 8) {
+                int c00 = p00 >> sh & 255, c10 = p10 >> sh & 255, c01 = p01 >> sh & 255, c11 = p11 >> sh & 255;
+                int top = c00 * (256 - wx) + c10 * wx, bot = c01 * (256 - wx) + c11 * wx;
+                o |= (uint32_t)((top * (256 - wy) + bot * wy + 32768) >> 16) << sh;
+            }
+            out.mem[k] = F::pack(o);
+        }
+}
+
+template void tile_into(const ImageT<X888, Rot>&, int, int, int, ImageT<X888, Rot>&, std::vector<uint8_t>&);
+template void tile_into(const ImageT<X888, Rows>&, int, int, int, ImageT<X888, Rows>&, std::vector<uint8_t>&);
+template void tile_into(const ImageT<R565, Rows>&, int, int, int, ImageT<R565, Rows>&, std::vector<uint8_t>&);
+
+template <class F, class L>
+void CanvasT<F, L>::coverage_turn(const uint8_t* cov, int w, int h, int x, int y, uint32_t rgb, int a)
+{
+    Rect pr = Rect{x, y, x + h, y + w}.intersect(clip_);
+    if (pr.empty() || a <= 0)
+        return;
+    T v = F::pack(rgb);
+    for (int py = pr.y0; py < pr.y1; py++)
+        for (int px = pr.x0; px < pr.x1; px++) {
+            int c = cov[L::index(w, h, w - 1 - (py - y), px - x)];
+            if (!c)
+                continue;
+            size_t i = s_.index(px, py);
+            int aa = (c + 1) * a >> 8;
+            s_.px[i] = aa >= 256 ? v : F::blend(s_.px[i], v, aa);
+            cover(i, aa);
+        }
 }
 
 namespace {

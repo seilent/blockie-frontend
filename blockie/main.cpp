@@ -27,23 +27,18 @@
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <wayland-client.h>
-
-#ifdef BLOCKIE_HAVE_XKB
-#include <xkbcommon/xkbcommon-keysyms.h>
-#else
-#include <linux/input-event-codes.h>
-#endif
 
 #include "../core/curves.h"
 #include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
+#include "../gfx/wayland.h"
 #include "../ui/roles.h"
 #include "bench.h"
 #include "bt.h"
 #include "bus.h"
 #include "children.h"
 #include "decodeq.h"
+#include "frame_gate.h"
 #include "framestats.h"
 #include "homeflow.h"
 #include "image.h"
@@ -52,7 +47,6 @@
 #include "launch.h"
 #include "library.h"
 #include "nav.h"
-#include "present_wl.h"
 #include "repeat.h"
 #include "screen_bt.h"
 #include "scraper.h"
@@ -64,6 +58,7 @@
 #include "theme_setting.h"
 #include "tile_grid.h"
 #include "volume.h"
+#include "wl_keys.h"
 #include "zones.h"
 
 namespace fd {
@@ -72,7 +67,6 @@ namespace {
 
 using Art = std::shared_ptr<const Image>;
 
-constexpr int kFrameWatchdogMs = 100;
 constexpr int kThemeWaitMs = 300;
 constexpr int kCoverWaitMs = 300;
 constexpr int kBenchIdleMs = 5000;
@@ -139,11 +133,6 @@ static int run()
 {
     std::fprintf(stderr, "blockie-frontend: started\n");
     std::fprintf(stderr, "blockie-frontend: commit %s\n", *frontend_commit() ? frontend_commit() : "unknown");
-    WaylandPresenter p;
-    if (!p.open("", true)) {
-        std::fprintf(stderr, "blockie-frontend: no wayland display, exiting\n");
-        return 1;
-    }
 
     Bus bus;
     ThemeSetting theme_set;
@@ -165,16 +154,50 @@ static int run()
         }
     }
     std::fprintf(stderr, "blockie-frontend: theme %s\n", theme().light ? "light" : "dark");
+    WlKeys wl_keys;
+    std::vector<PadEdge> key_edges;
+    int leave_at = -1;
+    WaylandPresenter p;
+    p.set_app_id("net.seilent.Blockie.Frontend");
+    p.set_title("Blockie");
+    p.set_output(kPortraitW, kPortraitH);
+    p.set_keyboard(true);
+    p.set_keymap_handler([&](int fd, uint32_t size) { wl_keys.keymap(fd, size); });
+    p.set_key_handler([&](uint32_t code, bool pressed) {
+        PadAction a = PadAction::Up;
+        if (wl_keys.action(code, a))
+            key_edges.push_back({a, pressed});
+    });
+    p.set_focus_handler([&](bool in) {
+        if (!in)
+            leave_at = (int)key_edges.size();
+    });
+    const char* cenv = std::getenv("BLOCKIE_PRESENT_COPY");
+    if (!p.open(cenv && std::strcmp(cenv, "1") == 0 ? "copy" : "direct", true)) {
+        std::fprintf(stderr, "blockie-frontend: no wayland display, exiting\n");
+        return 1;
+    }
     Bt bt(bus);
     bt.start();
-    t = now_ms();
-    p.begin_frame(t, p.show_at(t));
-    p.begin_full();
-    WaylandPresenter::S s = p.draw_target();
-    for (int y = 0; y < kPortraitH; y++)
-        fill_px(s.row(y), theme().bg, kPortraitW);
-    p.present(kScreen);
-    p.flip();
+    std::vector<WlTouch> touch_scratch;
+    auto wl_wait = [&](int ms) {
+        struct pollfd wf;
+        wf.fd = p.display_fd();
+        wf.events = POLLIN;
+        wf.revents = 0;
+        if (poll(&wf, 1, ms) > 0 && gate_pump(wf.revents))
+            return pump_presenter(p, touch_scratch);
+        return true;
+    };
+    fill_when_ready(p, now_ms, wl_wait, [&]() {
+        int64_t ft = now_ms();
+        p.begin_frame(ft, p.show_at(ft));
+        p.begin_full();
+        WaylandPresenter::S s = p.draw_target();
+        for (int y = 0; y < kPortraitH; y++)
+            fill_px(s.row(y), theme().bg, kPortraitW);
+        p.present(kScreen);
+    });
 
     std::string font_dir;
     if (const char* env = std::getenv("BLOCKIE_FONTS"))
@@ -244,7 +267,8 @@ static int run()
     sync_zone();
     bool zones_loaded = false;
     InkLayer ink;
-    int64_t frame_req_at = -1;
+    FrameGate gate;
+    int64_t exit_at = -1;
     bool drop_budget = false;
     std::unordered_map<int64_t, Game> by_id;
     std::unordered_map<int64_t, Art> held;
@@ -382,27 +406,36 @@ static int run()
         bool more = flow.frame(now, dst);
         more = more || page_animating(now);
         p.present(kScreen);
-        if (more)
-            p.request_frame();
-        bool ok = p.flip();
+        p.flip();
+        bool ok = p.posted();
         if (ok && folding)
             fstats.frame(t0, now_us());
-        if (ok && more)
-            frame_req_at = now;
+        gate.posted(ok, more, now);
         if (ok && folding)
             drop_budget = true;
-        if (!ok && more)
-            p.cancel_frame();
+        if (ok && exit_at >= 0) {
+            std::fprintf(stderr, "blockie-frontend: frame after return %lld ms\n", (long long)(now_ms() - exit_at));
+            exit_at = -1;
+        }
         return ok;
     };
     auto can_animate = [&]() { return p.activated() && child.pid <= 0; };
+    auto gate_in = [&](int64_t now, int timeout) {
+        GateIn in;
+        in.now = now;
+        in.ready = p.ready();
+        in.claim = p.claim();
+        in.activated = p.activated();
+        in.child = child.pid > 0;
+        in.need_redraw = need_redraw;
+        in.animating = animating(now);
+        in.timeout = timeout;
+        return in;
+    };
     auto land_all = [&](int64_t now, const char* why) {
         if (!flow.animating(now))
             return;
         flow.land_all(now, why);
-        if (p.frame_pending())
-            p.cancel_frame();
-        frame_req_at = -1;
         need_redraw = true;
     };
 
@@ -436,7 +469,8 @@ static int run()
             std::lock_guard<std::mutex> lk(dmutex);
             decode_pause = true;
         }
-        std::fprintf(stderr, "blockie-frontend: launch %s pid %d\n", sysname.c_str(), (int)ch.pid);
+        std::fprintf(stderr, "blockie-frontend: launch %s pid %d ready %d\n", sysname.c_str(), (int)ch.pid,
+                     p.ready() ? 1 : 0);
         return true;
     };
 
@@ -457,7 +491,9 @@ static int run()
             }
             if (!child.cfg_path.empty())
                 unlink(child.cfg_path.c_str());
-            std::fprintf(stderr, "blockie-frontend: game exited (%s)\n", ran ? "ran" : "not launched");
+            std::fprintf(stderr, "blockie-frontend: game exited (%s) ready %d\n", ran ? "ran" : "not launched",
+                         p.ready() ? 1 : 0);
+            exit_at = now_ms();
             child = {};
             child_game_id = -1;
             bt.set_game_running(false, now_ms());
@@ -655,39 +691,28 @@ static int run()
             repeat.press(a, src, now);
     };
 
-    p.set_key_handler([&](uint32_t sym, bool pressed) {
-        bool have = true;
-        PadAction a = PadAction::Up;
-#ifdef BLOCKIE_HAVE_XKB
-        if (sym == XKB_KEY_Up) a = PadAction::Up;
-        else if (sym == XKB_KEY_Down) a = PadAction::Down;
-        else if (sym == XKB_KEY_Left) a = PadAction::Left;
-        else if (sym == XKB_KEY_Right) a = PadAction::Right;
-        else if (sym == XKB_KEY_Return) a = PadAction::Accept;
-        else if (sym == XKB_KEY_Escape) a = PadAction::Back;
-        else if (sym == XKB_KEY_x) a = PadAction::Context;
-        else have = false;
-#else
-        if (sym == KEY_UP) a = PadAction::Up;
-        else if (sym == KEY_DOWN) a = PadAction::Down;
-        else if (sym == KEY_LEFT) a = PadAction::Left;
-        else if (sym == KEY_RIGHT) a = PadAction::Right;
-        else if (sym == KEY_ENTER) a = PadAction::Accept;
-        else if (sym == KEY_ESC) a = PadAction::Back;
-        else if (sym == KEY_X) a = PadAction::Context;
-        else have = false;
-#endif
-        if (!have)
-            return;
+    auto pump = [&]() {
+        bool ok = pump_presenter(p, touch_scratch);
+        std::vector<PadEdge> edges;
+        edges.swap(key_edges);
+        int leave = leave_at;
+        leave_at = -1;
         int64_t now = now_ms();
-        if (!pressed) {
-            repeat.release(a, kFromKeys, now);
-            return;
+        for (int i = 0; i < (int)edges.size(); i++) {
+            if (i == leave)
+                repeat.release_source(kFromKeys, now);
+            const PadEdge& e = edges[i];
+            if (!e.down) {
+                repeat.release(e.action, kFromKeys, now);
+                continue;
+            }
+            std::fprintf(stderr, "blockie-frontend: key %s\n", action_name(e.action));
+            press(e.action, kFromKeys, now);
         }
-        std::fprintf(stderr, "blockie-frontend: key %s\n", action_name(a));
-        press(a, kFromKeys, now);
-    });
-    p.set_leave_handler([&]() { repeat.release_source(kFromKeys, now_ms()); });
+        if (leave == (int)edges.size())
+            repeat.release_source(kFromKeys, now);
+        return ok;
+    };
 
     int sfd = -1;
     sigset_t mask;
@@ -886,13 +911,11 @@ static int run()
         fstats.begin("t1");
     }
     need_redraw = true;
+    key_edges.clear();
+    leave_at = -1;
 
-    wl_display* d = p.display();
-    int wl_fd = p.event_fd();
-    while (!bench && p.ready()) {
-        while (wl_display_prepare_read(d) != 0)
-            wl_display_dispatch_pending(d);
-        bool wl_blocked = wl_display_flush(d) < 0 && errno == EAGAIN;
+    while (!bench && gate_runs(p.lost(), p.closed())) {
+        p.flush();
         bus.pump();
         bus.tick(now_ms());
         {
@@ -928,12 +951,14 @@ static int run()
             fds[nfds].revents = 0;
             return (int)nfds++;
         };
-        watch(wl_fd, POLLIN | (wl_blocked ? POLLOUT : 0));
+        GateFds gf = gate_fds(p.display_fd(), p.event_fd(), p.blocked());
+        watch(gf.display.fd, gf.display.events);
         watch(sfd, POLLIN);
         int pi = pad_ok ? watch(pad.fd(), POLLIN) : -1;
         int ai = art_evfd >= 0 ? watch(art_evfd, POLLIN) : -1;
         int bi = bus.fd() >= 0 ? watch(bus.fd(), POLLIN | (bus.wants_write() ? POLLOUT : 0)) : -1;
         int vi = volume.fd() >= 0 ? watch(volume.fd(), POLLIN) : -1;
+        int ei = watch(gf.event.fd, gf.event.events);
         int64_t pnow = now_ms();
         int timeout = -1;
         auto until = [&](int64_t when) {
@@ -958,28 +983,21 @@ static int run()
             }
             until(battery.deadline());
         }
-        if (frame_req_at >= 0)
-            until(frame_req_at + kFrameWatchdogMs);
-        bool want_frame = child.pid <= 0 && (need_redraw || (animating(pnow) && !p.frame_pending()));
-        if ((want_frame && p.claim()) || bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty()))
+        timeout = gate.timeout(gate_in(pnow, timeout));
+        if (bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty()))
             timeout = 0;
         int pr = poll(fds.data(), (nfds_t)nfds, timeout);
         if (pr < 0) {
-            wl_display_cancel_read(d);
             if (errno == EINTR)
                 continue;
             break;
         }
-        if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-            if (wl_display_read_events(d) < 0)
-                break;
-        } else {
-            wl_display_cancel_read(d);
-        }
+        if (gate_pump(fds[0].revents) && !pump())
+            break;
+        if (fds[ei].revents & POLLIN)
+            drain_event(gf.event.fd);
         if (bi >= 0 && (fds[bi].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR)))
             bus.pump();
-        if (wl_display_dispatch_pending(d) < 0)
-            break;
 
         if (fds[1].revents & POLLIN) {
             bool quit = false;
@@ -1045,30 +1063,21 @@ static int run()
         }
 
         int64_t fnow = now_ms();
-        if (p.take_frame_done()) {
-            frame_req_at = -1;
+        GateStep g = gate.step(gate_in(fnow, -1));
+        if (g.report_done)
             fstats.done(now_us());
-        }
-        if (!can_animate()) {
-            land_all(fnow, child.pid > 0 ? "child" : "hidden");
+        if (g.land_reason)
+            land_all(fnow, g.land_reason);
+        if (g.land_reason || !can_animate())
             settings_page.land();
-        }
-        if (frame_req_at >= 0 && fnow - frame_req_at > kFrameWatchdogMs) {
-            p.cancel_frame();
-            frame_req_at = -1;
-            land_all(fnow, "watchdog");
-            settings_page.land();
+        if (g.redraw)
             need_redraw = true;
-        }
         if (flow.ctl.active() && need_redraw) {
             flow.redraw();
             need_redraw = false;
         }
-        bool anim = animating(fnow);
-        if ((need_redraw || (anim && !p.frame_pending())) && child.pid <= 0 && p.claim()) {
-            if (frame(fnow))
-                need_redraw = false;
-        }
+        if (g.draw && frame(fnow))
+            need_redraw = false;
     }
     if (child.pid > 0)
         kill(child.pid, SIGTERM);

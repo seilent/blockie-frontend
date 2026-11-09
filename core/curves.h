@@ -18,6 +18,12 @@ enum class Curve {
     EaseIn,
     EaseOut,
     PowOut17,
+    CubicOut,
+    SmoothStep,
+    PowOut15,
+    WordOpen,
+    QuartOut,
+    PowIn15,
 };
 
 fx curve(Curve c, fx t);

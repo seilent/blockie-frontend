@@ -138,8 +138,13 @@ bool PullDown::value_changed(int item) const
 bool PullDown::has(int item) const
 {
     switch (item) {
+    case Bluetooth:
+        return info_.has_bt;
     case Wifi:
         return board::kHasWifi;
+    case Dimmer:
+    case Brighter:
+        return info_.has_light;
     case Gain:
         return !info_.gain.empty();
     case Track:

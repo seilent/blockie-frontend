@@ -666,6 +666,7 @@ void mip_alloc(MipLevelT<R565>& out, Rect r0, bool coverage)
     out.blocks.h = coverage ? (out.h + kBlock - 1) >> kMipBlockBits : 0;
     out.blocks.f.resize((size_t)out.blocks.w * out.blocks.h);
     out.built = false;
+    out.cover = false;
 }
 
 void mip_drop(MipLevelT<R565>& out) { out.built = false; }
@@ -709,6 +710,7 @@ void mip_alloc(MipLevelT<X888>& out, Rect r0, bool coverage)
     out.blocks.h = coverage ? (out.h + kBlock - 1) >> kMipBlockBits : 0;
     out.blocks.f.resize((size_t)out.blocks.w * out.blocks.h);
     out.built = false;
+    out.cover = false;
 }
 
 void mip_drop(MipLevelT<X888>& out) { out.built = false; }

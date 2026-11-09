@@ -84,6 +84,7 @@ struct Press {
     }
 
     bool held() const { return t.to != kOne && release_at < 0; }
+    bool framed(int64_t now) const { return t.to != kOne && (release_at < 0 || now < release_at); }
     bool rest(int64_t now) const { return !moving(now) && scale(now) == kOne; }
     bool stale(int64_t now) const { return moving(now) || press_step(scale(now)) != shown; }
     int64_t end() const { return release_at >= 0 ? release_at + kMs : t.end(); }
@@ -103,6 +104,25 @@ struct Press {
         }
         return -1;
     }
+};
+
+struct LitRow {
+    int row = -1;
+    int64_t end = 0, until = -1;
+
+    void down(int r, int64_t fade_end)
+    {
+        row = r;
+        end = fade_end;
+        until = -1;
+    }
+    void up()
+    {
+        if (row >= 0 && until < 0)
+            until = end;
+    }
+    void reset() { row = -1; }
+    bool on(int r, int64_t now) const { return r >= 0 && r == row && (until < 0 || now < until); }
 };
 
 struct PressSlots {
@@ -206,6 +226,11 @@ struct PressSlots {
         if (item >= 0 && item == back.item)
             return back.p.scale(now);
         return kOne;
+    }
+
+    bool framed(int item, int64_t now) const
+    {
+        return item >= 0 && ((item == on.item && on.p.framed(now)) || (item == back.item && back.p.framed(now)));
     }
 
     bool stale(int item, int64_t now) const

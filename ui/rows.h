@@ -34,12 +34,20 @@ public:
         active_ = from_active_ = i;
         at_ = -1000000;
     }
-    void switch_to(int i, int64_t now);
+    void switch_to(int i, int64_t now, int dir);
     bool moving(int64_t now) const;
     void land() { at_ = -1000000; }
     int header_w64() const { return header_w64_; }
+    int header_x64() const;
+    void set_header_look(fx x, fx alpha)
+    {
+        header_x_ = x;
+        header_alpha_ = alpha;
+    }
+    fx header_alpha() const { return header_alpha_; }
+    const std::string& word() const { return word_; }
     int pivot_x64(int i) const;
-    bool draw(Canvas& c, Fonts& f, fx fly, int64_t now) const;
+    bool draw(Canvas& c, Fonts& f, int64_t now) const;
     int pivot_hit(fx x, fx y) const;
     bool header_hit(fx x, fx y) const;
     void set_header_part(const ChromePart& p) { header_part_ = p; }
@@ -49,6 +57,34 @@ public:
             pivot_parts_[(size_t)i] = p;
     }
     void clear_parts();
+    static constexpr int kHeader = -1, kNoPress = -2;
+    void press(int part)
+    {
+        press_ = part;
+        up_ = false;
+    }
+    void lift()
+    {
+        up_ = true;
+        press_at_ = at_;
+    }
+    void drop()
+    {
+        if (!up_)
+            clear();
+    }
+    void clear()
+    {
+        press_ = kNoPress;
+        up_ = false;
+    }
+    void settle() { press_at_ = at_; }
+    int pressed() const { return press_; }
+    bool lifted() const { return up_; }
+    bool lit(int part, int64_t now) const
+    {
+        return press_ == part && (part == kHeader || !up_ || (at_ == press_at_ && moving(now)));
+    }
 
 private:
     std::string word_;
@@ -66,8 +102,11 @@ private:
     int header_x64(int std_row) const;
 
     int header_w64_ = 0;
-    int active_ = 0, from_active_ = 0, from_row_ = 0, from_std_ = 0;
-    int64_t at_ = -1000000;
+    fx header_x_ = tok::page_headerX, header_alpha_ = role::pageHeader.alpha;
+    int active_ = 0, from_active_ = 0, dir_ = 1;
+    int64_t at_ = -1000000, press_at_ = -1000000;
+    int press_ = kNoPress;
+    bool up_ = false;
 };
 
 class PivotMotion {
@@ -92,6 +131,7 @@ public:
 
 private:
     void blend_row(const Surface& layer, Canvas& c, Rect clip, pos64 y, fx h, int row, int64_t now) const;
+    int64_t in_ms(int64_t now, int row) const;
 
     int64_t at_ = -1;
     int dir_ = 1;
@@ -99,8 +139,12 @@ private:
 };
 
 int row_title_x64(Fonts& f, const Row& r, bool ring);
+int collection_base(int top, const TextStyle& name);
+int list_row_base(Fonts& f, const Row& r, int top, const TextStyle& name);
+int row_thumbs_top(const Row& r, int top);
 bool draw_list_row(Canvas& c, Fonts& f, GlyphCache* g, const Row& r, int top, fx primary_alpha, bool focused = false,
-                   fx press = kOne);
+                   fx press = kOne, PressGlow* glow = nullptr, int64_t now = 0);
+bool list_row_word(Fonts& f, ListView& v, int row, std::string& text, TextStyle& st, fx& x, fx& base, fx& look);
 void warm_list_row(const Row& r, std::vector<WarmText>& out);
 void draw_focus_bar(Canvas& c, int y, fx pitch);
 std::vector<std::string> settings_value_lines(Fonts& f, const Role& role, const std::string& title,
@@ -112,12 +156,17 @@ bool draw_settings_value(Canvas& c, Fonts& f, const Role& role, const std::strin
                          int top, uint32_t rgb, int a256, int& clip_x, bool split = true, int h = -1,
                          bool edit = false);
 bool draw_settings_title(Canvas& c, Fonts& f, const Role& role, const std::vector<std::string>& lines, int top, int a256,
-                         int clip_x, int h = -1);
+                         int clip_x, int h = -1, PressGlow* glow = nullptr, int64_t now = 0);
 bool draw_settings_row(Canvas& c, Fonts& f, const Role& role, const std::string& title, const std::string& value, int top,
-                       fx focus, const std::vector<std::string>& words = {});
+                       fx focus, const std::vector<std::string>& words = {}, bool lit = false, PressGlow* glow = nullptr,
+                       int64_t now = 0);
 Zoom tile_zoom(Rect t, fx press);
 void draw_art_tile(Canvas& c, const Image* img, Rect t, int border, const Zoom& z);
-void draw_letter_tile(Canvas& c, Rect t, int border, int border_a, const Zoom& z);
+bool draw_art_tile(Canvas& c, Fonts& f, const Image* img, bool box, const std::string& name, Rect t, int border,
+                   bool frame, const Role& role = role::boxCaptionLib, int lines = tok::boxLines >> kFxBits);
+bool draw_box_tile(Canvas& c, Fonts& f, const Role& role, const std::string& name, Rect t, int lines);
+void draw_press_frame(Canvas& c, Rect t);
+void draw_letter_tile(Canvas& c, Rect t, int border, int border_a, const Zoom& z, bool frame = false);
 
 enum class PlayState { None, Playing, Paused };
 struct StatusBox {

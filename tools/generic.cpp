@@ -21,6 +21,7 @@
 #include "../gfx/fontkey.h"
 #include "../gfx/glyph.h"
 #include "../gfx/kernels.h"
+#include "../gfx/mempresent.h"
 #include "../gfx/mip.h"
 #include "../gfx/pagealloc.h"
 #include "../gfx/pairs.h"
@@ -28,7 +29,9 @@
 #include "../gfx/png.h"
 #include "../gfx/present.h"
 #include "../gfx/shape.h"
+#include "../gfx/turn.h"
 #include "../gfx/warp.h"
+#include "../gfx/wayland.h"
 #include "../gfx/wrap.h"
 #include "../gfx/xform.h"
 #include "../lib/kana.h"
@@ -49,6 +52,7 @@
 #include "../ui/rows.h"
 #include "../ui/scrollbar.h"
 #include "../ui/size.h"
+#include "../ui/tilt.h"
 
 namespace fd {
 
@@ -98,6 +102,9 @@ constexpr bool kMemSet = std::is_same_v<decltype(ref<P>().open(PresentMode::Copy
 static_assert(kCore<Presenter>, "the board presenter keeps the core set");
 #endif
 static_assert(kMemSet<PresenterT<X888, Rows>>, "the memory presenter keeps its set");
+static_assert(std::is_same_v<decltype(ref<const FrameSources>().retained(ref<const Op>(), ref<RetainedOps>())), bool>,
+              "frame sources keep the retained hook");
+static_assert(kCore<WaylandPresenter>, "the wayland presenter keeps the core set");
 
 void mem_use()
 {
@@ -107,6 +114,16 @@ void mem_use()
     p.present_warp();
     p.flip();
     p.screen();
+#if defined(FD_BOARD_PB) || defined(FD_BOARD_HEADER)
+    WaylandPresenter w;
+    w.set_output(kPortraitW, kPortraitH);
+    if (w.open("copy", true)) {
+        w.present(kScreen);
+        w.flip();
+        w.pump();
+        w.flush();
+    }
+#endif
 }
 
 }

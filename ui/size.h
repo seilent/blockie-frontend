@@ -26,6 +26,7 @@ fx canvas_h();
 fx u_from(fx v, fx at);
 fx content_bottom();
 void set_content_bottom(fx bottom);
+Role kept_text(const Role& r);
 
 enum class Fit : uint8_t { Std, Page, Kept };
 

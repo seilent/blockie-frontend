@@ -33,8 +33,8 @@ struct Xform {
                swivel == o.swivel && eye == o.eye;
     }
     bool operator!=(const Xform& o) const { return !(*this == o); }
-    void inverse(double* m) const;
-    void forward(double* m) const;
+    void inverse(double* m, bool kernel = false) const;
+    void forward(double* m, bool kernel = false) const;
 };
 
 Rect xform_bounds(const Xform& f, Rect r);

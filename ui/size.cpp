@@ -107,6 +107,15 @@ void set_content_bottom(fx bottom)
     g_bottom_ppu = tl_ppu;
 }
 
+Role kept_text(const Role& r)
+{
+    if (!size_large() || r.size >= tok::size_keptTextMax)
+        return r;
+    Role k = r;
+    k.size = (fx)((int64_t)r.size * tok::size_largeScale / fx_int(100));
+    return k;
+}
+
 Scope::Scope(Fit f, const char* site) : prev_(tl_ppu), kept_(f == Fit::Kept)
 {
 #ifndef FD_ALSA

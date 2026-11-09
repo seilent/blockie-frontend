@@ -28,6 +28,7 @@ gfx/glyph.cpp
 gfx/glyph.h
 gfx/kernels.cpp
 gfx/kernels.h
+gfx/mempresent.h
 gfx/mip.cpp
 gfx/mip.h
 gfx/pagealloc.h
@@ -38,8 +39,11 @@ gfx/png.h
 gfx/shape.cpp
 gfx/shape.h
 gfx/stb.cpp
+gfx/turn.h
 gfx/warp.cpp
 gfx/warp.h
+gfx/wayland.cpp
+gfx/wayland.h
 gfx/wrap.cpp
 gfx/wrap.h
 gfx/xform.cpp
@@ -77,3 +81,4 @@ ui/scrollbar.cpp
 ui/scrollbar.h
 ui/size.cpp
 ui/size.h
+ui/tilt.h

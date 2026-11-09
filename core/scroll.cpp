@@ -33,36 +33,49 @@ constexpr double cexp(double x)
     return sum;
 }
 
-constexpr double kLnR = cln((double)tok::motion_flingRetention / kOne);
-constexpr double kDecay = 1000.0 / kTick * -kLnR;
+constexpr int kLead = (int)(tok::motion_overscrollLead >> kFxBits);
+constexpr pos64 kLand = tok::motion_overscrollLand;
+constexpr int64_t kNoTime = INT64_MIN;
 
 struct Tables {
     int64_t keep[kMaxStep + 1];
     int64_t travel[kMaxStep + 1];
+    int64_t back[kMaxStep + 1];
+    int64_t decay;
 };
 
-constexpr Tables make()
+constexpr Tables make(fx retention, int back_ms)
 {
     Tables t{};
+    double ln_r = cln((double)retention / kOne), k = 1000.0 / kTick * -ln_r;
     for (int dt = 0; dt <= kMaxStep; dt++) {
-        double f = cexp(kLnR * dt / kTick);
+        double f = cexp(ln_r * dt / kTick);
         t.keep[dt] = (int64_t)(f * (1 << kQ) + 0.5);
-        t.travel[dt] = (int64_t)((1 - f) / kDecay * (1 << kQ) + 0.5);
+        t.travel[dt] = (int64_t)((1 - f) / k * (1 << kQ) + 0.5);
+        t.back[dt] = back_ms > 0 ? (int64_t)(cexp(-(double)dt / back_ms) * (1 << kQ) + 0.5) : 0;
     }
+    t.decay = (int64_t)(k * (1 << kQ) + 0.5);
     return t;
 }
 
-constexpr Tables kTab = make();
-constexpr int64_t kDecayQ = (int64_t)(kDecay * (1 << kQ) + 0.5);
+constexpr Tables kTab[] = {
+    make(tok::motion_listFlingRetention, (int)(tok::motion_overscrollBackList >> kFxBits)),
+    make(tok::motion_qpFlingRetention, (int)(tok::motion_overscrollBackQp >> kFxBits)),
+    make(tok::motion_flingRetention, 0),
+};
+
+const Tables& tab(ScrollKind k) { return kTab[(int)k]; }
 
 int64_t abs64(int64_t v) { return v < 0 ? -v : v; }
 
-int64_t decay(int64_t v, int64_t dt)
+int64_t decay(const int64_t* keep, int64_t v, int64_t dt)
 {
     for (; dt > 0 && v; dt -= kMaxStep)
-        v = (v * kTab.keep[std::min<int64_t>(dt, kMaxStep)]) >> kQ;
+        v = (v * keep[std::min<int64_t>(dt, kMaxStep)]) >> kQ;
     return v;
 }
+
+int64_t stop_of(ScrollKind k) { return std_u(k == ScrollKind::Quickplay ? tok::motion_qpFlingStop : tok::flingStop); }
 
 }
 
@@ -117,14 +130,18 @@ int64_t fling_velocity(int64_t v)
     return -v;
 }
 
-pos64 fling_travel(int64_t v0) { return (v0 << kQ) / kDecayQ; }
+pos64 fling_travel(int64_t v0, ScrollKind k) { return (v0 << kQ) / tab(k).decay; }
+
+bool Scroll::ends() const { return kind_ != ScrollKind::Grid && base_ > 0 && !reach_ && !dropping_; }
 
 void Scroll::set_limit(pos64 limit)
 {
     base_ = std::max<pos64>(0, limit);
     limit_ = std::max(base_, reach_);
-    if (pos_ > limit_)
-        pos_ = limit_;
+    pos64 room = (held_ || back_) && ends() ? std_u(tok::motion_overscrollCap) : 0;
+    pos_ = std::clamp<pos64>(pos_, -room, limit_ + room);
+    if (back_ && pos_ >= 0 && pos_ <= limit_)
+        back_ = false;
 }
 
 void Scroll::lift(int64_t now, pos64 by, int ms, Curve c)
@@ -187,6 +204,9 @@ void Scroll::fit(pos64 limit, pos64 lo, pos64 hi)
 
 void Scroll::stop()
 {
+    if (back_)
+        pos_ = end();
+    back_ = held_ = false;
     fling_ = false;
     anim_ = false;
     v_ = 0;
@@ -194,13 +214,29 @@ void Scroll::stop()
 
 bool Scroll::grab(int64_t at)
 {
+    const int64_t* keep = tab(kind_).keep;
     int64_t v = abs64(v_), min = std_u(tok::flingMin);
-    bool fast = fling_ && (at < last_ ? v >= decay(min, last_ - at) : decay(v, at - last_) >= min);
+    bool fast = fling_ && (at < last_ ? v >= decay(keep, min, last_ - at) : decay(keep, v, at - last_) >= min);
     if (anim_)
         pos_ = to_;
     stop();
     settle();
     return fast;
+}
+
+bool Scroll::land()
+{
+    if (!anim_ && !back_)
+        return false;
+    pos64 was = pos_;
+    if (anim_)
+        pos_ = to_;
+    anim_ = false;
+    if (back_)
+        pos_ = end();
+    back_ = false;
+    settle();
+    return pos_ != was;
 }
 
 void Scroll::begin(fx finger)
@@ -210,16 +246,38 @@ void Scroll::begin(fx finger)
     fit_at_ = -1;
     start_pos_ = pos_;
     start_finger_ = finger;
+    held_ = true;
 }
 
-void Scroll::drag(fx finger) { write(start_pos_ - ((pos64)finger - start_finger_)); }
+void Scroll::drag(fx finger)
+{
+    pos64 room = ends() ? std_u(tok::motion_overscrollCap) : 0;
+    pos_ = std::clamp<pos64>(start_pos_ - ((pos64)finger - start_finger_), -room, limit_ + room);
+    held_ = true;
+}
+
+void Scroll::end_drag()
+{
+    if (!held_)
+        return;
+    held_ = false;
+    if (pos_ < 0 || pos_ > limit_) {
+        back_ = true;
+        last_ = kNoTime;
+    }
+}
 
 void Scroll::release(int64_t now, int64_t v_finger)
 {
     stop();
     fit_at_ = -1;
+    if (pos_ < 0 || pos_ > limit_) {
+        back_ = true;
+        last_ = now;
+        return;
+    }
     int64_t v = fling_velocity(v_finger);
-    if (abs64(v) < std_u(tok::flingStop))
+    if (abs64(v) < stop_of(kind_))
         return;
     v_ = v;
     last_ = now;
@@ -257,15 +315,35 @@ bool Scroll::step(int64_t now)
         }
         return true;
     }
+    const Tables& t = tab(kind_);
+    if (back_) {
+        int64_t dt = last_ == kNoTime ? 0 : std::max<int64_t>(0, now - last_);
+        last_ = now;
+        pos64 e = end(), d = pos_ - e;
+        for (; dt > 0 && abs64(d) >= kLand; dt -= kMaxStep)
+            d = (d * t.back[std::min<int64_t>(dt, kMaxStep)]) >> kQ;
+        pos_ = abs64(d) < kLand ? e : e + d;
+        back_ = pos_ != e;
+        return true;
+    }
     if (!fling_)
         return settle();
     int dt = (int)std::clamp<int64_t>(now - last_, 0, kMaxStep);
     last_ = now;
     if (dt == 0)
         return true;
-    bool inside = write(pos_ + ((v_ * kTab.travel[dt]) >> kQ));
-    v_ = (v_ * kTab.keep[dt]) >> kQ;
-    if (!inside || abs64(v_) < std_u(tok::flingStop))
+    pos64 p = pos_ + ((v_ * t.travel[dt]) >> kQ);
+    if ((p < 0 || p > limit_) && ends()) {
+        pos64 lead = std::min<pos64>(abs64(v_) * kLead / 1000, std_u(tok::motion_overscrollCap));
+        pos_ = p < 0 ? -lead : limit_ + lead;
+        fling_ = false;
+        v_ = 0;
+        back_ = pos_ < 0 || pos_ > limit_;
+        return true;
+    }
+    bool inside = write(p);
+    v_ = (v_ * t.keep[dt]) >> kQ;
+    if (!inside || abs64(v_) < stop_of(kind_))
         stop();
     return true;
 }

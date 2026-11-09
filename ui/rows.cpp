@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "../gfx/compose.h"
+#include "../gfx/wrap.h"
 #include "accent.h"
 #include "size.h"
 
@@ -14,13 +15,32 @@ namespace {
 int to64(fx u) { return (to_px(u) + 512) >> 10; }
 constexpr int std64(fx u) { return (std_to_px(u) + 512) >> 10; }
 
-const Role& primary_role(const Row& r) { return r.bold ? sz().listPlaylist : sz().listPrimary; }
+const Role& primary_role(const Row& r)
+{
+    return r.collection ? role::listCollection : r.bold ? sz().listPlaylist : sz().listPrimary;
+}
 
 const Role& secondary_role(const Row& r) { return r.count_line || r.bold ? sz().listCount : sz().listSecondary; }
 
 const Role& count_role() { return sz().listCount; }
 
 const Role& divider_role() { return role::letterGlyph; }
+
+void ring(Canvas& c, Rect r, int w, int a)
+{
+    for (Rect q : {Rect{r.x0 - w, r.y0 - w, r.x1 + w, r.y0}, Rect{r.x0 - w, r.y1, r.x1 + w, r.y1 + w},
+                   Rect{r.x0 - w, r.y0, r.x0, r.y1}, Rect{r.x1, r.y0, r.x1 + w, r.y1}})
+        if (a >= 256)
+            c.fill(q, kWhite);
+        else
+            c.blend(q, kWhite, a);
+}
+
+void inset_ring(Canvas& c, Rect t, fx center, fx width, int a)
+{
+    int in = px(center + width / 2);
+    ring(c, t.grow(-in), std::max(1, in - px(center - width / 2)), a);
+}
 
 int number_column64(Fonts& f, size_t digits)
 {
@@ -43,6 +63,8 @@ int number_column64(Fonts& f, size_t digits)
 
 int row_title_x64(Fonts& f, const Row& r, bool ring)
 {
+    if (r.collection && ring)
+        return to64(tok::rowCollectionTextX);
     if (ring)
         return to64(tok::hubEdge + sz().songIndent);
     if (!r.number.empty())
@@ -65,6 +87,7 @@ void Chrome::measure(Fonts& f, const char* word, std::vector<const char*> pivots
     word_ = word;
     names_ = std::move(pivots);
     clear_parts();
+    clear();
     header_w64_ = f.width64(role::pageHeader.std_style(), word);
     for (int k = 0; k < 2; k++) {
         w64_[k].clear();
@@ -115,8 +138,8 @@ int Chrome::row64(int64_t now) const
     int64_t e = now - at_;
     if (e >= dur || e < 0)
         return rest_row64();
-    fx p = curve(Curve::Strip, (fx)(e * kOne / dur));
-    return from_row_ + (int)(((int64_t)(rest_row64() - from_row_) * p) >> kFxBits);
+    fx p = kOne - curve(Curve::CubicOut, (fx)(e * kOne / dur));
+    return rest_row64() + dir_ * (int)(((int64_t)to64(tok::motion_pivotStripShift) * p) >> kFxBits);
 }
 
 int Chrome::std_pos64(int i) const
@@ -135,56 +158,57 @@ int Chrome::std_row64(int64_t now) const
     int64_t e = now - at_;
     if (e >= dur || e < 0)
         return rest;
-    fx p = curve(Curve::Strip, (fx)(e * kOne / dur));
-    return from_std_ + (int)(((int64_t)(rest - from_std_) * p) >> kFxBits);
+    fx p = kOne - curve(Curve::CubicOut, (fx)(e * kOne / dur));
+    return rest + dir_ * (int)(((int64_t)std64(tok::motion_pivotStripShift) * p) >> kFxBits);
 }
 
 int Chrome::header_x64(int std_row) const
 {
     int edge = std64(tok::hubEdge);
-    return std64(tok::page_headerX) + (int)(((int64_t)(std_row - edge) * tok::motion_pivotHeaderParallax) >> kFxBits);
+    return std64(header_x_) + (int)(((int64_t)(std_row - edge) * tok::motion_pivotHeaderParallax) >> kFxBits);
 }
 
-void Chrome::switch_to(int i, int64_t now)
+void Chrome::switch_to(int i, int64_t now, int dir)
 {
     if (i == active_)
         return;
-    from_row_ = row64(now);
-    from_std_ = std_row64(now);
     from_active_ = active_;
     active_ = i;
+    dir_ = dir;
     at_ = now;
 }
 
-bool Chrome::draw(Canvas& c, Fonts& f, fx fly, int64_t now) const
+bool Chrome::draw(Canvas& c, Fonts& f, int64_t now) const
 {
     bool ok = true;
     Rect keep = c.clip();
-    int fy = fx_round(to_px(fx_mul(fly, tok::motion_headerOutDistance)));
-    int a = alpha256(kOne - fly);
     int row = row64(now);
     if (!header_part_.hidden) {
-        int hy = fy + header_part_.dy;
+        int hy = header_part_.dy;
         c.set_clip(Rect{0, hy, kPortraitW, hy + std_px(tok::pivotTop)}.intersect(keep));
+        fx ha = lit(kHeader, now) ? tok::alpha_full : header_alpha_;
         ok = f.draw(c, role::pageHeader.std_style(), word_.c_str(), header_x64(std_row64(now)) + header_part_.dx64,
                     std_px(tok::page_headerBaseline) + hy, tok::color_pageHeader,
-                    alpha256(fx_mul(role::pageHeader.alpha, header_part_.alpha)) * a >> 8) &&
+                    alpha256(fx_mul(ha, header_part_.alpha))) &&
              ok;
         c.set_clip(keep);
     }
-    int label = tok::motion_pivotLabel >> kFxBits;
+    int label = tok::motion_pivotLabel >> kFxBits, strip = tok::motion_pivotStrip >> kFxBits;
     int64_t e = now - at_;
     fx lp = e >= label || e < 0 ? kOne : (fx)(e * kOne / label);
+    fx sa = e >= strip || e < 0 ? kOne : fx_lerp(tok::motion_pivotStripAlpha, kOne, (fx)(e * kOne / strip));
     for (int i = 0; i < pivots(); i++) {
         const ChromePart& part = pivot_parts_[(size_t)i];
         if (part.hidden)
             continue;
         const Role& r = i == active_ ? role::pivotActive : role::pivotInactive;
         fx on = i == active_ ? (i != from_active_ ? lp : kOne) : i == from_active_ ? kOne - lp : 0;
-        fx la = fx_mul(fx_lerp(role::pivotInactive.alpha, role::pivotActive.alpha, on), part.alpha);
+        fx la = fx_mul(lit(i, now) ? tok::alpha_full
+                                   : fx_mul(fx_lerp(role::pivotInactive.alpha, role::pivotActive.alpha, on), sa),
+                       part.alpha);
         uint32_t rgb = blend_px(tok::color_pivotInactive, kWhite, alpha256(on));
-        ok = f.draw(c, r.style(), names_[i], row + pos64(i) + part.dx64, px(tok::page_pivotBaseline) + fy + part.dy, rgb,
-                    alpha256(la) * a >> 8) &&
+        ok = f.draw(c, r.style(), names_[i], row + pos64(i) + part.dx64, px(tok::page_pivotBaseline) + part.dy, rgb,
+                    alpha256(la)) &&
              ok;
     }
     return ok;
@@ -209,10 +233,12 @@ int Chrome::pivot_hit(fx x, fx y) const
     return -1;
 }
 
+int Chrome::header_x64() const { return header_x64(std64(tok::hubEdge) - std_pos64(active_)); }
+
 bool Chrome::header_hit(fx x, fx y) const
 {
     int64_t x64 = (int64_t)to_px(x) >> 10;
-    int hx = header_x64(std64(tok::hubEdge) - std_pos64(active_));
+    int hx = header_x64();
     return y < kept_u(tok::headerBand) && x64 >= hx && x64 < hx + header_w64_;
 }
 
@@ -225,22 +251,27 @@ void PivotMotion::begin(int64_t now, int dir)
 
 bool PivotMotion::active(int64_t now) const
 {
-    int total = ((tok::motion_pivotOut + tok::motion_pivotRows) >> kFxBits) +
+    int total = ((tok::motion_pivotOut + std::max(tok::motion_pivotRows, tok::motion_pivotRowFade)) >> kFxBits) +
                 (tok::motion_pivotRowCap >> kFxBits) * (tok::motion_pivotRowStagger >> kFxBits);
     return at_ >= 0 && now - at_ < total;
 }
 
 bool PivotMotion::entering(int64_t now) const { return active(now) && now - at_ >= (tok::motion_pivotOut >> kFxBits); }
 
+int64_t PivotMotion::in_ms(int64_t now, int row) const
+{
+    int stagger = tok::motion_pivotRowStagger >> kFxBits, cap = tok::motion_pivotRowCap >> kFxBits;
+    return now - at_ - (tok::motion_pivotOut >> kFxBits) - (int64_t)std::min(row, cap) * stagger;
+}
+
 fx PivotMotion::alpha(int64_t now, int row) const
 {
-    int out = tok::motion_pivotOut >> kFxBits, rows = tok::motion_pivotRows >> kFxBits;
-    int stagger = tok::motion_pivotRowStagger >> kFxBits, cap = tok::motion_pivotRowCap >> kFxBits;
+    int out = tok::motion_pivotOut >> kFxBits, fade = tok::motion_pivotRowFade >> kFxBits;
     int64_t e = now - at_;
     if (e < out)
         return kOne - curve(Curve::Strip, (fx)(e * kOne / out));
-    int64_t k = e - out - (int64_t)std::min(row, cap) * stagger;
-    return k <= 0 ? 0 : k >= rows ? kOne : curve(Curve::Strip, (fx)(k * kOne / rows));
+    int64_t k = in_ms(now, row);
+    return k <= 0 ? 0 : k >= fade ? kOne : (fx)(k * kOne / fade);
 }
 
 Thumb PivotMotion::thumb(const Thumb& out, const Thumb& in, int64_t now) const
@@ -268,37 +299,63 @@ void PivotMotion::compose(const Surface& layer, Canvas& c, Rect area, pos64 top,
 
 void PivotMotion::blend_row(const Surface& layer, Canvas& c, Rect clip, pos64 y, fx h, int row, int64_t now) const
 {
-    int dir = now - at_ < (tok::motion_pivotOut >> kFxBits) ? -dir_ : dir_;
     int y0 = (int)((((y * ppu()) >> kFxBits) + kHalf) >> kFxBits);
     int y1 = (int)(((((y + h) * ppu()) >> kFxBits) + kHalf) >> kFxBits);
     fx p = alpha(now, row);
-    int dx = dir * fx_round(to_px(fx_mul(tok::motion_pivotShift, kOne - p)));
+    int dx;
+    if (now - at_ < (tok::motion_pivotOut >> kFxBits)) {
+        dx = -dir_ * fx_round(to_px(fx_mul(tok::motion_pivotShift, kOne - p)));
+    } else {
+        int rows = tok::motion_pivotRows >> kFxBits;
+        int64_t k = std::clamp<int64_t>(in_ms(now, row), 0, rows);
+        fx s = kOne - curve(Curve::CubicOut, (fx)(k * kOne / rows));
+        dx = dir_ * fx_round(to_px(fx_mul(tok::motion_pivotRowInShift, s)));
+    }
     blend_band(layer, c.surface(), Rect{0, y0, kPortraitW, y1}.intersect(clip), dx, alpha256(p));
 }
 
-bool draw_list_row(Canvas& c, Fonts& f, GlyphCache* g, const Row& r, int top, fx alpha, bool focused, fx press)
+int collection_base(int top, const TextStyle& name)
+{
+    return top + px(tok::rowTextInset) + fx_round(fx_mul(tok::capHeight, fx_int(name.px)));
+}
+
+int list_row_base(Fonts& f, const Row& r, int top, const TextStyle& name)
+{
+    int h = px(r.collection ? tok::rowCollection : sz().rowHeight);
+    if (r.collection)
+        return collection_base(top, name);
+    if (!r.secondary.empty())
+        return top + px(sz().rowTextInset) + f.ascent(name.px);
+    return top + (h - f.ascent(name.px) - f.descent(name.px)) / 2 + f.ascent(name.px);
+}
+
+int row_thumbs_top(const Row& r, int top) { return collection_base(top, primary_role(r).style()) + px(tok::rowThumbDrop); }
+
+bool draw_list_row(Canvas& c, Fonts& f, GlyphCache* g, const Row& r, int top, fx alpha, bool focused, fx press,
+                   PressGlow* glow, int64_t now)
 {
     bool ok = true;
-    int h = px(sz().rowHeight);
+    int h = px(r.collection ? tok::rowCollection : sz().rowHeight);
     int right = px(canvas_w() - tok::hubEdge);
     Rect band{0, top, kPortraitW, top + h};
     if (r.kind == Row::Divider) {
+        int d = px(r.collection ? tok::dividerTileCollection : tok::dividerTile), x = px(tok::hubEdge);
+        Rect t{x, top + (h - d) / 2, x + d, top + (h - d) / 2 + d};
+        draw_letter_tile(c, t, px(tok::letterTileBorder), alpha256(tok::letterTileBorderAlpha), {});
         TextStyle st = divider_role().style();
-        return draw_clipped(c, f, st, r.primary, to64(tok::hubEdge), top + h - px(tok::letterInsetBaseline),
-                            alpha256(divider_role().alpha), band);
+        int w = f.width64(st, r.primary.c_str());
+        return draw_clipped(c, f, st, r.primary, (t.x1 - px(tok::letterInsetX)) * 64 - w,
+                            t.y1 - px(tok::letterInsetBaseline), alpha256(divider_role().alpha), band);
     }
     Zoom z{press, kPortraitW * 32, top * 64 + h * 32};
     TextStyle ps = primary_role(r).style();
     const Role& sr = secondary_role(r);
     TextStyle ss = sr.style();
-    int base;
-    if (!r.secondary.empty())
-        base = top + px(sz().rowTextInset) + f.ascent(ps.px);
-    else
-        base = top + (h - f.ascent(ps.px) - f.descent(ps.px)) / 2 + f.ascent(ps.px);
+    int base = list_row_base(f, r, top, ps);
     int x64 = row_title_x64(f, r, r.ring && g);
     if (r.ring && g) {
-        int d = px(sz().rowRing), cx = px(tok::hubEdge) + d / 2, cy = top + h / 2;
+        int d = px(r.collection ? tok::rowPlayRing : sz().rowRing);
+        int cx = r.collection ? px(tok::rowPlayRingX) : px(tok::hubEdge) + d / 2, cy = top + h / 2;
         bool lit = r.ring_toggle ? r.ring_on : focused;
         int a = alpha256(lit ? tok::alpha_full : tok::alpha_mid);
         int stroke = px(focused ? tok::ringStrokeFocused : tok::ringStrokeIdle);
@@ -353,19 +410,47 @@ bool draw_list_row(Canvas& c, Fonts& f, GlyphCache* g, const Row& r, int top, fx
     }
     Rect clip{x64 >> 6, top, primary_right, top + h};
     Rect keep = c.clip();
-    c.set_clip(z.rect(clip).intersect(keep));
     TextStyle ts = ps;
     if (r.accent)
         accent_bold(ts);
-    if (!c.clip().empty())
+    if (glow && !r.hide && (!r.accent || accent_off()))
+        ok = glow->draw(c, f, {{ts, r.primary, x64, base}}, clip, z, now) && ok;
+    c.set_clip(z.rect(clip).intersect(keep));
+    if (!c.clip().empty() && !r.hide)
         ok = f.draw(c, ts, r.primary.c_str(), x64, base, r.accent ? accent() : kWhite,
                     r.accent ? 256 : alpha256(alpha), z) && ok;
     c.set_clip(keep);
     if (!r.secondary.empty()) {
         int sb = top + h - px(sz().rowTextInset) - f.descent(ss.px);
-        ok = draw_clipped(c, f, ss, r.secondary, x64, sb, alpha256(sr.alpha), Rect{x64 >> 6, top, right, top + h}, z) && ok;
+        fx sa = r.lib_sub ? role::listLibSecondary.alpha : sr.alpha;
+        ok = draw_clipped(c, f, ss, r.secondary, x64, sb, alpha256(sa), Rect{x64 >> 6, top, right, top + h}, z) && ok;
     }
     return ok;
+}
+
+bool list_row_word(Fonts& f, ListView& v, int row, std::string& text, TextStyle& st, fx& x, fx& base, fx& look)
+{
+    if (!v.model() || row < 0 || row >= v.model()->count() || !v.cell_x.empty())
+        return false;
+    pos64 y = (pos64)v.top() + (pos64)row * v.pitch() - v.offset();
+    if (y < (pos64)v.top() || y + v.pitch() > (pos64)v.bottom())
+        return false;
+    const Row& r = v.slot(row);
+    if (r.kind != Row::Item || r.accent || r.primary.empty())
+        return false;
+    int top = (int)((((y * ppu()) >> kFxBits) + kHalf) >> kFxBits);
+    st = primary_role(r).style();
+    int base_px = list_row_base(f, r, top, st);
+    int x64 = row_title_x64(f, r, r.ring), right = px(canvas_w() - tok::hubEdge);
+    if (!r.trailing.empty())
+        right = ((right * 64 - f.width64(count_role().style(), r.trailing.c_str())) >> 6) - px(tok::gutter);
+    if (x64 + f.width64(st, r.primary.c_str()) > right * 64)
+        return false;
+    text = r.primary;
+    x = (fx)((int64_t)x64 * 1024);
+    base = fx_int(base_px);
+    look = primary_role(r).alpha;
+    return true;
 }
 
 void warm_list_row(const Row& r, std::vector<WarmText>& out)
@@ -508,7 +593,7 @@ bool draw_settings_value(Canvas& c, Fonts& f, const Role& role, const std::strin
 }
 
 bool draw_settings_title(Canvas& c, Fonts& f, const Role& role, const std::vector<std::string>& lines, int top, int a256,
-                         int clip_x, int h)
+                         int clip_x, int h, PressGlow* glow, int64_t now)
 {
     if (h < 0)
         h = px(sz().settingsPitch);
@@ -517,6 +602,12 @@ bool draw_settings_title(Canvas& c, Fonts& f, const Role& role, const std::vecto
     int pitch = lines.size() < 2 ? 0 : px(sz().settingsTitlePitch);
     int base = top + (h - asc - pitch - desc) / 2 + asc;
     bool ok = true;
+    if (glow) {
+        std::vector<GlowText> gt;
+        for (size_t l = 0; l < lines.size(); l++)
+            gt.push_back({ts, lines[l], to64(tok::hubEdge), base + (int)l * pitch});
+        ok = glow->draw(c, f, gt, {0, top, clip_x, top + h}, {}, now);
+    }
     for (size_t l = 0; l < lines.size(); l++)
         ok = draw_clipped(c, f, ts, lines[l], to64(tok::hubEdge), base + (int)l * pitch, a256, {0, top, clip_x, top + h}) &&
              ok;
@@ -524,9 +615,9 @@ bool draw_settings_title(Canvas& c, Fonts& f, const Role& role, const std::vecto
 }
 
 bool draw_settings_row(Canvas& c, Fonts& f, const Role& role, const std::string& title, const std::string& value, int top,
-                       fx focus, const std::vector<std::string>& words)
+                       fx focus, const std::vector<std::string>& words, bool lit, PressGlow* glow, int64_t now)
 {
-    fx ta = fx_lerp(tok::type_settingsItem_alphaDim, tok::type_settingsItem_alpha, focus);
+    fx ta = lit ? tok::alpha_full : fx_lerp(tok::type_settingsItem_alphaDim, tok::type_settingsItem_alpha, focus);
     fx va = fx_lerp(tok::settingsValueDim, tok::settingsValueFocused, focus);
     std::vector<std::string> cands = words;
     cands.push_back(value);
@@ -534,7 +625,7 @@ bool draw_settings_row(Canvas& c, Fonts& f, const Role& role, const std::string&
     int clip_x = 0;
     bool ok =
         draw_settings_value(c, f, role, settings_wide_line(f, role, lines), value, top, kWhite, alpha256(va), clip_x);
-    return draw_settings_title(c, f, role, lines, top, alpha256(ta), clip_x) && ok;
+    return draw_settings_title(c, f, role, lines, top, alpha256(ta), clip_x, -1, glow, now) && ok;
 }
 
 Zoom tile_zoom(Rect t, fx press) { return {press, (t.x0 + t.x1) * 32, (t.y0 + t.y1) * 32}; }
@@ -547,12 +638,8 @@ void draw_art_tile(Canvas& c, const Image* img, Rect t, int b, const Zoom& z)
             c.blit(*img, t.x0, t.y0);
         else
             c.fill(t, tok::color_tile);
-        if (b) {
-            c.fill({t.x0 - b, t.y0 - b, t.x1 + b, t.y0}, kWhite);
-            c.fill({t.x0 - b, t.y1, t.x1 + b, t.y1 + b}, kWhite);
-            c.fill({t.x0 - b, t.y0, t.x0, t.y1}, kWhite);
-            c.fill({t.x1, t.y0, t.x1 + b, t.y1}, kWhite);
-        }
+        if (b)
+            ring(c, t, b, 256);
         return;
     }
     Rect64 r = Rect64::of(t, z);
@@ -564,7 +651,59 @@ void draw_art_tile(Canvas& c, const Image* img, Rect t, int b, const Zoom& z)
         c.fill_aa(r, tok::color_tile, 256);
 }
 
-void draw_letter_tile(Canvas& c, Rect t, int bw, int ba, const Zoom& z)
+bool draw_art_tile(Canvas& c, Fonts& f, const Image* img, bool box, const std::string& name, Rect t, int b, bool frame,
+                   const Role& role, int lines)
+{
+    bool ok = true;
+    if (img && img->w == t.x1 - t.x0)
+        c.blit(*img, t.x0, t.y0);
+    else if (box)
+        ok = draw_box_tile(c, f, role, name, t, lines);
+    else
+        c.fill(t, tok::color_tile);
+    if (b)
+        ring(c, t, b, 256);
+    if (frame)
+        draw_press_frame(c, t);
+    return ok;
+}
+
+bool draw_box_tile(Canvas& c, Fonts& f, const Role& role, const std::string& name, Rect t, int lines)
+{
+    inset_ring(c, t, tok::boxInset, tok::boxLine, alpha256(tok::boxLineAlpha));
+    if (name.empty() || lines <= 0)
+        return true;
+    Rect in = t.grow(-px(tok::boxInset + tok::boxLine / 2));
+    TextStyle ts = role.style();
+    std::shared_ptr<const TextLayout> l = f.layout(ts, name, Dir::Auto);
+    bool rtl = l->para.base & 1;
+    int inset64 = to64(tok::boxInset + tok::boxCaptionX);
+    int x64 = rtl ? t.x1 * 64 - inset64 : t.x0 * 64 + inset64;
+    TextPrefix pre;
+    f.prefix64(ts, *l, pre);
+    auto width = [&](size_t b, size_t e) {
+        int w = 0;
+        return pre.span64(*l, b, e, w) ? w : f.span64(ts, *l, b, e);
+    };
+    auto step = [&](size_t p, size_t end) { return cluster_next(*l, p, end); };
+    std::vector<std::pair<size_t, size_t>> rows =
+        wrap_ranges(l->text, rtl ? x64 - in.x0 * 64 : in.x1 * 64 - x64, (size_t)lines, width, step);
+    Rect keep = c.clip();
+    c.set_clip(in.intersect(keep));
+    bool ok = l->complete;
+    fx pitch = (fx)((int64_t)tok::boxCaptionPitch * role.size / tok::type_boxCaptionLib_size);
+    for (size_t i = 0; i < rows.size(); i++) {
+        GlyphRun r = f.run(ts, *l, rows[i].first, i + 1 == rows.size() ? l->text.size() : rows[i].second);
+        int base = t.y1 - px(tok::boxInset + tok::boxCaptionBase + (fx)(rows.size() - 1 - i) * pitch);
+        ok = f.draw(c, r, rtl ? x64 - r.width64 : x64, base, kWhite, alpha256(role.alpha)) && ok;
+    }
+    c.set_clip(keep);
+    return ok;
+}
+
+void draw_press_frame(Canvas& c, Rect t) { inset_ring(c, t, tok::boxInset, tok::pressFrame, 256); }
+
+void draw_letter_tile(Canvas& c, Rect t, int bw, int ba, const Zoom& z, bool frame)
 {
     if (!z.on()) {
         c.fill(t, tok::color_bg);
@@ -572,6 +711,8 @@ void draw_letter_tile(Canvas& c, Rect t, int bw, int ba, const Zoom& z)
         c.blend({t.x0, t.y1 - bw, t.x1, t.y1}, kWhite, ba);
         c.blend({t.x0, t.y0 + bw, t.x0 + bw, t.y1 - bw}, kWhite, ba);
         c.blend({t.x1 - bw, t.y0 + bw, t.x1, t.y1 - bw}, kWhite, ba);
+        if (frame)
+            draw_press_frame(c, t);
         return;
     }
     Rect64 r = Rect64::of(t, z);

@@ -70,6 +70,21 @@ EyeRun eye_run(int h, fx step, int eye)
     return r;
 }
 
+EyeRun shift_run(EyeRun e, int h, fx step, int ty)
+{
+    if (e.n <= 0 || ty == 0)
+        return e;
+    int y0 = e.y0 + ty;
+    if (y0 < 0) {
+        e.acc += (uint32_t)((int64_t)-y0 * std::max<fx>(step, 0));
+        e.n += y0;
+        y0 = 0;
+    }
+    e.y0 = std::min(y0, h);
+    e.n = std::clamp(e.n, 0, h - e.y0);
+    return e;
+}
+
 int row_span(int w, int lw, fx step)
 {
     if (step < 0)
@@ -84,20 +99,21 @@ int row_span(int w, int lw, fx step)
 
 template <class F, class L>
 void warp(const SurfaceT<F, L>& src, const SurfaceT<F, L>& dst, const WarpRow* rows, uint32_t bg, int a, bool motion,
-          int eye)
+          int eye, int tx, int ty)
 {
     prof::Scope ps(prof::Warp);
     using T = typename F::T;
     if constexpr (std::is_same_v<L, Rot>) {
         for (int row = 0; row < dst.w; row++) {
             uint32_t* d = dst.mem_row(row);
-            const WarpRow& r = rows[row];
-            if (r.src < 0 || a <= 0) {
+            int ri = row + tx;
+            if (ri < 0 || ri >= dst.w || rows[ri].src < 0 || a <= 0) {
                 fill_px(d, bg, dst.h);
                 continue;
             }
+            const WarpRow& r = rows[ri];
             const uint32_t* s = src.mem_row(r.src);
-            EyeRun e = eye_run(dst.h, r.step, eye);
+            EyeRun e = shift_run(eye_run(dst.h, r.step, eye), dst.h, r.step, ty);
             if (e.y0)
                 fill_px(d, bg, e.y0);
             d += e.y0;
@@ -139,9 +155,14 @@ void warp(const SurfaceT<F, L>& src, const SurfaceT<F, L>& dst, const WarpRow* r
         T g = F::pack(bg);
         std::vector<Col> cols(w);
         for (int x = 0; x < w; x++) {
-            const WarpRow& r = rows[w - 1 - x];
+            int ri = w - 1 - x + tx;
             Col& k = cols[x];
-            EyeRun e = r.src < 0 || a <= 0 ? EyeRun{} : eye_run(h, r.step, eye);
+            if (ri < 0 || ri >= w) {
+                k = Col{nullptr, 0, 0, 0, 0};
+                continue;
+            }
+            const WarpRow& r = rows[ri];
+            EyeRun e = r.src < 0 || a <= 0 ? EyeRun{} : shift_run(eye_run(h, r.step, eye), h, r.step, ty);
             k.acc = e.acc;
             k.step = (uint32_t)r.step;
             k.y0 = e.y0;
@@ -170,7 +191,7 @@ void warp(const SurfaceT<F, L>& src, const SurfaceT<F, L>& dst, const WarpRow* r
             }
         };
         auto go = [&](auto px) {
-            if (eye)
+            if (eye || ty)
                 run(px, std::true_type{});
             else
                 run(px, std::false_type{});
@@ -668,19 +689,24 @@ using S = SurfaceT<X888, Rot>;
 using SR = SurfaceT<X888, Rows>;
 using S16 = SurfaceT<R565, Rows>;
 
-template void warp<X888, Rot>(const S&, const S&, const WarpRow*, uint32_t, int, bool, int);
+template void warp<X888, Rot>(const S&, const S&, const WarpRow*, uint32_t, int, bool, int, int, int);
 template void project<X888, Rot>(const S&, Rect, const S&, Rect, const Projection&, uint32_t, int);
 template void project_sprite<X888, Rot>(const S&, Rect, const Projection&, uint32_t, SpriteT<X888, Rot>&);
 template void draw_sprite<X888, Rot>(CanvasT<X888, Rot>&, const SpriteT<X888, Rot>&, int);
 template void swivel<X888, Rot>(const S&, const S&, const S&, const SwivelCol*, uint32_t, int, int, bool);
 
-template void warp<X888, Rows>(const SR&, const SR&, const WarpRow*, uint32_t, int, bool, int);
+template void warp<X888, Rows>(const SR&, const SR&, const WarpRow*, uint32_t, int, bool, int, int, int);
 template void project<X888, Rows>(const SR&, Rect, const SR&, Rect, const Projection&, uint32_t, int);
 template void project_sprite<X888, Rows>(const SR&, Rect, const Projection&, uint32_t, SpriteT<X888, Rows>&);
 template void draw_sprite<X888, Rows>(CanvasT<X888, Rows>&, const SpriteT<X888, Rows>&, int);
 template void swivel<X888, Rows>(const SR&, const SR&, const SR&, const SwivelCol*, uint32_t, int, int, bool);
+template void project<X888, Rows>(const SR&, const uint8_t*, Rect, const SR&, Rect, const Projection&, uint32_t, int);
+template void project_sprite<X888, Rows>(const SR&, const uint8_t*, Rect, const Projection&, uint32_t,
+                                         SpriteT<X888, Rows>&);
+template void swivel<X888, Rows>(const SR&, const SR&, const uint8_t*, const SR&, const SwivelCol*, uint32_t, int, int,
+                                 bool);
 
-template void warp<R565, Rows>(const S16&, const S16&, const WarpRow*, uint32_t, int, bool, int);
+template void warp<R565, Rows>(const S16&, const S16&, const WarpRow*, uint32_t, int, bool, int, int, int);
 template void project<R565, Rows>(const S16&, const uint8_t*, Rect, const S16&, Rect, const Projection&, uint32_t, int);
 template void project_sprite<R565, Rows>(const S16&, const uint8_t*, Rect, const Projection&, uint32_t,
                                          SpriteT<R565, Rows>&);

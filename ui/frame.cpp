@@ -205,13 +205,17 @@ void quad_px(const Op& o, const LayerRef& l, Tgt& t, Rect clip)
         }
 }
 
-int group_end(const Frame& f, int i, int i1)
+}
+
+int frame_group_end(const Frame& f, int i, int i1)
 {
     int depth = 1, e = i + 1;
     for (; e < i1 && depth > 0; e++)
         depth += f.ops[e].kind == OpKind::Group ? 1 : f.ops[e].kind == OpKind::End ? -1 : 0;
     return depth > 0 ? i1 : e - 1;
 }
+
+namespace {
 
 Rect range_bounds(const Frame& f, int i0, int i1)
 {
@@ -221,7 +225,7 @@ Rect range_bounds(const Frame& f, int i0, int i1)
         if (o.kind == OpKind::End)
             continue;
         if (o.kind == OpKind::Group) {
-            int end = group_end(f, i, i1);
+            int end = frame_group_end(f, i, i1);
             Rect inner = o.src.empty() ? range_bounds(f, i + 1, end) : o.src;
             b = b.unite(sampled(o, inner).intersect(o.clip));
             i = end;
@@ -287,14 +291,22 @@ bool run_quad(const Frame& f, bool first, const Op& q, const LayerRef& l, Tgt& t
                           xf.x + xf.scale * l.ox, xf.y + xf.scale * l.oy, l.key, q.a, true);
         return true;
     }
+    bool px_whole = (xf.x & (kOne - 1)) == 0 && (xf.y & (kOne - 1)) == 0;
+    if (l.fmt == LayerFmt::Opaque && xf.angle == 0 && !xf.swivel && xf.scale == kOne && px_whole &&
+        q.sample == Sample::Nearest) {
+        Rect s = q.src.intersect(Rect{l.ox, l.oy, l.ox + l.s.w, l.oy + l.s.h});
+        blend_scaled_rect(l.s, nullptr, Rect{s.x0 - l.ox, s.y0 - l.oy, s.x1 - l.ox, s.y1 - l.oy}, t.s, c, kOne,
+                          xf.x + fx_int(l.ox), xf.y + fx_int(l.oy), l.key, q.a, true);
+        return true;
+    }
     Rect full = t.s.rect(), have{0, 0, l.s.w, l.s.h};
     bool whole = l.ox == 0 && l.oy == 0 && l.s.w == t.s.w && l.s.h == t.s.h && t.s.w == kPortraitW &&
                  same_rect(q.src.intersect(have), have) && same_rect(c, full);
     if (first && whole && l.fmt == LayerFmt::Opaque && q.sample == Sample::Nearest && xf.angle != 0 && !xf.swivel &&
-        xf.d > 0 && cos_deg(xf.angle) > 0 && xf.scale == kOne && xf.x == 0 && xf.y == 0) {
+        xf.d > 0 && cos_deg(xf.angle) > 0 && xf.scale == kOne && px_whole) {
         sc.rows.resize(kPortraitW);
         turnstile_rows(xf.angle, xf.hinge, xf.d, sc.rows.data());
-        warp(l.s, t.s, sc.rows.data(), f.ground, q.a, true, xf.eye);
+        warp(l.s, t.s, sc.rows.data(), f.ground, q.a, true, xf.eye, xf.x >> kFxBits, xf.y >> kFxBits);
         return true;
     }
     return false;
@@ -310,8 +322,53 @@ Surface surface_of(Pix* px, int w, int h)
     return s;
 }
 
+bool in_place(const Op& o, int level) { return (o.xf.plain() && o.a >= 256 && !o.frozen) || level >= kFrameDepth; }
+
+Op group_quad(const Op& o, fx dx, fx dy)
+{
+    Op q = o;
+    q.kind = OpKind::Quad;
+    q.xf.x += dx;
+    q.xf.y += dy;
+    q.blend = Blend::Over;
+    return q;
+}
+
+Rect group_area(const Frame& f, const Op& q, int i, int end, Rect reach)
+{
+    Rect inner = f.ops[i].src.empty() ? range_bounds(f, i + 1, end) : f.ops[i].src;
+    return inner.intersect(preimage(q, reach));
+}
+
+size_t area_bytes(Rect a) { return a.empty() ? 0 : (size_t)(a.x1 - a.x0) * (a.y1 - a.y0) * (sizeof(Pix) + 1); }
+
+bool over_scratch(const Frame& f, int i0, int i1, fx dx, fx dy, Rect clip, size_t used, int level)
+{
+    for (int i = i0; i < i1; i++) {
+        const Op& o = f.ops[i];
+        if (o.kind != OpKind::Group)
+            continue;
+        int end = frame_group_end(f, i, i1);
+        Rect oc = shift(o.clip, dx, dy).intersect(clip);
+        if (in_place(o, level)) {
+            if (over_scratch(f, i + 1, end, dx + o.xf.x, dy + o.xf.y, oc, used, level))
+                return true;
+        } else {
+            Rect whole = group_area(f, group_quad(o, dx, dy), i, end, oc);
+            size_t need = area_bytes(whole);
+            if (used + need > kScratchCap)
+                return true;
+            if (need && over_scratch(f, i + 1, end, fx_int(-whole.x0), fx_int(-whole.y0),
+                                     {0, 0, whole.x1 - whole.x0, whole.y1 - whole.y0}, used + need, level + 1))
+                return true;
+        }
+        i = end;
+    }
+    return false;
+}
+
 void draw_range(const Frame& f, int i0, int i1, Tgt& t, fx dx, fx dy, Rect clip, const FrameSources& src,
-                FrameScratch& sc, int level, int first, bool& ok)
+                FrameScratch& sc, size_t used, int level, int first, bool& ok)
 {
     for (int i = i0; i < i1; i++) {
         const Op& o = f.ops[i];
@@ -319,31 +376,32 @@ void draw_range(const Frame& f, int i0, int i1, Tgt& t, fx dx, fx dy, Rect clip,
             continue;
         Rect oc = shift(o.clip, dx, dy).intersect(clip);
         if (o.kind == OpKind::Group) {
-            int end = group_end(f, i, i1);
-            if ((o.xf.plain() && o.a >= 256 && !o.frozen) || level >= kFrameDepth) {
-                draw_range(f, i + 1, end, t, dx + o.xf.x, dy + o.xf.y, oc, src, sc, level, -1, ok);
+            int end = frame_group_end(f, i, i1);
+            bool flat = in_place(o, level);
+            Op q = group_quad(o, dx, dy);
+            Rect whole = flat ? Rect{} : group_area(f, q, i, end, oc);
+            size_t need = area_bytes(whole);
+            if (flat || used + need > kScratchCap) {
+                ok = ok && flat;
+                draw_range(f, i + 1, end, t, dx + o.xf.x, dy + o.xf.y, oc, src, sc, used, level, -1, ok);
+            } else if (!need) {
+                ok = false;
             } else {
                 ok = false;
-                Op q = o;
-                q.kind = OpKind::Quad;
-                q.xf.x += dx;
-                q.xf.y += dy;
-                q.blend = Blend::Over;
-                Rect inner = o.src.empty() ? range_bounds(f, i + 1, end) : o.src;
-                Rect area = inner.intersect(preimage(q, oc.intersect(t.clip).intersect(t.s.rect())));
-                if (!area.empty()) {
-                    FrameScratch::Level& lv = sc.lv[level];
-                    int w = area.x1 - area.x0, h = area.y1 - area.y0;
-                    lv.px.assign((size_t)w * h, Pix{});
-                    lv.m.assign((size_t)w * h, 0);
-                    Surface s = surface_of(lv.px.data(), w, h);
-                    Tgt st{s, lv.m.data(), s.rect()};
-                    draw_range(f, i + 1, end, st, fx_int(-area.x0), fx_int(-area.y0), st.clip, src, sc, level + 1, -1,
-                               ok);
-                    LayerRef lr{s, lv.m.data(), 0, LayerFmt::Masked, area.x0, area.y0};
-                    q.src = area;
-                    quad_px(q, lr, t, oc);
-                }
+                FrameScratch::Level& lv = sc.lv[level];
+                int w = whole.x1 - whole.x0, h = whole.y1 - whole.y0;
+                lv.px.assign((size_t)w * h, Pix{});
+                lv.m.assign((size_t)w * h, 0);
+                Surface s = surface_of(lv.px.data(), w, h);
+                Rect seen = whole.intersect(preimage(q, oc.intersect(t.clip).intersect(t.s.rect())));
+                Rect local{seen.x0 - whole.x0, seen.y0 - whole.y0, seen.x1 - whole.x0, seen.y1 - whole.y0};
+                Tgt st{s, lv.m.data(), local};
+                if (!seen.empty())
+                    draw_range(f, i + 1, end, st, fx_int(-whole.x0), fx_int(-whole.y0), s.rect(), src, sc,
+                               used + need, level + 1, -1, ok);
+                LayerRef lr{s, lv.m.data(), 0, LayerFmt::Masked, whole.x0, whole.y0};
+                q.src = whole;
+                quad_px(q, lr, t, oc);
             }
             i = end;
             continue;
@@ -442,6 +500,8 @@ bool Op::same(const Op& o) const
 
 Rect op_bounds(const Op& o) { return o.bounds.empty() ? geom(o) : o.bounds; }
 
+bool frame_over_scratch(const Frame& f) { return over_scratch(f, 0, f.n, 0, 0, kScreen, 0, 0); }
+
 size_t FrameScratch::bytes() const
 {
     size_t n = rows.capacity() * sizeof(WarpRow);
@@ -467,7 +527,8 @@ Rect frame_damage(const Frame& prev, const Frame& next, const FrameSources& src)
 {
     if (prev.n == 0 || prev.ground != next.ground || (next.flags & kFrameFull) || prev.over_cap || next.over_cap ||
         prev.over_depth || next.over_depth || prev.phase != next.phase || prev.over != next.over ||
-        (prev.flags & ~kFrameFull) != (next.flags & ~kFrameFull))
+        (prev.flags & ~kFrameFull) != (next.flags & ~kFrameFull) || frame_over_scratch(prev) ||
+        frame_over_scratch(next))
         return kScreen;
     Walk pws, nws;
     Walk* pw = &pws;
@@ -540,7 +601,7 @@ bool frame_draw(const Frame& f, Canvas& c, const FrameSources& src, FrameScratch
     while (first < f.n && f.ops[first].kind == OpKind::End)
         first++;
     bool ok = true;
-    draw_range(f, 0, f.n, t, 0, 0, kScreen, src, sc, 0, first, ok);
+    draw_range(f, 0, f.n, t, 0, 0, kScreen, src, sc, 0, 0, first, ok);
     return ok;
 }
 

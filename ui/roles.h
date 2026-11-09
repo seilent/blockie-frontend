@@ -41,6 +41,7 @@ inline constexpr Role pivotInactive = FD_ROLE(pivotInactive, tok::tracking);
 inline constexpr Role watermark = FD_ROLE(watermark, tok::tracking);
 inline constexpr Role quickplayHeader = FD_ROLE(quickplayHeader, tok::tracking);
 inline constexpr Role quickplayHint = FD_ROLE(quickplayHint, tok::tracking);
+inline constexpr Role qpHint = FD_ROLE(qpHint, tok::tracking);
 inline constexpr Role sectionLabel = FD_ROLE(sectionLabel, tok::tracking);
 inline constexpr Role settingsItem = FD_ROLE(settingsItem, tok::tracking);
 inline constexpr Role pageRowTitle{tok::page_rowTitle, settingsItem.weight, settingsItem.tcase, settingsItem.alpha,
@@ -50,16 +51,23 @@ inline constexpr Role settingsSub = FD_ROLE(settingsSub, tok::tracking);
 inline constexpr Role detailName = FD_ROLE(detailName, tok::tracking);
 inline constexpr Role detailTitle = FD_ROLE(detailTitle, tok::tracking);
 inline constexpr Role detailSub = FD_ROLE(detailSub, tok::tracking);
+inline constexpr Role albcolTitle = FD_ROLE(albcolTitle, tok::tracking);
+inline constexpr Role albcolArtist = FD_ROLE(albcolArtist, tok::tracking);
 inline constexpr Role listPrimary = FD_ROLE(listPrimary, tok::tracking);
 inline constexpr Role listSecondary = FD_ROLE(listSecondary, tok::tracking);
 inline constexpr Role listCount = FD_ROLE(listCount, tok::tracking);
 inline constexpr Role listPlaylist = FD_ROLE(listPlaylist, tok::tracking);
+inline constexpr Role listCollection = FD_ROLE(listCollection, tok::tracking);
+inline constexpr Role listLibSecondary = FD_ROLE(listLibSecondary, tok::tracking);
 inline constexpr Role letterGlyph = FD_ROLE(letterGlyph, tok::tracking);
+inline constexpr Role boxCaption = FD_ROLE(boxCaption, tok::tracking);
+inline constexpr Role boxCaptionLib = FD_ROLE(boxCaptionLib, tok::tracking);
 inline constexpr Role gridCaption = FD_ROLE(gridCaption, tok::tracking);
 inline constexpr Role dialogTitle = FD_ROLE(dialogTitle, tok::tracking);
 inline constexpr Role dialogItem = FD_ROLE(dialogItem, tok::tracking);
 inline constexpr Role overlayLabel = FD_ROLE(overlayLabel, tok::tracking);
 inline constexpr Role jumpExit = FD_ROLE(jumpExit, tok::tracking);
+inline constexpr Role jumpCell = FD_ROLE(jumpCell, tok::tracking);
 inline constexpr Role npArtist = FD_ROLE(npArtist, tok::tracking);
 inline constexpr Role npAlbum = FD_ROLE(npAlbum, tok::tracking);
 inline constexpr Role npTitle = FD_ROLE(npTitle, tok::tracking);
@@ -71,10 +79,10 @@ inline constexpr Role toastTitle = FD_ROLE(toastTitle, tok::tracking);
 #define FD_ROLE_MIXED(n) \
     Role { tok::type_##n##_size, weight_of(tok::type_##n##_style), Case::Mixed, tok::type_##n##_alpha, tok::tracking }
 inline constexpr Role saverClock = FD_ROLE_MIXED(saverClock);
+inline constexpr Role lockTitle = FD_ROLE_MIXED(lockTitle);
+inline constexpr Role lockArtist = FD_ROLE_MIXED(lockArtist);
+inline constexpr Role lockAlbum = FD_ROLE_MIXED(lockAlbum);
 #undef FD_ROLE_MIXED
-inline constexpr Role saverWord = FD_ROLE(saverWord, tok::tracking);
-inline constexpr Role saverTitle = FD_ROLE(saverTitle, tok::tracking);
-inline constexpr Role saverLabel = FD_ROLE(saverLabel, tok::tracking);
 inline constexpr Role saverFourth = FD_ROLE(saverFourth, tok::tracking);
 inline constexpr Role overlayNumber{tok::type_overlayNumber_size, weight_of(tok::type_overlayNumber_style), Case::Mixed,
                                     tok::overlayLit, tok::tracking};

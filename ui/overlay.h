@@ -53,6 +53,8 @@ public:
     const std::string& title() const { return title_; }
     const std::vector<std::string>& items() const { return model_.items; }
     Rect render(Canvas& c, Fonts& f, int64_t now);
+    static int dialog_end(Fonts& f, int rows, const std::vector<std::string>& wraps,
+                          const std::vector<std::string>& subs);
     void set_frame(int top, int bottom)
     {
         top_px_ = top;
@@ -63,12 +65,40 @@ public:
     int panel_h() const { return panel_h_; }
     int first() const { return first_; }
     bool at_top() const { return first_ <= pin_; }
+    void set_kept(bool kept, bool capped, int max_panel)
+    {
+        kept_ = kept;
+        capped_ = kept && capped;
+        max_panel_ = capped_ ? max_panel : 0;
+    }
+    bool kept() const { return kept_; }
+    bool title_shown() const { return title_shown_; }
+    int shown() const { return shown_; }
+    int pinned() const { return pin_; }
+    fx row_pitch() const;
     void set_held(bool h) { held_ = h; }
+    void press(int i)
+    {
+        press_ = i >= lead_ && !read_only_ ? i : -1;
+        unglow_ = false;
+        if (press_ < 0 || press_ != glow_.key())
+            glow_.clear();
+    }
+    void drop_glow()
+    {
+        unglow_ = true;
+        glow_.clear();
+    }
+    int glow_key() const { return glow_.key(); }
+    int pressed() const { return press_; }
     bool scroll_to(int first, int64_t now);
     int hit(fx y) const;
     bool lead_hit(fx y) const;
     bool title_hit(fx x, fx y) const;
-    bool animating(int64_t now) const { return list_.animating(now) || list_.animating(drawn_at_); }
+    bool animating(int64_t now) const
+    {
+        return list_.animating(now) || list_.animating(drawn_at_) || glow_.moving(now);
+    }
     bool thumb_stale(int64_t now) const { return fade_.fading(now) || bar_.faded(fade_.at(now)) != thumb_; }
     Rect thumb_rect() const { return bar_.r.unite(thumb_.r); }
     ThumbFade& thumb_fade() { return fade_; }
@@ -96,6 +126,12 @@ private:
     ThumbFade fade_;
     int drawn_first_ = 0;
     bool held_ = false;
+    bool free_ = false;
+    bool kept_ = false, capped_ = false, title_shown_ = false;
+    int max_panel_ = 0;
+    int press_ = -1;
+    bool unglow_ = false;
+    PressGlow glow_;
 };
 
 class JumpGrid {
@@ -157,7 +193,7 @@ private:
     bool avail_[kSectionCount] = {};
     int focus_ = -1;
     PressSlots press_;
-    Scroll scroll_;
+    Scroll scroll_{ScrollKind::Grid};
     Velocity vel_;
     bool down_ = false, drag_ = false, caught_ = false;
     fx down_x_ = 0, down_y_ = 0;

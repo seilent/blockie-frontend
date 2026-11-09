@@ -20,13 +20,14 @@ const GlyphPath kGlyphs[] = {
     {"back", false, "M 28 16 L 5 16 M 14 7 L 5 16 L 14 25"},
     {"play", true, "M 9 5 L 27 16 L 9 27 Z"},
     {"pause", true, "M 7 5 H 13 V 27 H 7 Z M 19 5 H 25 V 27 H 19 Z"},
+    {"pauseWide", true, "M 6.43 5 H 12.43 V 27 H 6.43 Z M 19.57 5 H 25.57 V 27 H 19.57 Z"},
     {"next", true, "M 5 5 L 21 16 L 5 27 Z M 23 5 H 27 V 27 H 23 Z"},
     {"previous", true, "M 27 5 L 11 16 L 27 27 Z M 5 5 H 9 V 27 H 5 Z"},
     {"skipNext", true, "M 1.7 8 L 13.8 16 L 1.7 24 Z M 13.8 8 L 25.9 16 L 13.8 24 Z M 27.35 8 H 30.3 V 24 H 27.35 Z"},
     {"skipPrevious", true, "M 30.3 8 L 18.2 16 L 30.3 24 Z M 18.2 8 L 6.1 16 L 18.2 24 Z M 4.65 8 H 1.7 V 24 H 4.65 Z"},
     {"shuffle", false, "M 4 9 H 10 L 22 23 H 28 M 4 23 H 10 L 22 9 H 28 M 24 5 L 28 9 L 24 13 M 24 19 L 28 23 L 24 27"},
     {"repeat", false, "M 23 9 A 10 10 0 1 0 26 16 M 18 4 L 23 9 L 18 14"},
-    {"repeatOne", false, "M 23 9 A 10 10 0 1 0 26 16 M 18 4 L 23 9 L 18 14 M 13 13 L 16 11 V 21"},
+    {"one", false, "M 18.2 10.19 V 22.24 M 12.9 13.79 L 16.3 11.39"},
     {"heart", true, "M 16 28 L 5.5 17 A 7 7 0 0 1 16 9 A 7 7 0 0 1 26.5 17 Z"},
     {"plus", false, "M 16 4 V 28 M 4 16 H 28"},
     {"minus", false, "M 4 16 H 28"},
@@ -53,6 +54,7 @@ const GlyphPath kGlyphs[] = {
      "28.84 L 13.97 28.84 L 13.70 25.22 L 11.11 24.14 L 8.36 26.52 L 5.48 23.64 L 7.86 20.89 L 6.78 18.30 L 3.16 18.03 L 3.16 "
      "13.97 L 6.78 13.70 L 7.86 11.11 L 5.48 8.36 L 8.36 5.48 L 11.11 7.86 Z M 12.5 16 A 3.5 3.5 0 1 1 19.5 16 A 3.5 3.5 0 1 1 "
      "12.5 16 Z"},
+    {"queue", true, "M 8 6.98 H 24 V 10.59 H 8 Z M 8 14.2 H 20 V 17.81 H 8 Z M 8 21.41 H 16 V 25.02 H 8 Z"},
 };
 
 struct Pt {
@@ -469,6 +471,77 @@ void arc_coverage(int px, int stroke_px, int start_deg, int sweep_deg, Coverage&
         }
 }
 
+void glow_coverage(const Coverage& src, int grow, Coverage& out, int hole, int reach)
+{
+    int w = src.w + 2 * grow, h = src.h + 2 * grow;
+    out.w = w;
+    out.h = h;
+    out.rot.assign((size_t)std::max(0, w) * std::max(0, h), 0);
+    if (src.w <= 0 || grow <= 0)
+        return;
+    std::vector<uint8_t> a((size_t)w * h, 0), b((size_t)w * h, 0);
+    for (int y = 0; y < src.h; y++)
+        for (int x = 0; x < src.w; x++)
+            a[(size_t)(y + grow) * w + x + grow] = src.rot[src.index(x, y)];
+    auto pass = [&](const std::vector<uint8_t>& in, std::vector<uint8_t>& to, int r, int len, int lines, size_t step,
+                    size_t line) {
+        int n = 2 * r + 1;
+        for (int l = 0; l < lines; l++) {
+            const uint8_t* sp = in.data() + (size_t)l * line;
+            uint8_t* dp = to.data() + (size_t)l * line;
+            int sum = 0;
+            for (int i = 0; i < std::min(r, len); i++)
+                sum += sp[(size_t)i * step];
+            for (int i = 0; i < len; i++) {
+                if (i + r < len)
+                    sum += sp[(size_t)(i + r) * step];
+                if (i - r - 1 >= 0)
+                    sum -= sp[(size_t)(i - r - 1) * step];
+                dp[(size_t)i * step] = (uint8_t)((sum + n / 2) / n);
+            }
+        }
+    };
+    for (int k = 0; k < 3; k++) {
+        int r = reach > 0 ? (reach + 2 - k) / 3 : std::max(1, grow / 3);
+        if (r <= 0)
+            continue;
+        pass(a, b, r, w, h, 1, (size_t)w);
+        pass(b, a, r, h, w, (size_t)w, 1);
+    }
+    int64_t cut = (int64_t)4 * hole * hole;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int64_t dx = 2 * x + 1 - w, dy = 2 * y + 1 - h;
+            store(out, x, y, hole > 0 && dx * dx + dy * dy < cut ? 0 : a[(size_t)y * w + x]);
+        }
+}
+
+void dilate_coverage(const Coverage& src, int r, Coverage& out)
+{
+    out = src;
+    if (src.w <= 0 || src.h <= 0 || r <= 0)
+        return;
+    int w = src.w, h = src.h;
+    std::vector<uint8_t> a((size_t)w * h), b((size_t)w * h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            a[(size_t)y * w + x] = src.rot[src.index(x, y)];
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t m = 0;
+            for (int i = std::max(0, x - r); i <= std::min(w - 1, x + r); i++)
+                m = std::max(m, a[(size_t)y * w + i]);
+            b[(size_t)y * w + x] = m;
+        }
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t m = 0;
+            for (int i = std::max(0, y - r); i <= std::min(h - 1, y + r); i++)
+                m = std::max(m, b[(size_t)i * w + x]);
+            store(out, x, y, m);
+        }
+}
+
 void scale_coverage(const Coverage& src, int px, Coverage& out)
 {
     out.w = out.h = px;
@@ -504,15 +577,17 @@ void scale_coverage(const Coverage& src, int px, Coverage& out)
     }
 }
 
-const Coverage& GlyphCache::arc(int px, int stroke_px, int start_deg, int sweep_deg)
+const Coverage& GlyphCache::arc(int px, int stroke_px, int start_deg, int sweep_deg, fx scale)
 {
     std::string k = "arc:" + std::to_string(px) + ":" + std::to_string(stroke_px) + ":" + std::to_string(start_deg) + ":" +
                     std::to_string(sweep_deg);
+    if (scale != kOne)
+        k += ":s" + std::to_string(scale);
     auto it = map_.find(k);
     if (it != map_.end())
         return it->second;
     Coverage& cv = map_[k];
-    arc_coverage(px, stroke_px, start_deg, sweep_deg, cv);
+    arc_coverage(px, stroke_px, start_deg, sweep_deg, cv, scale);
     misses_++;
     bytes_ += cv.rot.size();
     return cv;

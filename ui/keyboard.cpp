@@ -543,7 +543,7 @@ void Keyboard::draw_key(Canvas& c, Fonts& f, const Key& k, bool bare)
     if (!s.empty())
         centered(c, f, ls, s, r, locked ? accent() : kWhite, k.code == Done && !ready() ? alpha256(tok::alpha_low) : a);
     if (k.code >= 0 && k.code <= 9 && !number() && !kana()) {
-        TextStyle ds = role::sectionLabel.style();
+        TextStyle ds = kept_text(role::sectionLabel).style();
         char d[2] = {(char)('0' + k.code), 0};
         int w = f.width64(ds, d);
         Rect keep = c.clip();
@@ -564,7 +564,7 @@ void Keyboard::draw_field(Canvas& c, Fonts& f, bool bare)
     border(c, field, px(tok::kb_fieldBorder), tok::color_border, alpha256(tok::alpha_full));
     if (bare)
         return;
-    TextStyle ts = role::listPrimary.style();
+    TextStyle ts = kept_text(role::listPrimary).style();
     ts.tcase = Case::Mixed;
     int pad = px(tok::kb_fieldPad);
     int box_top = px(top + tok::kb_fieldPad), base = box_top + f.ascent(ts.px);
@@ -575,7 +575,7 @@ void Keyboard::draw_field(Canvas& c, Fonts& f, bool bare)
                                                         : nullptr;
     if (word) {
         Key tk = toggle_key();
-        TextStyle hs = role::listCount.style();
+        TextStyle hs = kept_text(role::listCount).style();
         int w = f.width64(hs, word);
         f.draw(c, hs, word, right * 64 - w, base, kWhite, alpha256(role::listCount.alpha));
         right = std::min(px(tk.x), right - (w + 63) / 64) - pad;

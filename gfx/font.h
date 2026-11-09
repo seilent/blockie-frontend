@@ -65,6 +65,7 @@ struct TextPrefix;
 struct GlyphRaster {
     int w = 0, h = 0, xoff = 0, yoff = 0;
     std::vector<uint8_t> cov;
+    bool spans = false;
 };
 
 inline void warm_add(std::vector<WarmText>& out, const TextStyle& st, const std::string& s, int bucket = 0)
@@ -140,6 +141,7 @@ public:
     bool owes() const;
     int width64(const TextStyle& st, const char* utf8);
     void ink64(const TextStyle& st, const char* utf8, int& left64, int& right64);
+    void ink_rows(const TextStyle& st, const char* utf8, int& top, int& bottom);
     bool draw(Canvas& c, const TextStyle& st, const char* utf8, int x64, int baseline, uint32_t rgb, int a256);
     bool draw(Canvas& c, const TextStyle& st, const char* utf8, int x64, int baseline, uint32_t rgb, int a256,
               const Zoom& z);
@@ -174,12 +176,15 @@ public:
     bool draw(Canvas& c, const GlyphRun& r, int x64, int baseline, uint32_t rgb, int a256, const Zoom& z);
     bool warm(const TextStyle& st, std::string_view s, Dir d, Need n, int bucket = 0);
     bool cached(const TextStyle& st, std::string_view s, Dir d, int bucket = 0);
-    GlyphRaster direct(int face, int px, int gid);
+    GlyphRaster direct(int face, int px, int gid, int angle = 0);
     bool glyph_box(int face, int px, int gid, Rect& box);
-    void ask_direct(int face, int px, int gid);
-    bool take_direct(int face, int px, int gid, GlyphRaster& out);
-    void drop_direct(int face, int px, int gid);
+    void ask_direct(int face, int px, int gid, int angle = 0, Need n = Need::Predicted);
+    bool take_direct(int face, int px, int gid, GlyphRaster& out, int angle = 0);
+    void drop_direct(int face, int px, int gid, int angle = 0);
+    void post(std::function<void()> task);
+    uint32_t tasks_run() const { return tasks_run_.load(); }
     uint32_t direct_rasters() const { return direct_rasters_; }
+    static bool direct_key(uint64_t key);
     uint32_t ahead_rasters() const { return ahead_rasters_.load(); }
     size_t direct_held() const;
     size_t layout_entries() const { return lru_.size(); }
@@ -284,9 +289,10 @@ private:
     Glyph* glyph(int face, int px, int gid, int x, int y, bool& pending, bool& miss);
     Glyph* find(Cache& c, uint64_t key);
     Glyph make(int face, int px, int gid, float factor);
+    Glyph turned(int face, int px, int gid, int angle);
     Glyph* insert(Cache& c, uint64_t key, Glyph&& g, bool any);
     Glyph* raster(Cache& c, uint64_t key, int face, int px, int gid, float factor);
-    Glyph* claim(Cache& c, uint64_t key, int face, int px, int gid, float factor);
+    Glyph* claim(Cache& c, uint64_t key, int face, int px, int gid, float factor, bool* busy = nullptr);
     Glyph* scaled(int face, int px, int gid, int bucket, int x, int y, bool& pending, bool& miss, bool& subst,
                   uint64_t& got);
     void ask(uint64_t key, Need n, bool owed, bool kept, int x, int y);
@@ -318,6 +324,8 @@ private:
     std::condition_variable cv_, done_cv_;
     std::vector<Job> jobs_;
     std::vector<int> loads_;
+    std::deque<std::function<void()>> tasks_;
+    std::atomic<uint32_t> tasks_run_{0};
     std::vector<Done> done_, direct_done_;
     Job busy_;
     bool busy_on_ = false, busy_nice_ = false, loading_ = false, quit_ = false, ui_busy_ = false, idle_ahead_ = false;

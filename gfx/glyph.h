@@ -27,6 +27,8 @@ bool glyph_coverage(const char* name, int px, Coverage& out, fx scale = kOne);
 bool path_coverage(const char* d, bool fill, int px, Coverage& out, fx scale = kOne);
 void ring_coverage(int px, int stroke_px, Coverage& out, fx scale = kOne);
 void arc_coverage(int px, int stroke_px, int start_deg, int sweep_deg, Coverage& out, fx scale = kOne);
+void glow_coverage(const Coverage& src, int grow, Coverage& out, int hole = 0, int reach = 0);
+void dilate_coverage(const Coverage& src, int r, Coverage& out);
 void scale_coverage(const Coverage& src, int px, Coverage& out);
 
 struct Icon {
@@ -39,7 +41,7 @@ class GlyphCache {
 public:
     const Coverage& glyph(const char* name, int px, fx scale = kOne);
     const Coverage& ring(int px, int stroke_px, fx scale = kOne);
-    const Coverage& arc(int px, int stroke_px, int start_deg, int sweep_deg);
+    const Coverage& arc(int px, int stroke_px, int start_deg, int sweep_deg, fx scale = kOne);
     bool warm(const Icon& i);
     size_t size() const { return map_.size(); }
     size_t misses() const { return misses_; }

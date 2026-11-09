@@ -11,6 +11,8 @@
 #elif defined(FD_BOARD_A105)
 #include "a105.h"
 #define FD_PREFETCH 1
+#elif defined(FD_BOARD_PB)
+#include "pb.h"
 #else
 #include "ap80.h"
 #define FD_ROT 1

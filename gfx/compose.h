@@ -6,6 +6,10 @@
 
 namespace fd {
 
+template <class F = LiveF, class L = LiveL> struct PageShift {
+    const SurfaceT<F, L>* ground = nullptr;
+    int y0 = 0, y1 = 0, dy = 0;
+};
 template <class F = LiveF, class L = LiveL>
 void scrim(const SurfaceT<F, L>& page, const SurfaceT<F, L>& dst, uint32_t color, int a256, bool motion = false);
 template <class F = LiveF, class L = LiveL>
@@ -16,10 +20,12 @@ void blend_shifted(const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, Rect 
                    bool motion = false);
 template <class F = LiveF, class L = LiveL>
 void scrim_shifted(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, uint32_t color,
-                   int scrim_a256, Rect portrait, int dy, int a256, bool motion = false);
+                   int scrim_a256, Rect portrait, int dy, int a256, bool motion = false,
+                   const PageShift<F, L>& shift = {});
 template <class F = LiveF, class L = LiveL>
 void scrim_shifted_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst,
-                        uint32_t color, int scrim_a256, Rect portrait, int dy, int a256, int r0, int r1);
+                        uint32_t color, int scrim_a256, Rect portrait, int dy, int a256, int r0, int r1,
+                        const PageShift<F, L>& shift = {});
 template <class F = LiveF, class L = LiveL>
 void scrim_coverage_rows(const SurfaceT<F, L>& page, const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst,
                          uint32_t scrim_color, int scrim_a256, Rect portrait, fx scale, int cx, int cy, uint32_t color,
@@ -30,6 +36,17 @@ void coverage_scaled(const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, Rec
 template <class F = LiveF, class L = LiveL>
 void coverage_scaled(const SurfaceT<F, L>& layer, const uint8_t* mask, const SurfaceT<F, L>& dst, Rect portrait,
                      fx scale, int cx, int cy, uint32_t color, int a256, bool motion = false);
+struct HomographyFx {
+    int64_t m[9];
+};
+bool homography_fx(const double* inv, HomographyFx& out);
+void homography_span(const HomographyFx& h, int y, int x0, int n, int* u, int* v);
+template <class F = LiveF, class L = LiveL>
+void coverage_homography(const SurfaceT<F, L>& layer, const uint8_t* mask, const SurfaceT<F, L>& dst, Rect src,
+                         const double* h, uint32_t color, int a256, bool nearest = false, bool motion = false);
+template <class F = LiveF, class L = LiveL>
+void image_homography(const ImageT<F, L>& img, Rect at, const SurfaceT<F, L>& dst, Rect clip, const double* h,
+                      bool nearest);
 template <class F = LiveF, class L = LiveL>
 void blend_scaled(const SurfaceT<F, L>& layer, const SurfaceT<F, L>& dst, fx scale, int cx, int cy, uint32_t bg,
                   int a256, bool motion = false);

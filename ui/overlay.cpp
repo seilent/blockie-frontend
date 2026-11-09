@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <optional>
 
 #include "../core/gesture.h"
 #include "../gfx/wrap.h"
@@ -20,17 +21,36 @@ constexpr int kSlots = tok::jumpCols >> kFxBits;
 constexpr int kExitCells = tok::jumpExitCells >> kFxBits;
 constexpr int kSlotCount = kSectionCount + kExitCells;
 constexpr int kRows = (kSlotCount + kSlots - 1) / kSlots;
-constexpr fx kPitch = tok::tileS + tok::jumpGap;
-constexpr fx kLeft = (tok::canvasW - kSlots * tok::tileS - (kSlots - 1) * tok::jumpGap) / 2;
+constexpr fx kPitch = tok::jumpPitch;
+constexpr fx kTile = tok::jumpPitch - tok::jumpGap;
+constexpr fx kLeft = tok::jumpLeft;
+constexpr int kLatinSections = 27;
+constexpr int kSearchSlot = kLatinSections + 1;
 constexpr int ms_of(fx t) { return t >> kFxBits; }
 
-int slot_of(int i) { return i == JumpGrid::kExit ? 0 : i == JumpGrid::kSearch ? 1 : i + kExitCells; }
+int slot_of(int i)
+{
+    if (i == JumpGrid::kExit)
+        return 0;
+    if (i == JumpGrid::kSearch)
+        return kSearchSlot;
+    return i < kLatinSections ? i + 1 : i + kExitCells;
+}
+
+int item_of(int slot)
+{
+    if (slot == 0)
+        return JumpGrid::kExit;
+    if (slot == kSearchSlot)
+        return JumpGrid::kSearch;
+    return slot < kSearchSlot ? slot - 1 : slot - kExitCells;
+}
 
 pos64 row_top(int slot) { return (pos64)tok::jumpTop + (pos64)(slot / kSlots) * kPitch; }
 
 int px64(pos64 u) { return (int)((((u * ppu()) >> kFxBits) + kHalf) >> kFxBits); }
 
-const Role& letter_role() { return role::letterGlyph; }
+const Role& letter_role() { return role::jumpCell; }
 
 void border(Canvas& c, Rect t, int bw, uint32_t rgb, int a)
 {
@@ -94,6 +114,10 @@ void Menu::open(Form f, const std::string& title, const std::vector<std::string>
     shown_ = (int)items.size();
     fade_ = ThumbFade{};
     held_ = false;
+    free_ = false;
+    press_ = -1;
+    unglow_ = false;
+    glow_.clear();
 }
 
 void Menu::value(int focus, int mark, bool wrap, int64_t now)
@@ -101,6 +125,7 @@ void Menu::value(int focus, int mark, bool wrap, int64_t now)
     value_ = true;
     mark_ = mark;
     wrap_ = wrap;
+    free_ = false;
     list_.set_focus(std::clamp(focus, lead_, std::max(lead_, model_.count() - 1)), 0, now, false);
 }
 
@@ -114,6 +139,9 @@ void Menu::cells(std::vector<std::string> values, std::vector<bool> mixed, int e
 
 Rect Menu::render(Canvas& c, Fonts& f, int64_t now)
 {
+    std::optional<Scope> std_scope;
+    if (kept_)
+        std_scope.emplace(Fit::Kept, "menu");
     TextStyle ts = role::dialogTitle.std_style(), is = sz().dialogItem.style(), ms = is, vs = sz().settingsValue.style(),
               cs = sz().listCount.style();
     Rect keep = c.clip();
@@ -184,9 +212,25 @@ Rect Menu::render(Canvas& c, Fonts& f, int64_t now)
                 used += h[(size_t)(first_ + vis++)];
         } else {
             vis = std::clamp(pin_ + (room_h - pin_h) / pitch, std::min(n, pin_ + 1), n);
+            if (capped_) {
+                int fit = vis, least = std::min(n, pin_ + 1);
+                auto over = [&] { return 2 * edge + title_h + pin_h + (vis - pin_) * pitch > max_panel_; };
+                vis = std::clamp(pin_ + (max_panel_ - 2 * edge - title_h - pin_h) / pitch, least, fit);
+                if (title_h > 0 && over()) {
+                    title_h = 0;
+                    vis = std::clamp(pin_ + (max_panel_ - 2 * edge - pin_h) / pitch, least, fit);
+                }
+                if (pin_ > 0 && over()) {
+                    int rows = std::max(1, std::min(n - pin_, fit - pin_));
+                    pin_ = 0;
+                    pin_h = 0;
+                    vis = std::clamp((max_panel_ - 2 * edge) / pitch, 1, rows);
+                }
+            }
             int room = vis - pin_, fr = std::clamp(list_.focus_row(), pin_, n - 1);
             max_first_ = n - room;
-            first_ = std::clamp(first_, std::max(pin_, fr - room + 1), std::min(fr, n - room));
+            first_ = free_ ? std::clamp(first_, pin_, std::max(pin_, n - room))
+                           : std::clamp(first_, std::max(pin_, fr - room + 1), std::min(fr, n - room));
         }
     } else {
         first_ = pin_;
@@ -213,10 +257,13 @@ Rect Menu::render(Canvas& c, Fonts& f, int64_t now)
     items_top_ = fx_div(fx_int(top), ppu());
     pin_extra_ = fx_div(fx_int(pin_h - pin_ * pitch), ppu());
     title_rect_ = {};
-    if (!title_.empty()) {
+    title_shown_ = !title_.empty() && title_h > 0;
+    if (title_shown_) {
+        int x0 = px(tok::edge), x1 = kPortraitW - edge;
+        c.set_clip(Rect{keep.x0, keep.y0, x1, keep.y1}.intersect(keep));
         f.draw(c, ts, title_.c_str(), to64(tok::edge), title_base, kWhite, alpha256(role::dialogTitle.alpha));
-        int x0 = px(tok::edge);
-        title_rect_ = {x0, title_base - f.ascent(ts.px), x0 + (f.width64(ts, title_.c_str()) >> 6),
+        c.set_clip(keep);
+        title_rect_ = {x0, title_base - f.ascent(ts.px), std::min(x1, x0 + (f.width64(ts, title_.c_str()) >> 6)),
                        title_base + f.descent(ts.px)};
     }
     int rt = top;
@@ -243,9 +290,25 @@ Rect Menu::render(Canvas& c, Fonts& f, int64_t now)
             c.set_clip(Rect{0, rt, clip_x, rt + rh}.intersect(keep));
         int si = i - lead_;
         uint32_t ink = i == mark_ ? accent() : kWhite;
-        if (i == mark_ && accent_off())
+        if ((i == mark_ && accent_off()) || i == press_)
             a = kOne;
-        if (si >= 0 && (size_t)si < swatches_.size()) {
+        bool swatch = si >= 0 && (size_t)si < swatches_.size();
+        if (i == press_ && !swatch && !unglow_ && (i != mark_ || accent_off())) {
+            if (glow_.key() != i)
+                glow_.down(i, now);
+            std::vector<GlowText> gt;
+            const std::string& t = model_.items[(size_t)i];
+            if (cut[(size_t)i]) {
+                size_t r = t.find_first_not_of(' ', cut[(size_t)i]);
+                gt.push_back({s, t.substr(0, cut[(size_t)i]), to64(tok::edge), base});
+                gt.push_back({s, r == std::string::npos ? "" : t.substr(r), to64(tok::edge),
+                              base + f.ascent(s.px) + f.descent(s.px)});
+            } else {
+                gt.push_back({s, t, to64(tok::edge), base});
+            }
+            glow_.draw(c, f, gt, Rect{0, rt, clip_x, rt + rh}, {}, now);
+        }
+        if (swatch) {
             int side = s.px, sx = px(tok::edge), sy = rt + (pitch - side) / 2;
             c.set_clip(keep);
             c.fill({sx, sy, sx + side, sy + side}, swatches_[(size_t)si]);
@@ -308,6 +371,10 @@ bool Menu::scroll_to(int first, int64_t now)
     if (first == first_)
         return false;
     first_ = first;
+    if (!swatches_.empty()) {
+        free_ = true;
+        return true;
+    }
     int fr = std::clamp(list_.focus_row(), first_, first_ + shown_ - pin_ - 1);
     if (fr != list_.focus_row())
         list_.set_focus(fr, 0, now, false);
@@ -319,11 +386,16 @@ bool Menu::step(int delta, int64_t now, bool hold)
     if (read_only_)
         return scroll_to(first_ + delta, now);
     int n = model_.count(), to = list_.focus_row() + delta;
-    if (to >= lead_ && to < n)
-        return list_.move(delta, now);
+    if (to >= lead_ && to < n) {
+        bool moved = list_.move(delta, now);
+        if (moved)
+            free_ = false;
+        return moved;
+    }
     if (!wrap_ || hold || n - lead_ < 2)
         return false;
     list_.set_focus(delta > 0 ? lead_ : n - 1, 0, now, true);
+    free_ = false;
     return true;
 }
 
@@ -333,8 +405,23 @@ bool Menu::title_hit(fx x, fx y) const
     return px_x >= title_rect_.x0 && px_x < title_rect_.x1 && px_y >= title_rect_.y0 && px_y < title_rect_.y1;
 }
 
+int Menu::dialog_end(Fonts& f, int rows, const std::vector<std::string>& wraps, const std::vector<std::string>& subs)
+{
+    int is = sz().dialogItem.style().px, cs = sz().listCount.style().px;
+    int end = px(tok::contentTop) + rows * px(sz().settingsPitch);
+    for (const std::string& w : wraps)
+        end += w.empty() ? 0 : f.ascent(is) + f.descent(is);
+    for (const std::string& t : subs)
+        end += t.empty() ? 0 : f.ascent(cs) + f.descent(cs);
+    return end;
+}
+
+fx Menu::row_pitch() const { return kept_ ? kept_u(sz().settingsPitch) : sz().settingsPitch; }
+
 int Menu::row_at(fx y) const
 {
+    if (kept_)
+        y = fx_div(fx_mul(y, ppu()), tok::u);
     if (y < items_top_)
         return -1;
     fx rel = y - items_top_, pinned = pin_ * sz().settingsPitch + pin_extra_;
@@ -376,7 +463,7 @@ void JumpGrid::open(const bool avail[kSectionCount], int section)
 
 pos64 JumpGrid::limit_of() const
 {
-    return (pos64)tok::jumpTop + (pos64)(kRows - 1) * kPitch + tok::tileS + tok::edge - bottom_;
+    return (pos64)tok::jumpTop + (pos64)(kRows - 1) * kPitch + kTile + tok::edge - bottom_;
 }
 
 void JumpGrid::set_bottom(fx b, fx at)
@@ -400,22 +487,12 @@ bool JumpGrid::step(int delta, int64_t now)
 
 bool JumpGrid::step_focus(int delta, int64_t now)
 {
-    if (focus_ == kExit && delta > 0) {
-        set_focus(kSearch, now);
-        return true;
-    }
-    if (focus_ == kSearch && delta < 0) {
-        set_focus(kExit, now);
-        return true;
-    }
-    for (int i = (focus_ == kSearch ? kExit : focus_) + delta; i >= 0 && i < kSectionCount; i += delta)
-        if (avail_[i]) {
+    for (int s = slot_of(focus_) + delta; s >= 0 && s < kSlotCount; s += delta) {
+        int i = item_of(s);
+        if (i == kExit || i == kSearch || avail_[i]) {
             set_focus(i, now);
             return true;
         }
-    if (delta < 0 && focus_ >= 0) {
-        set_focus(kSearch, now);
-        return true;
     }
     return false;
 }
@@ -428,9 +505,9 @@ void JumpGrid::set_focus(int i, int64_t now)
 
 pos64 JumpGrid::offset_for(int i, pos64 off) const
 {
-    pos64 top = row_top(slot_of(i)), bottom = top + tok::tileS;
+    pos64 top = row_top(slot_of(i)), bottom = top + kTile;
     if (top - off < tok::edge)
-        off = top - tok::edge;
+        off = slot_of(i) < kSlots ? 0 : top - tok::edge;
     else if (bottom - off > bottom_ - tok::edge)
         off = bottom - (bottom_ - tok::edge);
     return std::clamp<pos64>(off, 0, limit_of());
@@ -439,7 +516,7 @@ pos64 JumpGrid::offset_for(int i, pos64 off) const
 bool JumpGrid::in_band(int slot, pos64 off) const
 {
     pos64 top = row_top(slot) - off;
-    return top >= tok::edge && top + tok::tileS <= bottom_ - tok::edge;
+    return top >= tok::edge && top + kTile <= bottom_ - tok::edge;
 }
 
 void JumpGrid::focus_after_scroll(int64_t now)
@@ -452,7 +529,7 @@ void JumpGrid::focus_after_scroll(int64_t now)
     for (int s = d > 0 ? 0 : kSlotCount - 1; s >= 0 && s < kSlotCount; s += d) {
         if (!in_band(s, off))
             continue;
-        int i = s == 0 ? kExit : s == 1 ? kSearch : s - kExitCells;
+        int i = item_of(s);
         if (i == kExit || i == kSearch || avail_[i]) {
             if (i != focus_)
                 set_focus(i, now);
@@ -465,8 +542,8 @@ void JumpGrid::cell_center(int i, fx& x, fx& y) const
 {
     Scope scope(Fit::Kept, "jump");
     int slot = slot_of(i);
-    x = cell_x(slot) + tok::tileS / 2;
-    y = cell_y(slot) + tok::tileS / 2;
+    x = cell_x(slot) + kTile / 2;
+    y = cell_y(slot) + kTile / 2;
 }
 
 void JumpGrid::press(const Event& in, int64_t now)
@@ -599,10 +676,11 @@ Rect JumpGrid::render(Canvas& c, Fonts& f, int64_t now)
     Rect e = cell_rect(kExit);
     if (e.y1 > 0) {
         TextStyle es = role::jumpExit.style();
-        int ebase = e.y0 + (e.y1 - e.y0 - f.ascent(es.px) - f.descent(es.px)) / 2 + f.ascent(es.px);
-        f.draw(c, es, "exit", to64(tok::edge), ebase, kWhite, alpha256(focus_ == kExit ? tok::alpha_full : role::jumpExit.alpha));
+        int ex64 = to64(tok::jumpExitCx) - f.width64(es, "exit") / 2;
+        int ebase = e.y0 + px(tok::jumpExitTop - tok::jumpTop) + fx_round(fx_mul(fx_int(es.px), tok::capHeight));
+        f.draw(c, es, "exit", ex64, ebase, kWhite, alpha256(focus_ == kExit ? tok::alpha_full : role::jumpExit.alpha));
         if (focus_ == kExit) {
-            int bx = px(tok::edge - tok::focus_barOffset);
+            int bx = (ex64 >> 6) - px(tok::focus_barOffset);
             c.fill({bx, e.y0, bx + px(tok::focus_barWidth), e.y1}, kWhite);
         }
     }
@@ -624,7 +702,7 @@ Rect JumpGrid::render(Canvas& c, Fonts& f, int64_t now)
 Rect JumpGrid::cell_rect(int i) const
 {
     int slot = slot_of(i);
-    int tile = std_px(tok::tileS), x = px(cell_x(slot)), y = px(cell_y(slot));
+    int tile = std_px(kTile), x = px(cell_x(slot)), y = px(cell_y(slot));
     return {x, y, x + tile, y + tile};
 }
 
@@ -640,7 +718,7 @@ void JumpGrid::draw_search(Canvas& c, int64_t now)
     else
         border(c, t, bw, kWhite, ba);
     int g = px(tok::jumpSearchGlyph);
-    int cx = t.x1 - px(tok::letterInsetX) - g * 27 / 64, cy = t.y1 - px(tok::letterInsetBaseline) - g * 27 / 64;
+    int cx = (t.x0 + t.x1) / 2, cy = (t.y0 + t.y1) / 2;
     if (z.on()) {
         cx = z.px_x(cx);
         cy = z.px_y(cy);
@@ -683,8 +761,8 @@ void JumpGrid::draw_cell(Canvas& c, Fonts& f, int i, int64_t now)
     int w = f.width64(ls, l);
     Rect keep = c.clip();
     c.set_clip(z.rect(t).intersect(keep));
-    f.draw(c, ls, l, (t.x1 - px(tok::letterInsetX)) * 64 - w, t.y1 - px(tok::letterInsetBaseline), kWhite,
-           alpha256(avail_[i] ? letter_role().alpha : tok::alpha_low), z);
+    f.draw(c, ls, l, (t.x1 - px(tok::jumpLetterInsetX)) * 64 - w, t.y1 - px(tok::jumpLetterInsetBaseline), kWhite,
+           alpha256(avail_[i] ? letter_role().alpha : tok::jump_emptyAlpha), z);
     c.set_clip(keep);
 }
 
@@ -720,12 +798,8 @@ int JumpGrid::hit(fx x, fx y) const
     int col = (int)(cx / kPitch), row = (int)(cy / kPitch), slot = row * kSlots + col;
     if (col >= kSlots || slot >= kSlotCount)
         return -2;
-    if (slot == 0)
-        return kExit;
-    if (slot == 1)
-        return kSearch;
-    int i = slot - kExitCells;
-    return avail_[i] ? i : -2;
+    int i = item_of(slot);
+    return i == kExit || i == kSearch || avail_[i] ? i : -2;
 }
 
 }

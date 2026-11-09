@@ -19,12 +19,13 @@ public:
         int brightness = 0;
         bool dimmer = true, brighter = true;
         bool playing = false, np = false;
+        bool has_bt = true, has_light = true;
         std::string artist, title;
         bool operator==(const Info& o) const
         {
             return bt == o.bt && wifi == o.wifi && gain == o.gain && sleep == o.sleep && brightness == o.brightness &&
                    dimmer == o.dimmer && brighter == o.brighter && playing == o.playing && np == o.np &&
-                   artist == o.artist && title == o.title;
+                   has_bt == o.has_bt && has_light == o.has_light && artist == o.artist && title == o.title;
         }
     };
 
