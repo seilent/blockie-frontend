@@ -60,11 +60,20 @@ bool eq_edges(const std::vector<PadEdge>& a, const std::vector<PadEdge>& b)
 int main()
 {
     check(pad_matches({0x0019, 0x4001, 0x0428, "ayaneo-gamepad/input0", "AYANEO Controller"}),
-          "matches the ayaneo id");
-    check(pad_matches({0, 0x4001, 0x0428, "", ""}), "matches vendor+product alone");
-    check(pad_matches({0, 0, 0, "", "AYANEO Controller"}), "matches by name alone");
-    check(pad_matches({0, 0, 0, "ayaneo-gamepad/input0", ""}), "matches by phys prefix alone");
-    check(!pad_matches({0, 0x4001, 0x0001, "", ""}), "rejects same vendor wrong product");
+          "matches the full ayaneo tuple");
+    check(!pad_matches({0x0003, 0x4001, 0x0428, "ayaneo-gamepad/input0", "AYANEO Controller"}), "rejects a wrong bus");
+    check(!pad_matches({0x0019, 0x4002, 0x0428, "ayaneo-gamepad/input0", "AYANEO Controller"}),
+          "rejects a wrong vendor");
+    check(!pad_matches({0x0019, 0x4001, 0x0429, "ayaneo-gamepad/input0", "AYANEO Controller"}),
+          "rejects a wrong product");
+    check(!pad_matches({0x0019, 0x4001, 0x0428, "ayaneo-gamepad/input1", "AYANEO Controller"}),
+          "rejects a wrong phys");
+    check(!pad_matches({0x0019, 0x4001, 0x0428, "ayaneo-gamepad/input0", "AYANEO Controller 2"}),
+          "rejects a wrong name");
+    check(!pad_matches({0x0003, 0x1234, 0x5678, "ayaneo-gamepad/input0", "AYANEO Controller"}),
+          "rejects a clone with the name and phys but other ids");
+    check(!pad_matches({0x0019, 0x4001, 0x0428, "ayaneo-gamepad/input0", ""}), "rejects the ids with an empty name");
+    check(!pad_matches({0x0019, 0x4001, 0x0428, "", ""}), "rejects the ids alone");
     check(!pad_matches({0x0003, 0x045e, 0x028e, "usb-0000:00:14.0-1/input0", "Xbox 360 Controller"}),
           "rejects an unrelated gamepad");
 

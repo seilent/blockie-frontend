@@ -13,12 +13,14 @@ namespace fd {
 
 namespace {
 
+constexpr int kStr = 256;
+
 std::string ioctl_str(int fd, unsigned long req)
 {
-    char buf[256] = {0};
-    if (ioctl(fd, req, sizeof buf - 1, buf) < 0)
+    char buf[kStr] = {0};
+    if (ioctl(fd, req, buf) < 0)
         return {};
-    buf[sizeof buf - 1] = 0;
+    buf[kStr - 1] = 0;
     return buf;
 }
 
@@ -52,13 +54,22 @@ void hat_edges(std::vector<PadEdge>& out, int& cur, int v, PadAction neg, PadAct
 
 bool pad_matches(const PadId& id)
 {
-    if (id.vendor == 0x4001 && id.product == 0x0428)
-        return true;
-    if (id.name == "AYANEO Controller")
-        return true;
-    if (id.phys.rfind("ayaneo-gamepad", 0) == 0)
-        return true;
-    return false;
+    return id.name == "AYANEO Controller" && id.bus == 0x0019 && id.vendor == 0x4001 && id.product == 0x0428 &&
+           id.phys == "ayaneo-gamepad/input0";
+}
+
+PadId pad_id(int fd)
+{
+    PadId id;
+    input_id iid = {};
+    if (ioctl(fd, EVIOCGID, &iid) == 0) {
+        id.bus = iid.bustype;
+        id.vendor = iid.vendor;
+        id.product = iid.product;
+    }
+    id.name = ioctl_str(fd, EVIOCGNAME(kStr - 1));
+    id.phys = ioctl_str(fd, EVIOCGPHYS(kStr - 1));
+    return id;
 }
 
 PadReader::~PadReader() { close(); }
@@ -94,16 +105,7 @@ bool PadReader::open()
         int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (fd < 0)
             continue;
-        input_id iid = {};
-        PadId id;
-        if (ioctl(fd, EVIOCGID, &iid) == 0) {
-            id.bus = iid.bustype;
-            id.vendor = iid.vendor;
-            id.product = iid.product;
-        }
-        id.name = ioctl_str(fd, EVIOCGNAME(0));
-        id.phys = ioctl_str(fd, EVIOCGPHYS(0));
-        if (pad_matches(id)) {
+        if (pad_matches(pad_id(fd))) {
             fd_ = fd;
             found = true;
         } else {

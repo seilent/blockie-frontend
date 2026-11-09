@@ -23,6 +23,7 @@ struct PadId {
 };
 
 bool pad_matches(const PadId& id);
+PadId pad_id(int fd);
 
 class PadReader {
 public:
