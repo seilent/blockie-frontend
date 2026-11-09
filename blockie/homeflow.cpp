@@ -84,6 +84,11 @@ bool HomeFlow::frame(int64_t now, const Surface& dst)
 {
     now_ = now;
     bool more = ctl.frame(now, dst);
+    if (!ctl.active() || ctl.kind() == FoldKind::Startup) {
+        drawn_gy_ = grid_.at(now);
+        drawn_first_ = home.first;
+        drawn_focus_ = nav.system_view ? nav.sys_focus - home.first : nav.tile_focus;
+    }
     redraw_ = false;
     return more;
 }
@@ -177,7 +182,7 @@ SelectorModel HomeFlow::posed(const SelectorModel& base, const Nav& n, bool at_t
     if (n.system_view) {
         m.tile_focus = n.sys_focus - home.first;
         int gy = at_target ? grid_.target() : grid_.at(t);
-        m.grid_y_px = home.first / std::max(1, home.cols) * kGridRowPitch - gy;
+        m.grid_y_px = grid_y_px(home.first, gy);
     } else {
         m.tile_focus = focus == Pane::Details ? n.tile_focus : -1;
         m.grid_y_px = 0;
@@ -225,6 +230,10 @@ void HomeFlow::draw(const Surface& dst, const SelectorModel& base, const Nav& n,
     draw_selector(c, fonts_, m, focus, false, n.system_view, theme(), expanded);
 }
 
+GridSpec HomeFlow::spec() const { return grid_spec(o_.big ? TileMode::Large : TileMode::Standard); }
+
+int HomeFlow::grid_y_px(int first, int gy) const { return first / std::max(1, home.cols) * spec().pitch - gy; }
+
 T9Text HomeFlow::shown_text(const std::vector<HomeGame>& list, int k) const
 {
     if (k < 0 || k >= (int)list.size())
@@ -240,10 +249,26 @@ void HomeFlow::show_recent(int k)
     model.game_system = in ? home.recent[k].system : std::string();
 }
 
-FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details)
+FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open)
 {
     Rect head = header_rect(fonts_, collapsed);
-    auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, o_.left, o_.unit, head));
+    auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, o_.left, head));
+    const Nav& wn = open ? nav : kept_nav_;
+    SelectorModel wide = posed(open ? model : kept_, wn, true, Pane::Details);
+    if (!open)
+        wide.tile_focus = drawn_focus_;
+    if (wn.system_view) {
+        int first = open ? home.first : drawn_first_;
+        int gy = open ? wn.sys_scroll * spec().pitch : drawn_gy_;
+        wide.grid_y_px = grid_y_px(first, gy);
+    }
+    LeftPlan& lp = plan->moves;
+    lp.grid = spec();
+    lp.grid_y = wide.grid_y_px;
+    lp.band = o_.grid_band ? Rect{0, kBandTop, kPaneSplitWide, kBandBottom} : kScreen;
+    lp.focus_from = details ? tile_slot_rect(collapsed, nav.tile_focus, false) : Rect{};
+    lp.focus_to = tile_slot_rect(wide, wide.tile_focus, true);
+    lp.collapse = !open;
     plan_ = plan;
     FoldPlay p;
     p.details = details;
@@ -287,17 +312,17 @@ void HomeFlow::start_wanted()
     want_ = Want::None;
     switch (w) {
     case Want::Enter:
-        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, false), now_);
+        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, false, true), now_);
         break;
     case Want::Exit:
-        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, false), now_);
+        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, false, false), now_);
         break;
     case Want::RecentIn:
-        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, true), now_);
+        ctl.start(FoldKind::Expand, expand_play(turned(model, nav), kept_, true, true), now_);
         step_in_ = ctl.details() && ctl.kind() == FoldKind::Expand && !ctl.reversed();
         break;
     case Want::RecentOut:
-        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, true), now_);
+        ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, true, false), now_);
         break;
     case Want::Push:
         ctl.start(FoldKind::Push, page_play(), now_);
@@ -335,7 +360,7 @@ void HomeFlow::sync(bool instant)
         go(labels_[i], alpha256(lit ? role::homeItem.alpha : tok::type_homeItem_alphaDim),
            fx_round(tok::motion_focusAlpha), Curve::Linear, o_.menu_glide);
     }
-    int gy = nav.system_view ? nav.sys_scroll * kGridRowPitch : 0;
+    int gy = nav.system_view ? nav.sys_scroll * spec().pitch : 0;
     if (o_.grid_band && !instant)
         grid_.to(gy, t, fx_round(tok::motion_scroll), Curve::EaseIn);
     else

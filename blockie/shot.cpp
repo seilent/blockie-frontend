@@ -245,6 +245,8 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
             st.ms = atoll(t.c_str());
         out.push_back(st);
     }
+    if (std::none_of(out.begin(), out.end(), [](const Step& st) { return st.pct >= 0; }))
+        std::stable_sort(out.begin(), out.end(), [](const Step& x, const Step& y) { return x.ms < y.ms; });
     return true;
 }
 
@@ -326,11 +328,10 @@ struct DriveOpts {
     std::string recent_system = "Synth";
     bool big = false;
     SlotMap slots = SlotMap::RowMajor;
-    LeftMove left = LeftMove::Cells;
-    int unit = 5;
+    LeftMove left = LeftMove::T5;
     bool t9_edge = false;
     bool bar_slot = false;
-    bool grid_band = false;
+    bool grid_band = true;
     bool startup = false;
     int64_t arrive = -1;
     std::string script;
@@ -360,6 +361,17 @@ bool same_px(const Surface& a, const Surface& b)
     return true;
 }
 
+unsigned long long px_hash(const Surface& s)
+{
+    unsigned long long h = 1469598103934665603ull;
+    for (int y = 0; y < s.h; y++)
+        for (int x = 0; x < s.w; x++) {
+            h ^= s.at(x, y);
+            h *= 1099511628211ull;
+        }
+    return h;
+}
+
 void copy_surface(const Surface& src, const Surface& dst)
 {
     for (int y = 0; y < dst.h; y++)
@@ -372,7 +384,6 @@ FlowOpts flow_opts(const DriveOpts& o)
     f.big = o.big;
     f.slots = o.slots;
     f.left = o.left;
-    f.unit = o.unit;
     f.t9_edge = o.t9_edge;
     f.bar_slot = o.bar_slot;
     f.grid_band = o.grid_band;
@@ -425,6 +436,13 @@ public:
             bool by_input = !in_frame_ && !flow.ctl.navigating();
             if (by_input && std::strcmp(why, "end") == 0 && std::strcmp(what, "startup") != 0)
                 end_check_input();
+            if (std::strcmp(why, "input") == 0 && std::strcmp(what, "collapse") == 0 && flow.ctl.navigating()) {
+                collapse_landed_ = true;
+                Nav det = flow.kept_nav();
+                det.tile_focus = flow.nav.tile_focus;
+                flow.draw(rest_sel_.surface(), flow.kept(), flow.kept_nav(), true, flow.kept_nav().pane, kScreen);
+                flow.draw(rest_det_.surface(), flow.kept(), det, true, Pane::Details, kScreen);
+            }
         };
         flow.home.load = [this](const HomeGame& g) -> Art {
             if (late_.count(g.id) && !arrived_)
@@ -483,7 +501,10 @@ public:
                 step = 1;
                 Buffer ref;
                 flow.draw(ref.surface(), flow.kept(), flow.kept_focus(), true, Pane::Details, kScreen);
-                ok = same_px(ref.surface(), last_.surface());
+                bool held = same_px(ref.surface(), last_.surface());
+                ok = ok && held;
+                fprintf(stderr, "blockie-shot: %lld ms step in check %s\n", (long long)tf,
+                        held ? "the frame is the state before the input with Details focus" : "FAILED");
             }
             if (was_fold && !ctl.active() && was_kind != FoldKind::Startup) {
                 bool collapse_step = was_details && was_kind == FoldKind::Collapse;
@@ -504,6 +525,54 @@ public:
             std::string sys = t9.shown(tf).system;
             int title_a = t9.pose(tf).a256;
             const char* cause = "";
+            if (collapse_landed_ && ctl.active() && ctl.kind() == FoldKind::Expand && !ctl.reversed()) {
+                Buffer ref;
+                step = 1;
+                Surface rest = ctl.details() ? rest_det_.surface() : rest_sel_.surface();
+                bool held = same_px(rest, ctl.from()) && ctl.compose_at(ctl.forward_time(tf), ref.surface()) &&
+                            same_px(ref.surface(), last_.surface());
+                ok = ok && held;
+                cause = " the collapse lands on the input and the expand starts from its rest";
+                const char* res = held ? "the frame is the new expand composed fresh from the landed rest" : "FAILED";
+                fprintf(stderr,
+                        "blockie-shot: %lld ms rule 3 landing check %s, frame hash (FNV-1a over pixels) %016llx\n",
+                        (long long)tf, res, px_hash(last_.surface()));
+            }
+            collapse_landed_ = false;
+            if (ctl.active() && ctl.reversed() && ctl.t0() != back_logged_) {
+                back_logged_ = ctl.t0();
+                fprintf(stderr, "blockie-shot: %lld ms reversal at e %lld ms\n", (long long)ctl.t0(),
+                        (long long)ctl.run_length());
+            }
+            bool swap = o_.left == LeftMove::T5 && ctl.active() &&
+                        (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse);
+            int64_t ft = ctl.forward_time(tf);
+            int64_t k = ctl.kind() == FoldKind::Collapse && !ctl.reversed() ? slide_ms() - ft : ft;
+            int leave_ms = fx_round(tok::motion_swapOut);
+            bool same = swap_seen_ && (ctl.t0() == swap_t0_ ||
+                                       (ctl.reversed() && !swap_back_ && ctl.t0() - ctl.run_length() == swap_t0_));
+            bool crossed = same && std::min(swap_k_, k) < leave_ms && std::max(swap_k_, k) > 0;
+            if (!step && swap && ((k > 0 && k <= leave_ms) || crossed)) {
+                Buffer ref;
+                const char* what = k <= 0 ? "landing" : k < leave_ms ? "leave" : k == leave_ms ? "hold" : "arrival";
+                int64_t gap = n > 0 ? tf - frame_time(n - 1) : 0;
+                bool short_back = ctl.reversed() && tf == ctl.t0() && ctl.run_length() <= gap;
+                step = k <= 0 ? 4 : short_back ? 3 : 2;
+                bool held = ctl.compose_at(ft, ref.surface()) && same_px(ref.surface(), last_.surface());
+                ok = ok && held;
+                cause = short_back      ? " the T5 pose a reversal shorter than a frame starts from"
+                        : k <= 0        ? " the reversed T5 leave lands on the origin"
+                        : k < leave_ms  ? " the T5 rows leave on strip"
+                        : k == leave_ms ? " the T5 ground hold before the arrival"
+                                        : " the T5 rows arrive after the leave";
+                const char* res = held ? "the frame is the row swap composed fresh at its time" : "FAILED";
+                fprintf(stderr, "blockie-shot: %lld ms T5 %s check %s, frame hash (FNV-1a over pixels) %016llx\n",
+                        (long long)tf, what, res, px_hash(last_.surface()));
+            }
+            swap_seen_ = swap;
+            swap_k_ = k;
+            swap_t0_ = ctl.t0();
+            swap_back_ = ctl.reversed();
             if (!step && seen_ && !was_fold && !ctl.active() && t9.running(tf) && sys != seen_sys_ &&
                 flow.nav.pane == Pane::Details && flow.nav.top() == Screen::Home) {
                 step = 1;
@@ -736,6 +805,14 @@ private:
     bool seen_ = false;
     std::string seen_sys_;
     int seen_title_a_ = 256;
+    bool swap_seen_ = false;
+    int64_t swap_k_ = 0;
+    int64_t swap_t0_ = 0;
+    bool swap_back_ = false;
+    bool collapse_landed_ = false;
+    int64_t back_logged_ = -1;
+    Buffer rest_sel_;
+    Buffer rest_det_;
 };
 
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
@@ -1167,6 +1244,9 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
             r.t = t;
             r.motion = motion != 0;
             r.step = step != 0;
+            r.left_only = step >= 2;
+            r.short_back = step == 3;
+            r.landing = step == 4;
             r.ok = ok != 0;
             std::getline(ls >> std::ws, r.cause);
             rows.push_back(r);
@@ -1185,7 +1265,7 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
             printf("FAIL frame %d changes size\n", rows[i].n);
             return 1;
         }
-        pop_count(f0.rgb.data(), f1.rgb.data(), f0.w, f0.h, rows[i].b, rows[i].art, diffs[i].d, diffs[i].e,
+        pop_count(f0.rgb.data(), f1.rgb.data(), f0.w, f0.h, pop_edge(rows[i]), rows[i].art, diffs[i].d, diffs[i].e,
                   &diffs[i].same);
         if (i + 1 < rows.size()) {
             if (!load_frame(dir, rows[i + 1].n, f2))
@@ -1194,7 +1274,7 @@ int run_pops(const std::string& dir, bool lead, const std::string& summary, cons
                 printf("FAIL frame %d changes size\n", rows[i + 1].n);
                 return 1;
             }
-            pop_count(f0.rgb.data(), f2.rgb.data(), f0.w, f0.h, rows[i].b, rows[i].art, diffs[i].skip,
+            pop_count(f0.rgb.data(), f2.rgb.data(), f0.w, f0.h, pop_edge(rows[i]), rows[i].art, diffs[i].skip,
                       diffs[i].e_skip, nullptr);
         }
         std::swap(f0, f1);
@@ -1604,10 +1684,14 @@ int main(int argc, char** argv)
             drive.big = std::string(argv[++i]) == "g2";
         else if (a == "--slots" && i + 1 < argc)
             drive.slots = std::string(argv[++i]) == "c" ? SlotMap::RecentC : SlotMap::RowMajor;
-        else if (a == "--left" && i + 1 < argc)
-            drive.left = std::string(argv[++i]) == "l0" ? LeftMove::Fade : LeftMove::Cells;
-        else if (a == "--unit" && i + 1 < argc)
-            drive.unit = atoi(argv[++i]) == 3 ? 3 : 5;
+        else if (a == "--left" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if (v != "t5" && v != "l0") {
+                fprintf(stderr, "blockie-shot: --left takes t5 or l0\n");
+                return 2;
+            }
+            drive.left = v == "l0" ? LeftMove::Fade : LeftMove::T5;
+        }
         else if (a == "--t9clip" && i + 1 < argc)
             drive.t9_edge = std::string(argv[++i]) == "edge";
         else if (a == "--tail" && i + 1 < argc)
@@ -1627,11 +1711,12 @@ int main(int argc, char** argv)
         else if (a == "--bar" && i + 1 < argc)
             drive.bar_slot = std::string(argv[++i]) == "slot";
         else if (a == "--gridscroll" && i + 1 < argc) {
-            if (std::string(argv[++i]) != "band") {
-                fprintf(stderr, "blockie-shot: --gridscroll takes band\n");
+            std::string v = argv[++i];
+            if (v != "band" && v != "full") {
+                fprintf(stderr, "blockie-shot: --gridscroll takes band or full\n");
                 return 2;
             }
-            drive.grid_band = true;
+            drive.grid_band = v == "band";
         }
         else if (a == "--startup")
             drive.startup = true;
@@ -1689,8 +1774,8 @@ int main(int argc, char** argv)
                 " [same options]\n"
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY:d|u:MS|PCT%%,...] [--at MS] [--from MS]"
                 " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
-                " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left l1|l0] [--unit 5|3]"
-                " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band] [--startup] [--arrive MS]"
+                " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
+                " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band|full] [--startup] [--arrive MS]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"

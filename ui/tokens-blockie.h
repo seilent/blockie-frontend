@@ -738,8 +738,13 @@ inline constexpr Token kTokens[] = {
     {"turnedLineStart", "340", "u", 22282240},
     {"motion.leave", "133", "ms", 8716288},
     {"motion.t3mTile", "595", "ms", 38993920},
+    {"motion.swapOut", "50", "ms", 3276800},
+    {"motion.swapShift", "34", "u", 2228224},
+    {"motion.swapRows", "150", "ms", 9830400},
+    {"motion.swapRowInShift", "25", "u", 1638400},
+    {"motion.swapRowFade", "200", "ms", 13107200},
 };
-inline constexpr int kTokenCount = 727;
+inline constexpr int kTokenCount = 732;
 
 inline constexpr int32_t u = (int32_t)kTokens[0].num;
 inline constexpr int32_t canvasW = (int32_t)kTokens[1].num;
@@ -1468,5 +1473,10 @@ inline constexpr int32_t backdrop_coverGrid = (int32_t)kTokens[723].num;
 inline constexpr int32_t turnedLineStart = (int32_t)kTokens[724].num;
 inline constexpr int32_t motion_leave = (int32_t)kTokens[725].num;
 inline constexpr int32_t motion_t3mTile = (int32_t)kTokens[726].num;
+inline constexpr int32_t motion_swapOut = (int32_t)kTokens[727].num;
+inline constexpr int32_t motion_swapShift = (int32_t)kTokens[728].num;
+inline constexpr int32_t motion_swapRows = (int32_t)kTokens[729].num;
+inline constexpr int32_t motion_swapRowInShift = (int32_t)kTokens[730].num;
+inline constexpr int32_t motion_swapRowFade = (int32_t)kTokens[731].num;
 
 }

@@ -119,14 +119,15 @@ void MotionCtl::render_to()
         to_us_ = (int)(clock_us() - c0);
 }
 
-bool MotionCtl::compose_end(const Surface& dst)
+bool MotionCtl::compose_end(const Surface& dst) { return compose_at(forward_dir() ? play_.duration : 0, dst); }
+
+bool MotionCtl::compose_at(int64_t ft, const Surface& dst)
 {
     if (!play_.forward)
         return false;
     Surface f = from_.surface();
     Surface t = to_.surface();
     bool fw = forward_dir();
-    int64_t ft = fw ? play_.duration : 0;
     play_.forward(fw ? f : t, fw ? t : f, dst, ft, -1);
     return true;
 }

@@ -82,6 +82,44 @@ Clip path(const std::vector<int>& steps)
 
 Clip clean() { return path({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}); }
 
+struct Flick {
+    bool mark = true;
+    bool back = true;
+    bool ok = true;
+    bool same_end = true;
+    bool still_before = true;
+    bool landing = true;
+    bool land_ok = true;
+};
+
+Clip flick(const Flick& o)
+{
+    Clip c;
+    for (int i = 0; i < kStill + 3 + kStill; i++) {
+        Frame f((size_t)kW * kH, kGround);
+        fill(f, 600, 720, kBlock);
+        if (i == kStill + 1)
+            fill(f, 700, 900, 0xE0E0E0);
+        if (i >= kStill + 2 && !o.same_end)
+            fill(f, 900, 960, 0x606060);
+        if (i >= kStill && !o.still_before)
+            fill(f, 100, 110, 0x606060);
+        c.frames.push_back(f);
+        c.rows.push_back(row(i, 3));
+    }
+    PopRow& pose = c.rows[kStill + 1];
+    PopRow& land = c.rows[kStill + 2];
+    pose.step = pose.left_only = o.mark;
+    pose.short_back = o.mark && o.back;
+    pose.ok = o.ok;
+    pose.cause = o.mark ? "a reversal pose" : "";
+    land.step = land.left_only = true;
+    land.landing = o.landing;
+    land.ok = o.land_ok;
+    land.cause = "a landing";
+    return c;
+}
+
 Clip ramp(int jump_at)
 {
     Clip c;
@@ -104,10 +142,10 @@ int judge(const Clip& c, bool lead, std::vector<std::string>& lines)
 {
     std::vector<PopDiff> diffs(c.frames.size());
     for (size_t i = 1; i < c.frames.size(); i++) {
-        pop_count(c.frames[i - 1].data(), c.frames[i].data(), kW, kH, c.rows[i].b, c.rows[i].art, diffs[i].d,
+        pop_count(c.frames[i - 1].data(), c.frames[i].data(), kW, kH, pop_edge(c.rows[i]), c.rows[i].art, diffs[i].d,
                   diffs[i].e, &diffs[i].same);
         if (i + 1 < c.frames.size())
-            pop_count(c.frames[i - 1].data(), c.frames[i + 1].data(), kW, kH, c.rows[i].b, c.rows[i].art,
+            pop_count(c.frames[i - 1].data(), c.frames[i + 1].data(), kW, kH, pop_edge(c.rows[i]), c.rows[i].art,
                       diffs[i].skip, diffs[i].e_skip, nullptr);
     }
     return pop_judge(c.rows, diffs, lead, lines);
@@ -220,6 +258,76 @@ int main()
         c.rows[kStill].step = false;
         c.rows[kStill].cause.clear();
         check(names(c, "FAIL step in x < 432"), "the same frame without the designed mark fails as a step");
+    }
+    {
+        Clip c = clean();
+        for (size_t i = kStill; i < c.frames.size(); i++)
+            fill(c.frames[i], 0, 432, 0x808080);
+        c.rows[kStill].step = true;
+        c.rows[kStill].left_only = true;
+        c.rows[kStill].cause = "a left pane swap";
+        check(judge(c) == 0, "a designed left pane frame skips the step and flash tests left of b");
+        fill(c.frames[kStill], 648, 960, 0xE0E0E0);
+        check(names(c, "FAIL flash in right of b"), "a designed left pane frame still fails a flash right of b");
+        c.rows[kStill].left_only = false;
+        check(judge(c) == 0, "a designed whole frame skips the tests in every region");
+        c.rows[kStill].left_only = true;
+        std::vector<std::string> lines;
+        judge(c, true, lines);
+        bool marked = false;
+        for (const std::string& l : lines)
+            marked = marked || l.find(" ml- ") != std::string::npos;
+        check(marked, "a designed left pane frame is printed as l, not s");
+    }
+    {
+        check(judge(flick(Flick{})) == 0,
+              "a reversal shorter than a frame: its designed pose and landing on the origin pass the flash test");
+        Flick f;
+        f.back = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "the same one frame flash with no reversal still fails as a flash");
+        f = Flick{};
+        f.mark = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "the same one frame flash on a frame that is not designed still fails as a flash");
+        f = Flick{};
+        f.ok = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "the same one frame flash on a designed frame not equal to its fresh compose still fails as a flash");
+        f = Flick{};
+        f.same_end = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "a landing that is not the frame before the input does not hold the flash");
+        f = Flick{};
+        f.still_before = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "a frame before the pose that is still moving does not hold the flash");
+        f = Flick{};
+        f.landing = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "a next frame that is not a landing does not hold the flash");
+        f = Flick{};
+        f.land_ok = false;
+        check(names(flick(f), "FAIL flash in right of b"),
+              "a landing whose own assertion failed does not hold the flash");
+    }
+    {
+        PopRow r;
+        r.b = 432;
+        PopRow l = r;
+        l.left_only = true;
+        PopRow wide = l;
+        wide.b = 500;
+        check(pop_edge(r) == 432 && pop_edge(l) == 436 && pop_edge(wide) == 500,
+              "right of b starts at 436 on a designed left pane frame while b is below it");
+        Frame a((size_t)kW * kH, kGround), b = a;
+        fill(b, 432, 436, kBlock);
+        std::array<int, 3> n{};
+        std::array<int64_t, 3> e{};
+        pop_count(a.data(), b.data(), kW, kH, pop_edge(l), Rect{}, n, e, nullptr);
+        bool left = n[2] == 0 && n[1] == 4 * kH;
+        pop_count(a.data(), b.data(), kW, kH, pop_edge(r), Rect{}, n, e, nullptr);
+        check(left && n[2] == 4 * kH, "x 432 to 436 counts left of b on a designed left pane frame, else right of b");
     }
 
     {

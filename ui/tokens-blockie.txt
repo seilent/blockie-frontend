@@ -725,3 +725,8 @@ backdrop.coverGrid 0.25 ratio
 turnedLineStart 340 u
 motion.leave 133 ms
 motion.t3mTile 595 ms
+motion.swapOut 50 ms
+motion.swapShift 34 u
+motion.swapRows 150 ms
+motion.swapRowInShift 25 u
+motion.swapRowFade 200 ms

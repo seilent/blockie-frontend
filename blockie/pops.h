@@ -15,6 +15,9 @@ struct PopRow {
     int b = 432;
     bool motion = false;
     bool step = false;
+    bool left_only = false;
+    bool short_back = false;
+    bool landing = false;
     bool ok = true;
     Rect art;
     std::string cause;
@@ -35,6 +38,7 @@ constexpr int kPopDelta = 8;
 constexpr int kPopReach = 3;
 constexpr int kStillFrames = 12;
 
+int pop_edge(const PopRow& r);
 void pop_count(const uint32_t* a, const uint32_t* b, int w, int h, int bx, Rect skip, std::array<int, 3>& out,
                std::array<int64_t, 3>& energy, bool* same);
 int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs, bool lead,

@@ -462,7 +462,7 @@ void bench_grow(HomeFlow& flow, Fonts& fonts, Library& lib, const std::vector<st
         draw_turned(c, fonts, m, theme());
     };
     r.head = header_rect(fonts, flow.model);
-    r.plan = slide_plan(kPaneSplitWide, LeftMove::Fade, 0, r.head);
+    r.plan = slide_plan(kPaneSplitWide, LeftMove::Fade, r.head);
     r.xs.resize(kBigCols);
     r.ys.resize((r.covers.size() + kBigCols - 1) / kBigCols);
     for (int q = 0; q < 2; q++)

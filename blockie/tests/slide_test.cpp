@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "../leftmove.h"
 #include "../motion.h"
 #include "../slide.h"
 #include "../tile_grid.h"
@@ -60,35 +61,29 @@ void menu(Canvas& c, int x)
         c.fill({x, 56 + i * 96, x + kMenuW, 96 + i * 96}, kLabel);
 }
 
-void draw_collapsed(const Surface& s, Rect bound, bool every)
+void draw_collapsed(const Surface& s, Rect bound)
 {
     Canvas c(s);
     c.set_bound(bound);
     c.fill(s.rect(), kGround);
     c.fill({124, 20, 296, 70}, 0x808080);
     for (int k = 0; k < 8; k++)
-        c.fill(grid_tile_rect(k, kGridCols), every ? kFrom[k] ^ 0x0F0F0F : kFrom[k]);
-    if (every)
-        c.fill({0, 0, 432, 720}, 0x334455);
+        c.fill(grid_tile_rect(k, kGridCols), kFrom[k]);
     menu(c, 512);
 }
 
-void draw_expanded(const Surface& s, Rect bound, bool every)
+void draw_expanded(const Surface& s, Rect bound)
 {
     Canvas c(s);
     c.set_bound(bound);
     c.fill(s.rect(), kGround);
     for (int k = 0; k < 12; k++)
         c.fill(grid_tile_rect(k, 3), kTo[k]);
-    if (every)
-        c.fill({0, 0, 432, 720}, 0x556677);
 }
 
 void title(Canvas& c, int shift, int a) { c.blend({700, 100 - shift, 760, 680 - shift}, kTitle, a); }
 
 struct Host {
-    int unit = 5;
-    bool every = false;
     bool details = false;
     bool expanded = false;
     MotionCtl ctl;
@@ -96,24 +91,23 @@ struct Host {
     std::shared_ptr<SlidePlan> plan;
     int text_calls = 0;
 
-    Host(int u, bool all, bool det) : unit(u), every(all), details(det)
+    explicit Host(bool det) : details(det)
     {
         ctl.render = [this](const Surface& s, Rect bound) {
             if (expanded)
-                draw_expanded(s, bound, every);
+                draw_expanded(s, bound);
             else
-                draw_collapsed(s, bound, every);
+                draw_collapsed(s, bound);
         };
-        ctl.render_kept = [this](const Surface& s) { draw_collapsed(s, s.rect(), every); };
+        ctl.render_kept = [this](const Surface& s) { draw_collapsed(s, s.rect()); };
         ctl.last = [this](const Surface& s) { copy(last.surface(), s); };
-        draw_collapsed(last.surface(), kScreen, every);
+        draw_collapsed(last.surface(), kScreen);
     }
 
-    FoldPlay play()
+    FoldPlay play(bool open)
     {
-        plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, LeftMove::Cells, unit, kHead));
-        if (every)
-            plan->cells.slots = {Rect{0, 0, 432, 720}};
+        plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, LeftMove::T5, kHead));
+        plan->moves.collapse = !open;
         auto pl = plan;
         FoldPlay p;
         p.details = details;
@@ -139,31 +133,14 @@ struct Host {
     }
 };
 
-bool mid_fold(const SlidePlan& p, int64_t t)
-{
-    if (p.left != LeftMove::Cells)
-        return false;
-    int64_t unit = p.cells.plan.ring_unit;
-    int64_t tt = t * 60;
-    for (size_t i = 0; i < p.cells.plan.cells.size(); i++) {
-        if (!p.cells.folds[i])
-            continue;
-        int64_t local = tt - p.cells.plan.cells[i].ring * unit;
-        if (local <= 0 || local >= unit)
-            continue;
-        for (int k = 0; k < kLeftLine; k++)
-            if (p.cells.lines[i * kLeftLine + k])
-                return true;
-    }
-    return false;
-}
+bool mid_swap(const SlidePlan& p, int64_t t) { return p.left == LeftMove::T5 && t > 0 && t < swap_ms(); }
 
 bool leg_mid(const SlidePlan& p, int64_t t)
 {
     SlidePose ps = slide_pose(p, t);
     bool slide = ps.boundary > kPaneSplit + 8 && ps.boundary < p.target - 8;
     bool text = ps.text_a256 >= 8 && ps.text_a256 <= 248;
-    return slide || text || mid_fold(p, t);
+    return slide || text || mid_swap(p, t);
 }
 
 void fill_all(const Surface& s, uint32_t v)
@@ -181,22 +158,22 @@ struct RevResult {
     bool ends = true;
 };
 
-RevResult reverse_at(int unit, bool every, int64_t e, bool details = false)
+RevResult reverse_at(int64_t e, bool details = false)
 {
     RevResult r;
-    Host h(unit, every, details);
+    Host h(details);
     Buffer a0;
-    draw_collapsed(a0.surface(), kScreen, every);
+    draw_collapsed(a0.surface(), kScreen);
     h.expanded = true;
-    h.ctl.start(FoldKind::Expand, h.play(), 0);
+    h.ctl.start(FoldKind::Expand, h.play(true), 0);
     std::shared_ptr<SlidePlan> fwd = h.plan;
     for (int n = 0; frame_ms(n) < e; n++)
         h.frame(frame_ms(n));
     h.expanded = false;
-    h.ctl.start(FoldKind::Collapse, h.play(), e);
+    h.ctl.start(FoldKind::Collapse, h.play(false), e);
     r.run_e = h.ctl.reversed() && h.ctl.details() == details && h.ctl.run_length() == e;
     Buffer b0;
-    draw_expanded(b0.surface(), kScreen, every);
+    draw_expanded(b0.surface(), kScreen);
     SlidePlan ref = *fwd;
     SlideText text(title);
     Buffer prev, want;
@@ -226,7 +203,7 @@ RevResult reverse_at(int unit, bool every, int64_t e, bool details = false)
         if (have) {
             if (leg_mid(ref, ft) && same(h.last.surface(), prev.surface(), kScreen))
                 r.no_repeat = false;
-            if (mid_fold(ref, ft) && same(h.last.surface(), prev.surface(), {0, 0, kPaneSplit, kPortraitH}))
+            if (mid_swap(ref, ft) && same(h.last.surface(), prev.surface(), {0, 0, kPaneSplit, kPortraitH}))
                 r.left_moves = false;
         }
         copy(h.last.surface(), prev.surface());
@@ -249,7 +226,7 @@ void report(const RevResult& r, const char* name)
     check(r.mirror, buf);
     snprintf(buf, sizeof buf, "%s: no repeated frame while any leg is mid way", name);
     check(r.no_repeat, buf);
-    snprintf(buf, sizeof buf, "%s: while cells fold, x < 432 changes every frame", name);
+    snprintf(buf, sizeof buf, "%s: while the rows swap, x < 432 changes every frame", name);
     check(r.left_moves, buf);
     snprintf(buf, sizeof buf, "%s: the title's alpha is 0 before the boundary leaves 648", name);
     check(r.title_first, buf);
@@ -288,9 +265,9 @@ int main()
 
     {
         Buffer a, b, plain, grown;
-        draw_collapsed(a.surface(), kScreen, false);
-        draw_expanded(b.surface(), kScreen, false);
-        SlidePlan fade = slide_plan(648, LeftMove::Fade, 5, kHead);
+        draw_collapsed(a.surface(), kScreen);
+        draw_expanded(b.surface(), kScreen);
+        SlidePlan fade = slide_plan(648, LeftMove::Fade, kHead);
         SlidePlan grow = fade;
         grow.moves.grow = GrowClock::G6;
         bool kept = true;
@@ -309,39 +286,41 @@ int main()
         check(kept, "a planned grow leaves x < b to the grow composite and the rest of the frame as the fade's");
     }
 
-    SlidePlan sys5 = slide_plan(648, LeftMove::Cells, 5, kHead);
-    SlidePlan sys0 = slide_plan(648, LeftMove::Fade, 5, kHead);
+    SlidePlan still = slide_plan(648, LeftMove::T5, kHead);
+    SlidePlan sys0 = slide_plan(648, LeftMove::Fade, kHead);
     {
         Buffer a, b;
-        draw_collapsed(a.surface(), kScreen, false);
-        draw_collapsed(b.surface(), kScreen, false);
-        slide_prepare(sys5, a.surface(), b.surface());
+        draw_collapsed(a.surface(), kScreen);
+        draw_collapsed(b.surface(), kScreen);
+        slide_prepare(still, a.surface(), b.surface());
     }
-    check(slide_duration(sys5) == 800 && slide_duration(sys0) == 800,
-          "nothing folds: a system enter or a Recent toggle is 800 ms; L0 the same");
+    check(slide_duration(still) == 800 && slide_duration(sys0) == 800 && still.moves.kept.size() == 8 &&
+              still.moves.leaves.empty(),
+          "slots that match stay and nothing leaves; a system enter or a Recent toggle is 800 ms; L0 the same");
 
-    SlidePose p0 = slide_pose(sys5, 0), p400 = slide_pose(sys5, 400), p800 = slide_pose(sys5, 800);
+    SlidePose p0 = slide_pose(still, 0), p400 = slide_pose(still, 400), p800 = slide_pose(still, 800);
     check(p0.boundary == 432 && p0.pane_a256 == 256 && p0.text_a256 == 0 && p0.text_shift == -40 && p0.left_a256 == 0,
           "system at 0: the boundary at 432, the old pane opaque, the text hidden");
     check(p400.boundary == 648 && p400.pane_a256 == 0 && p400.text_a256 == 0 && p400.left_a256 == 256,
           "system at 400: the boundary at 648, the old pane gone, the text about to enter");
     check(p800.boundary == 648 && p800.text_a256 == 256 && p800.text_shift == 0, "system at 800: the text at rest");
-    SlidePose t600 = slide_pose(sys5, 600);
+    SlidePose t600 = slide_pose(still, 600);
     check(t600.text_shift == -30 && t600.text_a256 == 64, "the text enters by T9 in over 400 to 800");
     bool mono = true;
     for (int t = 1; t <= 400; t++)
-        if (slide_pose(sys5, t).boundary < slide_pose(sys5, t - 1).boundary)
+        if (slide_pose(still, t).boundary < slide_pose(still, t - 1).boundary)
             mono = false;
     check(mono, "the boundary only moves right");
 
     Buffer fa, fb, dst, left;
-    draw_collapsed(fa.surface(), kScreen, false);
-    draw_expanded(fb.surface(), kScreen, false);
+    draw_collapsed(fa.surface(), kScreen);
+    draw_expanded(fb.surface(), kScreen);
     Surface as = fa.surface(), bs = fb.surface(), ds = dst.surface();
-    SlidePlan sp = slide_plan(648, LeftMove::Cells, 5, kHead);
+    SlidePlan sp = slide_plan(648, LeftMove::T5, kHead);
     slide_prepare(sp, as, bs);
     int64_t L = slide_left_ms(sp);
-    check(L == 667 && slide_duration(sp) == 800, "a system enter with re-dealt slots: L is 667 ms, the enter 800 ms");
+    check(L == 400 && slide_duration(sp) == 800,
+          "a Recent toggle with re-dealt slots: the rows swap inside the slide, L is 400 ms, the enter 800 ms");
     {
         bool full = true, left_eq = true, mid = true, right = true, strip = true, literal = true;
         int calls = 0;
@@ -361,18 +340,18 @@ int main()
             SlidePose ps = slide_pose(sp, at.t);
             if (ps.boundary != at.b || ps.pane_a256 != at.pane)
                 literal = false;
-            left_compose(as, bs, left.surface(), sp.cells, at.t, ps.left_a256);
+            int left_end = std::max(at.b, 436);
+            swap_compose(as, bs, left.surface(), sp.moves, at.t, left_end, kGround);
             int shift = at.b - 432;
             for (int y = 0; y < ds.h; y++)
                 for (int x = 0; x < ds.w; x++) {
                     uint32_t v = ds.at(x, y);
                     if (v == kSentinel)
                         full = false;
-                    if (x < 436) {
+                    if (x < left_end) {
                         if (v != left.surface().at(x, y))
                             left_eq = false;
-                    } else if (x < at.b) {
-                        if (v != bs.at(x, y))
+                        if (at.t >= swap_ms() && x >= 436 && v != bs.at(x, y))
                             mid = false;
                     } else if (x < at.b + 4) {
                         if (v != kGround)
@@ -389,24 +368,24 @@ int main()
         }
         check(full, "a sentinel full write: every pixel is written");
         check(literal, "the boundary runs 432, 530, 599, 634, 648 at 0 to 400 ms, the old pane fades 256 to 0");
-        check(left_eq, "x < 436 equals the left composite");
-        check(mid, "436 to b equals the expanded frame");
+        check(left_eq, "x < max(b, 436) equals the row swap");
+        check(mid, "once the rows have landed 436 to b equals the expanded frame");
         check(strip, "the 4 px after b are ground, the old pane's border overhang never rides along");
         check(right, "right of b + 4 is the old pane shifted by b - 432, faded, ground unblended");
         check(calls > 0, "the text callback draws the turned title once it shows");
     }
     {
-        Host h(5, false, true);
+        Host h(true);
         h.expanded = true;
-        h.ctl.start(FoldKind::Expand, h.play(), 0);
+        h.ctl.start(FoldKind::Expand, h.play(true), 0);
         SlidePlan rp = *h.plan;
         int64_t T = h.ctl.run_length();
         check(h.ctl.details() && T == std::max<int64_t>(800, slide_left_ms(rp)) && T == slide_duration(rp) &&
                   slide_pose(rp, 400).boundary == 648,
               "a Recent in runs the system slide: the boundary at 648 by 400 ms, T = max(800, L)");
         Buffer ra, fresh;
-        draw_collapsed(ra.surface(), kScreen, false);
-        draw_expanded(fresh.surface(), kScreen, false);
+        draw_collapsed(ra.surface(), kScreen);
+        draw_expanded(fresh.surface(), kScreen);
         {
             Canvas fc(fresh.surface());
             fc.fill({648, 0, 960, 720}, kGround);
@@ -455,46 +434,76 @@ int main()
                     kept = false;
         check(d.x0 == 648 && d.x1 == 960 && d.y0 == 0 && d.y1 == 720 && kept && L <= 780,
               "once the left motion has landed the title phase composes and presents only the pane");
-        fill_all(ds, kSentinel);
-        d = slide_compose(as, bs, ds, sp, 500, 483, kGround, SlideText(title));
-        bool mid_kept = true, left_drawn = true;
-        for (int y = 0; y < 720; y++) {
-            for (int x = 436; x < 648; x++)
-                if (ds.at(x, y) != kSentinel)
-                    mid_kept = false;
-            for (int x = 0; x < 436; x++)
-                if (ds.at(x, y) == kSentinel)
-                    left_drawn = false;
+        bool composed = true;
+        for (int64_t t = swap_ms(); t <= 400; t++) {
+            fill_all(ds, kSentinel);
+            d = slide_compose(as, bs, ds, sp, t, t - 1, kGround, SlideText(title));
+            int bx = slide_pose(sp, t).boundary;
+            if (d.x0 != 0 || d.x1 != 960)
+                composed = false;
+            for (int y = 0; y < 720 && composed; y++)
+                for (int x = 0; x < bx; x++)
+                    if (ds.at(x, y) != bs.at(x, y)) {
+                        composed = false;
+                        break;
+                    }
         }
-        check(d.x0 == 0 && d.x1 == 960 && mid_kept && left_drawn,
-              "before the left motion lands the full screen is presented, the landed strip is not recomposed");
+        check(composed, "D: from 250 to 400 x < b is the destination and [436, 648) is composed every frame");
+        fill_all(ds, kSentinel);
+        d = slide_compose(as, bs, ds, sp, 401, 400, kGround, SlideText(title));
+        bool landed = d.x0 == 648;
+        for (int y = 0; y < 720; y++)
+            for (int x = 0; x < 648; x++)
+                if (ds.at(x, y) != kSentinel)
+                    landed = false;
+        check(landed, "D: past 400 nothing left of 648 is recomposed");
+    }
+    {
+        SlidePlan cp = slide_plan(648, LeftMove::T5, kHead);
+        cp.moves.collapse = true;
+        slide_prepare(cp, as, bs);
+        bool held = true;
+        for (int64_t t = 400; t <= 800 && held; t += 16) {
+            slide_compose(as, bs, ds, cp, t, -1, kGround, SlideText(title));
+            if (!same(ds, bs, {0, 0, 648, 720}))
+                held = false;
+        }
+        slide_compose(as, bs, ds, cp, 399, -1, kGround, SlideText(title));
+        bool started = !same(ds, bs, {0, 0, kPaneSplit, 720});
+        check(held && started, "collapse: the left pane holds the presented frame until s = 400, then the rows swap");
+        slide_compose(as, bs, ds, cp, 0, -1, kGround, SlideText(title));
+        check(same(ds, as, kScreen), "collapse: the last composed frame equals a fresh render of the collapsed home");
+        Buffer fade;
+        SlidePlan fp = slide_plan(648, LeftMove::Fade, kHead);
+        slide_compose(as, bs, ds, cp, 100, -1, kGround, SlideText(title));
+        slide_compose(as, bs, fade.surface(), fp, 100, -1, kGround, SlideText(title));
+        int bx = slide_pose(cp, 100).boundary;
+        bool ground = true, inside = same(ds, as, {0, 0, 436, 720});
+        bool outside = same(ds, fade.surface(), {bx, 0, 960, 720});
+        for (int y = 0; y < 720; y++)
+            for (int x = 436; x < bx; x++)
+                if (ds.at(x, y) != kGround)
+                    ground = false;
+        check(bx == 530 && ground && inside && outside,
+              "collapse at s = 700: ground over [436, b), the collapsed home left of 436, the slide pose from b");
+        fill_all(ds, kSentinel);
+        Rect d = slide_compose(as, bs, ds, cp, 300, 316, kGround, SlideText(title));
+        int b300 = slide_pose(cp, 300).boundary;
+        bool drawn = true;
+        for (int y = 0; y < 720; y++)
+            for (int x = 0; x < b300; x++)
+                if (ds.at(x, y) == kSentinel)
+                    drawn = false;
+        check(drawn && d.x0 == 0 && d.x1 == 960, "collapse: while the rows swap every pixel left of b is presented");
     }
 
-    report(reverse_at(5, false, 380), "system e = 380 at 5 frames");
-    report(reverse_at(3, false, 380), "system e = 380 at 3 frames");
-    report(reverse_at(3, false, 500), "system e = 500 at 3 frames");
-    report(reverse_at(5, false, 600), "system e = 600 at 5 frames");
-    report(reverse_at(5, false, 160, true), "Recent e = 160 at 5 frames");
-    report(reverse_at(5, false, 600, true), "Recent e = 600 at 5 frames");
-    {
-        Host h(5, true, false);
-        h.expanded = true;
-        h.ctl.start(FoldKind::Expand, h.play(), 0);
-        int top = h.plan->cells.plan.maxring;
-        int64_t span = ((top + 1) * 5000 + 59) / 60;
-        check(h.plan->cells.top_ring == top && slide_left_ms(*h.plan) == span && slide_duration(*h.plan) == span &&
-                  span > 820,
-              "the every cell fixture: the left plan's top ring folds, L passes 800 at 5 frames");
-        Buffer a0, b0, at;
-        draw_collapsed(a0.surface(), kScreen, true);
-        draw_expanded(b0.surface(), kScreen, true);
-        slide_compose(a0.surface(), b0.surface(), at.surface(), *h.plan, 820, -1, kGround, SlideText(title));
-        check(at.surface().at(730, 400) == kTitle, "at e = 820 the title is at rest");
-        Rect lp{0, 0, 432, 720};
-        check(!same(at.surface(), a0.surface(), lp) && !same(at.surface(), b0.surface(), lp),
-              "at e = 820 the cells are still folding");
-    }
-    report(reverse_at(5, true, 820), "system e = 820 at 5 frames, every cell fixture");
+    report(reverse_at(40), "system e = 40");
+    report(reverse_at(160), "system e = 160");
+    report(reverse_at(380), "system e = 380");
+    report(reverse_at(500), "system e = 500");
+    report(reverse_at(600), "system e = 600");
+    report(reverse_at(160, true), "Recent e = 160");
+    report(reverse_at(600, true), "Recent e = 600");
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

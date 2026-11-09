@@ -44,6 +44,11 @@ Page and menu motion reuse:
   (motion.t3mTile, player/ui/tokens.txt:660): the 595 ms grow clock of the large Recent tiles.
 - funeOS c60cb3ca1, player/ui/app.cpp:1018: the Quickplay pan on EaseOut over motion.quickplay, the 420 ms grow clock.
 - funeOS c60cb3ca1, motion.leave in player/ui/tokens.txt:616: the 133 ms header leave.
+- funeOS c60cb3ca1, PivotMotion in player/ui/rows.cpp:245-315 with its values in player/ui/tokens.txt:698-709 (here
+  motion.swapOut, motion.swapShift, motion.swapRows, motion.swapRowInShift, motion.swapRowFade) and the pivot direction
+  in player/ui/hub.cpp:1195: the left pane row swap, forward on an expand and back on a collapse.
+- funeOS c60cb3ca1, the T3m LeaveHeader leg in player/ui/pagemove.cpp:573-579: the header leaving during the row
+  swap.
 
 Settings value sheet:
 

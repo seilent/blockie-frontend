@@ -20,8 +20,7 @@ namespace fd {
 struct FlowOpts {
     bool big = false;
     SlotMap slots = SlotMap::RowMajor;
-    LeftMove left = LeftMove::Cells;
-    int unit = 5;
+    LeftMove left = LeftMove::T5;
     bool t9_edge = false;
     bool bar_slot = false;
     bool grid_band = true;
@@ -97,8 +96,10 @@ private:
     SelectorModel posed(const SelectorModel& base, const Nav& n, bool at_target, Pane focus) const;
     SelectorModel turned(const SelectorModel& base, const Nav& n) const;
     T9Text shown_text(const std::vector<HomeGame>& list, int k) const;
+    GridSpec spec() const;
+    int grid_y_px(int first, int gy) const;
     void show_recent(int k);
-    FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details);
+    FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open);
     FoldPlay page_play();
     void start_wanted();
     void launch(const HomeGame& g);
@@ -121,6 +122,9 @@ private:
     bool step_in_ = false;
     Want want_ = Want::None;
     TileMode mode_wanted_ = TileMode::Standard;
+    int drawn_gy_ = 0;
+    int drawn_first_ = 0;
+    int drawn_focus_ = -1;
     std::shared_ptr<SlidePlan> plan_;
 };
 

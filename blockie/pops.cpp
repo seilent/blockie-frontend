@@ -38,6 +38,8 @@ std::string pad(long long v, int width)
 
 }
 
+int pop_edge(const PopRow& r) { return r.left_only ? std::max(r.b, kPaneLeftEdge) : r.b; }
+
 void pop_count(const uint32_t* a, const uint32_t* b, int w, int h, int bx, Rect skip, std::array<int, 3>& out,
                std::array<int64_t, 3>& energy, bool* same)
 {
@@ -85,7 +87,7 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
         const PopDiff& df = diffs[i];
         std::string line = pad(r.n, 4) + " " + pad(r.t, 6) + " ms b " + pad(r.b, 3);
         line += r.motion ? " m" : " -";
-        line += r.step ? "s" : "-";
+        line += r.left_only ? "l" : r.step ? "s" : "-";
         line += r.art.empty() ? "-" : "a";
         for (int g = 0; g < 3; g++)
             line += " " + pad(df.d[g], 7);
@@ -103,8 +105,8 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
             line += "  FAIL an art frame changes outside its slot rects";
             fails++;
         }
-        if (r.motion && !r.step) {
-            for (int g = 0; g < 3; g++) {
+        if (r.motion && (!r.step || r.left_only)) {
+            for (int g = r.left_only ? 2 : 0; g < 3; g++) {
                 if (df.d[g] <= floor_of(g))
                     continue;
                 int64_t e = df.e[g];
@@ -116,7 +118,9 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
                         around = std::max(around, diffs[i + k].e[g]);
                 }
                 around = std::max(around, before);
-                if (i + 1 < n && df.e_skip[g] * kPopRatio < e && e > kPopRatio * before) {
+                bool held = r.short_back && r.ok && i >= 2 && i + 1 < n && rows[i + 1].landing && rows[i + 1].ok &&
+                            diffs[i - 1].same && df.e_skip == std::array<int64_t, 3>{};
+                if (i + 1 < n && !held && df.e_skip[g] * kPopRatio < e && e > kPopRatio * before) {
                     line += std::string("  FAIL flash in ") + kRegion[g] + " (the frames around it differ by " +
                             num(df.e_skip[g]) + ")";
                     fails++;

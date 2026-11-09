@@ -107,7 +107,6 @@ public:
     std::vector<std::string> landed;
     bool launched = false;
     bool redraw = false;
-    int unit = 5;
     Want want = Want::None;
     std::shared_ptr<SlidePlan> plan;
 
@@ -241,9 +240,10 @@ public:
         return b;
     }
 
-    FoldPlay p2(bool details)
+    FoldPlay p2(bool details, bool open)
     {
-        auto pl = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, LeftMove::Cells, unit, kHead));
+        auto pl = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, LeftMove::T5, kHead));
+        pl->moves.collapse = !open;
         plan = pl;
         FoldPlay p;
         p.details = details;
@@ -277,10 +277,10 @@ public:
         Want w = want;
         want = Want::None;
         switch (w) {
-        case Want::Enter: ctl.start(FoldKind::Expand, p2(false), now); break;
-        case Want::Exit: ctl.start(FoldKind::Collapse, p2(false), now); break;
-        case Want::In: ctl.start(FoldKind::Expand, p2(true), now); break;
-        case Want::Out: ctl.start(FoldKind::Collapse, p2(true), now); break;
+        case Want::Enter: ctl.start(FoldKind::Expand, p2(false, true), now); break;
+        case Want::Exit: ctl.start(FoldKind::Collapse, p2(false, false), now); break;
+        case Want::In: ctl.start(FoldKind::Expand, p2(true, true), now); break;
+        case Want::Out: ctl.start(FoldKind::Collapse, p2(true, false), now); break;
         case Want::Push: ctl.start(FoldKind::Push, page(), now); break;
         case Want::Pop: ctl.start(FoldKind::Pop, page(), now); break;
         case Want::None: break;
@@ -598,6 +598,70 @@ int main()
         Buffer step = h.render_kept_as(Pane::Details);
         check(!has_bar(out.surface()) && equal(out.surface(), step.surface()),
               "the next frame shows no bar: the landed state with Details focus");
+    }
+
+    {
+        Host h(8, 12, false);
+        h.press(PadAction::Accept, 0);
+        bool fresh = true;
+        int sampled = 0;
+        for (int n = 0; frame_ms(n) <= 450; n++) {
+            int64_t t = frame_ms(n);
+            h.frame(t, out);
+            if (t == 16 || t == 33 || t == 100 || t >= 416) {
+                Buffer ref;
+                sampled++;
+                if (!h.ctl.compose_at(h.ctl.forward_time(t), ref.surface()) || !equal(ref.surface(), out.surface()))
+                    fresh = false;
+            }
+        }
+        check(fresh && sampled == 6,
+              "compose_at equals the expand's frames in the leave, mid swap and once the left pane is skipped");
+        bool bar = false;
+        int64_t te = h.land_frames(466, out, before, bar);
+        h.press(PadAction::Back, te + 50);
+        for (int64_t t = te + 50; t < te + 470; t += 16)
+            h.frame(t, out);
+        h.frame(te + 470, out);
+        Buffer ref;
+        check(te > 0 && h.ctl.forward_time(te + 470) == 380 && h.ctl.compose_at(380, ref.surface()) &&
+                  equal(ref.surface(), out.surface()),
+              "compose_at equals a collapse frame in the back swap's leave at forward time 380");
+    }
+
+    for (int64_t at : {(int64_t)200, (int64_t)500}) {
+        Host h(5, 12, false);
+        h.press(PadAction::Accept, 0);
+        bool bar = false;
+        int64_t te = h.land_frames(0, out, before, bar);
+        h.press(PadAction::Back, te + 50);
+        for (int64_t t = te + 50; t < te + 50 + at; t += 16)
+            h.frame(t, out);
+        Buffer rest = h.render_now(true, Pane::Selector);
+        h.press(PadAction::Accept, te + 50 + at);
+        check(h.saw("collapse:input") && h.ctl.kind() == FoldKind::Expand && !h.ctl.reversed() &&
+                  h.ctl.run_length() == 800 && equal(h.ctl.from(), rest.surface()),
+              at == 200 ? "an enter at s = 200 of a system exit lands it, the enter starts from the collapsed rest"
+                        : "an enter at s = 500 of a system exit lands it, the enter starts from the collapsed rest");
+    }
+
+    for (int64_t at : {(int64_t)200, (int64_t)500}) {
+        Host h(5, 12, false);
+        h.press(PadAction::Left, 0);
+        bool bar = false;
+        int64_t tl = h.land_frames(0, out, before, bar);
+        h.press(PadAction::Back, tl + 50);
+        for (int64_t t = tl + 50; t < tl + 50 + at; t += 16)
+            h.frame(t, out);
+        h.press(PadAction::Left, tl + 50 + at);
+        Nav want_nav = h.kept_nav;
+        want_nav.tile_focus = h.nav.tile_focus;
+        Buffer want;
+        h.draw(want.surface(), h.kept, want_nav, true, Pane::Details, kScreen);
+        check(h.saw("collapse:input") && h.ctl.kind() == FoldKind::Expand && h.ctl.details() && !h.ctl.reversed() &&
+                  equal(h.ctl.from(), want.surface()),
+              at == 200 ? "a Recent in at s = 200 of a Recent out lands it, the in starts from the collapsed rest"
+                        : "a Recent in at s = 500 of a Recent out lands it, the in starts from the collapsed rest");
     }
 
     {

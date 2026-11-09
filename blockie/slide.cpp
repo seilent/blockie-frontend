@@ -4,6 +4,8 @@
 #include <cmath>
 
 #include "../core/curves.h"
+#include "fold.h"
+#include "leftmove.h"
 #include "tile_grid.h"
 
 namespace fd {
@@ -11,6 +13,7 @@ namespace fd {
 namespace {
 
 constexpr int kSlideMs = 400;
+static_assert(swap_ms() <= kSlideMs, "the row swap ends inside the slide");
 constexpr double kX1 = 0.25, kY1 = 0.46, kX2 = 0.45, kY2 = 0.94;
 
 double cbez(double a, double b, double s)
@@ -28,12 +31,6 @@ int mix(int a, int b, double f) { return a + (int)std::lround((b - a) * f); }
 int64_t right_ms() { return kSlideMs + text_ms(); }
 
 bool settled(int64_t t, int64_t prev, int64_t end) { return prev >= end && t >= end; }
-
-fx cubic_out(fx t)
-{
-    fx m = kOne - t;
-    return kOne - fx_mul(fx_mul(m, m), m);
-}
 
 }
 
@@ -82,13 +79,12 @@ fx grow_at(GrowClock c, int64_t t)
     return kOne;
 }
 
-SlidePlan slide_plan(int target, LeftMove left, int ring_frames, Rect header)
+SlidePlan slide_plan(int target, LeftMove left, Rect header)
 {
     SlidePlan p;
     p.target = target;
     p.left = left;
-    if (left == LeftMove::Cells)
-        p.cells = left_fold(ring_frames, header);
+    p.moves.header = header.intersect({0, 0, kPaneLeftEdge, kPortraitH});
     return p;
 }
 
@@ -96,9 +92,9 @@ int64_t slide_ms() { return kSlideMs; }
 
 int64_t slide_left_ms(const SlidePlan& p)
 {
-    if (p.left == LeftMove::Fade)
-        return kSlideMs;
-    return std::max<int64_t>(kSlideMs, left_span(p.cells));
+    if (p.left == LeftMove::T5)
+        return std::max<int64_t>(kSlideMs, swap_ms());
+    return kSlideMs;
 }
 
 int64_t slide_duration(const SlidePlan& p) { return std::max(right_ms(), slide_left_ms(p)); }
@@ -122,8 +118,8 @@ SlidePose slide_pose(const SlidePlan& p, int64_t t)
 
 void slide_prepare(SlidePlan& p, const Surface& a, const Surface& b)
 {
-    if (p.left == LeftMove::Cells)
-        left_prepare(p.cells, a, b);
+    if (p.left == LeftMove::T5)
+        swap_prepare(p.moves, a, b);
 }
 
 Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const SlidePlan& p, int64_t t, int64_t prev,
@@ -135,17 +131,18 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
     bool skip_mid = settled(t, prev, kSlideMs);
     bool skip_pane = settled(t, prev, right_ms());
     bool grow = p.moves.grow != GrowClock::None;
+    int bx = std::clamp(s.boundary, kPaneSplit, w);
+    int left_end = std::max(bx, kPaneLeftEdge);
+    uint32_t g = LiveF::pack(bg);
     if (!skip_left && !grow) {
-        if (p.left == LeftMove::Cells)
-            left_compose(a, b, dst, p.cells, t, s.left_a256);
+        if (p.left == LeftMove::T5)
+            swap_compose(a, b, dst, p.moves, p.moves.collapse ? kSlideMs - t : t, left_end, g);
         else
             left_fade(a, b, dst, s.left_a256);
     }
-    int bx = std::clamp(s.boundary, kPaneSplit, w);
     int shift = bx - kPaneSplit;
     int edge = std::min(w, bx + kTileFocusBorder);
-    uint32_t g = LiveF::pack(bg);
-    int x_lo = skip_mid ? kPaneSplitWide : grow ? bx : kPaneLeftEdge;
+    int x_lo = skip_mid ? kPaneSplitWide : grow ? bx : p.left == LeftMove::T5 ? left_end : kPaneLeftEdge;
     int x_hi = skip_pane ? std::min(w, kPaneSplitWide) : w;
     int to_end = std::min(bx, x_hi);
     int g0 = std::max(x_lo, to_end), g1 = std::min(std::max(edge, x_lo), x_hi);
@@ -175,7 +172,7 @@ Rect slide_compose(const Surface& a, const Surface& b, const Surface& dst, const
         dmg.x1 = std::max(dmg.x1, x1);
     };
     if (!skip_left)
-        add(0, kPaneLeftEdge);
+        add(0, left_end);
     if (!skip_mid)
         add(kPaneLeftEdge, std::min(w, kPaneSplitWide));
     if (!skip_pane)

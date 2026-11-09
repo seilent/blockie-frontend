@@ -61,6 +61,7 @@ public:
     int from_us() const { return from_us_; }
     int to_us() const { return to_us_; }
     bool compose_end(const Surface& dst);
+    bool compose_at(int64_t ft, const Surface& dst);
     FoldKind kind() const { return kind_; }
     bool reversed() const { return reversed_; }
     int64_t t0() const { return t0_; }
