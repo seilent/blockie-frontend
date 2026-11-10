@@ -197,6 +197,29 @@ int main()
         Clip t = clean();
         t.frames[t.frames.size() - 2][100] = kGround + 0x010101;
         check(judge(t) > 0, "still frames after landing compare exactly");
+        check(names(t, "FAIL 14 frames after landing, not all identical"),
+              "a changed frame after landing is named as not identical, not as a short count");
+    }
+    {
+        auto late = [](int at, int x0, int x1) {
+            Clip c = clean();
+            for (size_t i = (size_t)at; i < c.frames.size(); i++)
+                fill(c.frames[i], x0, x1, 0x804020);
+            c.rows[(size_t)at].art = Rect{116, 0, 278, kH};
+            return c;
+        };
+        int end = kStill + kMotion;
+        check(judge(late(end + 1, 120, 274)) == 0,
+              "a cover arriving after the last motion frame with 12 identical frames after it passes");
+        check(names(late(end + 2, 120, 274), "FAIL 11 identical still frames after landing, want 12"),
+              "a cover arriving after the last motion frame with 11 identical frames after it fails");
+        check(names(late(end + 1, 0, 432), "FAIL an art frame changes outside its slot rects"),
+              "a cover arriving after the landing that changes outside its slot rect still fails");
+        Clip s = late(end + 1, 120, 274);
+        for (size_t i = (size_t)end; i < s.frames.size(); i++)
+            fill(s.frames[i], 900, 960, 0x606060);
+        check(names(s, "frames after landing, not all identical"),
+              "a change with no art rect between the landing and a late cover fails");
     }
     {
         Clip c = clean();

@@ -53,21 +53,6 @@ Gate refused(const BootGates& g, const std::string& t)
     return t == kReboot || t == kAndroid || t == kRecovery ? Gate::None : Gate::State;
 }
 
-fx progress(int64_t e, int d) { return e >= d || d <= 0 ? kOne : e <= 0 ? 0 : (fx)(e * kOne / d); }
-
-fx exp_out6_inverse(fx e)
-{
-    fx lo = 0, hi = kOne;
-    for (int i = 0; i < 17; i++) {
-        fx mid = (lo + hi) / 2;
-        if (curve(Curve::ExpOut6, mid) < e)
-            lo = mid;
-        else
-            hi = mid;
-    }
-    return hi;
-}
-
 bool running(const std::string& s)
 {
     return s == "activating" || s == "active" || s == "deactivating" || s == "reloading";
@@ -210,9 +195,7 @@ void PowerMenu::term(int64_t now)
         return;
     term_ = true;
     probing_ = false;
-    if (toast_on_ && !toast_forever_ && toast_phase(now) != 0) {
-        fx p = exp_out6_inverse(kOne - toast_eased(now));
-        toast_hold_ = now - ms(tok::motion_toastHold) - (int64_t)out_ms_ * p / kOne;
+    if (toast_.leave(now)) {
         fail_line_.clear();
         return;
     }
@@ -346,13 +329,13 @@ void PowerMenu::start_pick(int64_t at)
 {
     surf_ = PmSurface::Toast;
     if (pick_ok_) {
-        toast(at, kRestarting, "", true);
+        toast_.show(at, kRestarting, "", true);
         say("boot " + pick_, false, pick_at_);
         boot_at_ = at;
         probing_ = true;
         return;
     }
-    toast(at, failed_words(pick_), pick_reason_, false);
+    toast_.show(at, failed_words(pick_), pick_reason_, false);
     fail_line_ = "failed gate";
 }
 
@@ -435,7 +418,7 @@ void PowerMenu::fail(const std::string& reason, int64_t now)
     if (!probing_ || done_ || reason.empty())
         return;
     probing_ = false;
-    toast(now, failed_words(pick_), lower(reason), false);
+    toast_.show(now, failed_words(pick_), lower(reason), false);
     fail_line_.clear();
 }
 
@@ -451,68 +434,8 @@ void PowerMenu::tick(int64_t now)
         finish("screen-off", now);
         return;
     }
-    if (toast_on_ && !toast_forever_ && now >= toast_end())
+    if (toast_.on() && !toast_.forever() && now >= toast_.end())
         finish(fail_line_, now);
-}
-
-void PowerMenu::toast(int64_t at, const std::string& l1, const std::string& l2, bool forever)
-{
-    int p = toast_phase(at);
-    toast_forever_ = forever;
-    if (toast_on_ && (p == 1 || p == 2)) {
-        next_l1_ = l1;
-        next_l2_ = l2;
-        toast_swap_ = at;
-        if (p == 2)
-            toast_hold_ = at;
-        return;
-    }
-    toast_on_ = true;
-    toast_in_ = at;
-    toast_hold_ = at + in_ms_;
-    toast_swap_ = -1;
-    l1_ = l1;
-    l2_ = l2;
-}
-
-int PowerMenu::toast_phase(int64_t now) const
-{
-    if (!toast_on_)
-        return 0;
-    if (now < toast_hold_)
-        return 1;
-    if (toast_forever_ || now < toast_hold_ + ms(tok::motion_toastHold))
-        return 2;
-    if (now < toast_end())
-        return 3;
-    return 0;
-}
-
-int64_t PowerMenu::toast_end() const { return toast_hold_ + ms(tok::motion_toastHold) + out_ms_; }
-
-fx PowerMenu::toast_eased(int64_t now) const
-{
-    switch (toast_phase(now)) {
-    case 1:
-        return curve(Curve::ExpOut6, progress(now - toast_in_, in_ms_));
-    case 2:
-        return kOne;
-    case 3:
-        return kOne - curve(Curve::ExpOut6, progress(now - toast_hold_ - ms(tok::motion_toastHold), out_ms_));
-    default:
-        return 0;
-    }
-}
-
-fx PowerMenu::toast_text(int64_t now) const
-{
-    if (toast_swap_ < 0)
-        return kOne;
-    int64_t e = now - toast_swap_;
-    int d = ms(tok::motion_valueChange);
-    if (e < d)
-        return fx_lerp(kOne, tok::motion_valueDip, progress(e, d));
-    return fx_lerp(tok::motion_valueDip, kOne, progress(e - d, d));
 }
 
 bool PowerMenu::animating(int64_t now) const
@@ -521,8 +444,7 @@ bool PowerMenu::animating(int64_t now) const
         return false;
     if (run_ != Run::Still || !bar_.done(now) || !alpha_in_.done(now) || !alpha_out_.done(now))
         return true;
-    int p = toast_phase(now);
-    return p == 1 || p == 3 || (toast_swap_ >= 0 && now < toast_swap_ + 2 * ms(tok::motion_valueChange));
+    return toast_.animating(now);
 }
 
 int64_t PowerMenu::deadline(int64_t now) const
@@ -538,10 +460,7 @@ int64_t PowerMenu::deadline(int64_t now) const
         take(end_at_);
     if (menu())
         take(last_input_ + idle_ms_);
-    if (toast_on_ && !toast_forever_) {
-        take(toast_hold_ + ms(tok::motion_toastHold));
-        take(toast_end());
-    }
+    take(toast_.deadline(now));
     return d;
 }
 
@@ -550,11 +469,10 @@ PmView PowerMenu::view(int64_t now) const
     PmView v;
     v.surface = done_ ? PmSurface::None : surf_;
     if (v.surface == PmSurface::Toast) {
-        bool next = toast_swap_ >= 0 && now >= toast_swap_ + ms(tok::motion_valueChange);
-        v.line1 = next ? next_l1_ : l1_;
-        v.line2 = next ? next_l2_ : l2_;
-        v.e = toast_eased(now);
-        v.text = toast_text(now);
+        v.line1 = toast_.line1(now);
+        v.line2 = toast_.line2(now);
+        v.e = toast_.eased(now);
+        v.text = toast_.text(now);
         return v;
     }
     if (v.surface == PmSurface::Sheet) {

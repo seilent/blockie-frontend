@@ -7,7 +7,7 @@
 
 namespace fd {
 
-enum class FoldKind { Expand, Collapse, Push, Pop, Startup };
+enum class FoldKind { Expand, Collapse, Push, Pop, Startup, Launch, Return };
 
 struct FoldPlay {
     int64_t duration = 0;
@@ -45,6 +45,7 @@ public:
     void add(Channel c) { channels_.push_back(std::move(c)); }
     void input(int64_t now, const std::function<InputResult()>& nav);
     void start(FoldKind k, FoldPlay play, int64_t now);
+    bool reverse(int64_t now);
     void dirty();
     void dirty(Rect r);
     void land(const char* why);

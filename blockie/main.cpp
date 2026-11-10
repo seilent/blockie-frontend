@@ -45,6 +45,7 @@
 #include "ink.h"
 #include "input_pad.h"
 #include "launch.h"
+#include "launchflow.h"
 #include "library.h"
 #include "nav.h"
 #include "repeat.h"
@@ -57,6 +58,7 @@
 #include "theme.h"
 #include "theme_setting.h"
 #include "tile_grid.h"
+#include "toast_strip.h"
 #include "volume.h"
 #include "wl_keys.h"
 #include "zones.h"
@@ -68,10 +70,10 @@ namespace {
 using Art = std::shared_ptr<const Image>;
 
 constexpr int kThemeWaitMs = 300;
-constexpr int kCoverWaitMs = 300;
 constexpr int kBenchIdleMs = 5000;
 constexpr int kBenchPollMs = 50;
 constexpr const char* kZoneKey = "system.timezone";
+constexpr const char* kQuitStamp = "/blockie-game.quit";
 
 void copy_surface(const Surface& src, const Surface& dst)
 {
@@ -96,6 +98,12 @@ int64_t now_us()
 {
     using namespace std::chrono;
     return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+bool quit_stamped()
+{
+    const char* run = std::getenv("XDG_RUNTIME_DIR");
+    return run && *run && access((std::string(run) + kQuitStamp).c_str(), F_OK) == 0;
 }
 
 const char* action_name(PadAction a)
@@ -274,6 +282,13 @@ static int run()
     std::unordered_map<int64_t, Art> held;
     Launcher::Child child;
     int64_t child_game_id = -1;
+    std::string child_core;
+    LaunchFlow launch;
+    ToastStrip toast;
+    bool was_active = p.activated();
+    const char* lenv = std::getenv("BLOCKIE_LAUNCH");
+    bool launch_ab = lenv && std::strcmp(lenv, "ab") == 0;
+    bool arm_b = false;
 
     std::deque<ScrapeJob> squeue;
     std::mutex qmutex;
@@ -395,16 +410,25 @@ static int run()
             return true;
         return nav.top() == Screen::Bluetooth && btp.animating(now);
     };
-    auto animating = [&](int64_t now) { return flow.animating(now) || page_animating(now); };
+    auto animating = [&](int64_t now) { return flow.animating(now) || page_animating(now) || toast.animating(now); };
+    auto note_return = [&](bool ok) {
+        if (ok && exit_at >= 0) {
+            std::fprintf(stderr, "blockie-frontend: frame after return %lld ms\n", (long long)(now_ms() - exit_at));
+            exit_at = -1;
+        }
+    };
     auto frame = [&](int64_t now) -> bool {
         int64_t t0 = now_us();
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
         Surface dst = p.draw_target();
         fonts.begin_frame(-1);
+        toast.under(dst);
         bool folding = flow.ctl.active();
         bool more = flow.frame(now, dst);
         more = more || page_animating(now);
+        toast.draw(fonts, ink, dst, now);
+        more = more || toast.animating(now);
         p.present(kScreen);
         p.flip();
         bool ok = p.posted();
@@ -413,13 +437,25 @@ static int run()
         gate.posted(ok, more, now);
         if (ok && folding)
             drop_budget = true;
-        if (ok && exit_at >= 0) {
-            std::fprintf(stderr, "blockie-frontend: frame after return %lld ms\n", (long long)(now_ms() - exit_at));
-            exit_at = -1;
-        }
+        note_return(ok);
         return ok;
     };
-    auto can_animate = [&]() { return p.activated() && child.pid <= 0; };
+    auto black_frame = [&](int64_t now) {
+        p.begin_frame(now, p.show_at(now));
+        p.begin_full();
+        Surface dst = p.draw_target();
+        Canvas c(dst);
+        c.fill(dst.rect(), launch_ground());
+        p.present(kScreen);
+        p.flip();
+        bool ok = p.posted();
+        if (ok)
+            launch.black_shown();
+        note_return(ok);
+        std::fprintf(stderr, "blockie-frontend: black frame in %s posted %d at %lld us\n",
+                     launch_phase_name(launch.phase()), ok ? 1 : 0, (long long)now_us());
+    };
+    auto can_animate = [&]() { return launch.can_animate(p.activated(), child.pid > 0); };
     auto gate_in = [&](int64_t now, int timeout) {
         GateIn in;
         in.now = now;
@@ -430,7 +466,7 @@ static int run()
         in.need_redraw = need_redraw;
         in.animating = animating(now);
         in.timeout = timeout;
-        return in;
+        return launch_gate(launch, in, child.pid > 0);
     };
     auto land_all = [&](int64_t now, const char* why) {
         if (!flow.animating(now))
@@ -439,9 +475,15 @@ static int run()
         need_redraw = true;
     };
 
+    auto refuse = [&](bool core_absent, const std::string& core) {
+        LaunchOutcome o = launch_refused(core_absent, core);
+        toast.show(now_ms(), o.line1, o.line2, nav.top() == Screen::Home);
+        need_redraw = true;
+        return LaunchStart::Refused;
+    };
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
-            return false;
+            return LaunchStart::Refused;
         const SystemCfg* sc = system_cfg(g.system_id);
         std::string core = sc ? sc->core : std::string();
         std::string sysname = sc ? sc->name : std::string();
@@ -449,19 +491,26 @@ static int run()
             ch = (char)std::tolower((unsigned char)ch);
         if (!launcher.core_installed(core)) {
             std::fprintf(stderr, "blockie-frontend: core %s absent for %s\n", core.c_str(), g.system_id.c_str());
-            return false;
+            return refuse(true, core);
         }
         LaunchSpec spec;
         spec.system = sysname;
         spec.rompath_abs = g.rompath_abs;
         spec.core = core;
+        spec.theme = theme().light ? "light" : "dark";
         Launcher::Child ch = launcher.spawn(spec);
         if (ch.pid < 0) {
             std::fprintf(stderr, "blockie-frontend: spawn failed for %s\n", g.system_id.c_str());
-            return false;
+            return refuse(false, core);
         }
+        bool leave = !launch_ab || arm_b;
+        if (launch_ab)
+            arm_b = !arm_b;
         child = ch;
         child_game_id = g.id;
+        child_core = core;
+        launch.start(leave, p.activated());
+        toast.hide();
         repeat.release_all();
         bt.set_game_running(true, now_ms());
         scrape_pause.store(true);
@@ -469,9 +518,9 @@ static int run()
             std::lock_guard<std::mutex> lk(dmutex);
             decode_pause = true;
         }
-        std::fprintf(stderr, "blockie-frontend: launch %s pid %d ready %d\n", sysname.c_str(), (int)ch.pid,
-                     p.ready() ? 1 : 0);
-        return true;
+        std::fprintf(stderr, "blockie-frontend: launch %s pid %d arm %c press at %lld us ready %d\n", sysname.c_str(),
+                     (int)ch.pid, leave ? 'B' : 'A', (long long)now_us(), p.ready() ? 1 : 0);
+        return leave ? LaunchStart::Leave : LaunchStart::Cut;
     };
 
     auto reap_children = [&]() {
@@ -482,20 +531,18 @@ static int run()
                 continue;
             if (child.pid <= 0 || r != child.pid)
                 continue;
-            LaunchExit ex = Launcher::classify(status);
-            bool ran = ex != LaunchExit::ConfigError && ex != LaunchExit::CoreAbsent &&
-                       ex != LaunchExit::AudioGate && ex != LaunchExit::Busy;
-            if (ran && child_game_id >= 0) {
-                lib.mark_played(child_game_id, (int64_t)time(nullptr));
-                deal_recent(false);
-            }
+            int64_t now = now_ms();
+            LaunchPhase at = launch.phase();
+            LaunchOutcome out = launch.reap(status, quit_stamped(), child_core, now, now + kCoverWaitMs);
             if (!child.cfg_path.empty())
                 unlink(child.cfg_path.c_str());
-            std::fprintf(stderr, "blockie-frontend: game exited (%s) ready %d\n", ran ? "ran" : "not launched",
+            std::fprintf(stderr, "blockie-frontend: game exited (%s) in %s at %lld us ready %d\n",
+                         out.played ? "played" : "not played", launch_phase_name(at), (long long)now_us(),
                          p.ready() ? 1 : 0);
             exit_at = now_ms();
             child = {};
             child_game_id = -1;
+            child_core.clear();
             bt.set_game_running(false, now_ms());
             scrape_pause.store(false);
             {
@@ -601,7 +648,7 @@ static int run()
     };
     flow.launch_game = [&](const HomeGame& g) {
         auto it = by_id.find(g.id);
-        return it != by_id.end() && try_launch(it->second);
+        return it == by_id.end() ? LaunchStart::Refused : try_launch(it->second);
     };
     flow.draw_page = [&](Canvas& c, Screen sc, int64_t now) { render_page(c, sc, now); };
     flow.page_open = [&](Screen sc, int64_t now) {
@@ -634,14 +681,22 @@ static int run()
         return true;
     };
     flow.rearm = [&](int64_t now) { repeat.rearm(now); };
-    flow.last_frame = [&](const Surface& s) { copy_surface(p.draw_target(), s); };
+    flow.last_frame = [&](const Surface& s) {
+        copy_surface(p.draw_target(), s);
+        if (launch.phase() != LaunchPhase::Leaving)
+            toast.under(s);
+    };
     flow.ctl.can_animate = can_animate;
     flow.ctl.clock_us = now_us;
     flow.ctl.landed = [&](const char* what, const char* why) {
         std::fprintf(stderr, "blockie-frontend: %s landed (%s)\n", what, why);
         if (std::strcmp(what, "expand") == 0 || std::strcmp(what, "collapse") == 0 || std::strcmp(what, "push") == 0 ||
-            std::strcmp(what, "pop") == 0 || std::strcmp(what, "startup") == 0)
+            std::strcmp(what, "pop") == 0 || std::strcmp(what, "startup") == 0 || std::strcmp(what, "launch") == 0 ||
+            std::strcmp(what, "return") == 0)
             fstats.end(why);
+        if (std::strcmp(what, "return") == 0)
+            need_redraw = true;
+        launch.landed(what);
     };
     auto apply = [&](PadAction a, bool rep) {
         bool changed = flow.input(a, rep, now_ms());
@@ -656,7 +711,7 @@ static int run()
             fstats.to(flow.ctl.to_us());
         }
     };
-    theme_set.on_value = [&](bool light) {
+    auto apply_theme = [&](bool light) {
         settings_page.set_light(light);
         if (theme().light != light) {
             set_theme_light(light);
@@ -664,6 +719,7 @@ static int run()
         }
         need_redraw = true;
     };
+    theme_set.on_value = [&](bool light) { launch.theme(light); };
     theme_set.on_fail = [&](const std::string&, const std::string&) {
         settings_page.set_light(theme().light);
         need_redraw = true;
@@ -685,11 +741,65 @@ static int run()
             need_redraw = true;
     };
     settings_page.on_zone = [&](const std::string& id) { zone_key.set(id, now_ms()); };
-    auto press = [&](PadAction a, uint8_t src, int64_t now) {
-        apply(a, false);
-        if (is_direction(a) && child.pid <= 0)
-            repeat.press(a, src, now);
+    auto launch_edges = [&]() {
+        bool active = p.activated();
+        if (active != was_active) {
+            was_active = active;
+            int64_t at = now_us();
+            if (active && launch.phase() != LaunchPhase::Idle)
+                std::fprintf(stderr, "blockie-frontend: activation 1 in %s at %lld us, last frame hash %016llx\n",
+                             launch_phase_name(launch.phase()), (long long)at, frame_hash(p.draw_target()));
+            else
+                std::fprintf(stderr, "blockie-frontend: activation %d in %s at %lld us\n", active ? 1 : 0,
+                             launch_phase_name(launch.phase()), (long long)at);
+        }
+        launch.edges(active, child.pid > 0, now_ms());
     };
+    launch.hooks.land = land_all;
+    launch.hooks.reverse = [&](int64_t now) { return flow.launch_back(now); };
+    launch.hooks.fold_end = [&]() { return flow.ctl.active() ? flow.ctl.t0() + flow.ctl.run_length() : (int64_t)-1; };
+    launch.hooks.finish = [&](int64_t now) { flow.ctl.finish(now); };
+    launch.hooks.come_back = [&](int64_t now) {
+        std::fprintf(stderr, "blockie-frontend: return after a cover wait of %lld ms\n",
+                     (long long)(now - launch.cover_until() + kCoverWaitMs));
+        flow.come_back(now);
+        fstats.begin("return");
+        fstats.from_us = flow.ctl.from_us();
+        fstats.to(flow.ctl.to_us());
+    };
+    launch.hooks.covers_pending = [&]() {
+        std::lock_guard<std::mutex> lk(dmutex);
+        return covers_pending(home, model, [&](int64_t id) { return dq.pending(id); });
+    };
+    launch.hooks.played = [&]() {
+        if (child_game_id < 0)
+            return;
+        lib.mark_played(child_game_id, (int64_t)time(nullptr));
+        deal_recent(false);
+    };
+    launch.hooks.theme = apply_theme;
+    launch.hooks.drops = [&]() {
+        if (pending_drops.empty() || (flow.ctl.active() && !drop_budget))
+            return;
+        std::vector<ArtDrop> drops;
+        if (!flow.ctl.active()) {
+            drops.swap(pending_drops);
+        } else {
+            drop_budget = false;
+            drops.push_back(std::move(pending_drops.front()));
+            pending_drops.erase(pending_drops.begin());
+        }
+        for (const ArtDrop& drp : drops)
+            apply_drop(drp);
+    };
+    launch.hooks.toast = [&](const std::string& line1, const std::string& line2) {
+        toast.show(now_ms(), line1, line2, nav.top() == Screen::Home);
+        need_redraw = true;
+    };
+    LaunchKeys keys(launch, repeat);
+    keys.apply = [&](PadAction a, bool rep, int64_t) { apply(a, rep); };
+    auto press = [&](PadAction a, uint8_t src, int64_t now) { keys.press(a, src, child.pid <= 0, now); };
+    launch.hooks.act = [&](PadAction a, int64_t now) { keys.act(a, now); };
 
     auto pump = [&]() {
         bool ok = pump_presenter(p, touch_scratch);
@@ -983,8 +1093,10 @@ static int run()
             }
             until(battery.deadline());
         }
+        until(toast.deadline(pnow));
+        until(launch.deadline());
         timeout = gate.timeout(gate_in(pnow, timeout));
-        if (bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty()))
+        if (bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty() && !launch.holds()))
             timeout = 0;
         int pr = poll(fds.data(), (nfds_t)nfds, timeout);
         if (pr < 0) {
@@ -998,6 +1110,8 @@ static int run()
             drain_event(gf.event.fd);
         if (bi >= 0 && (fds[bi].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR)))
             bus.pump();
+
+        launch_edges();
 
         if (fds[1].revents & POLLIN) {
             bool quit = false;
@@ -1038,18 +1152,6 @@ static int run()
         }
         if (vi >= 0 && (fds[vi].revents & (POLLIN | POLLHUP | POLLERR)))
             volume.readable();
-        if (!pending_drops.empty() && (!flow.ctl.active() || drop_budget)) {
-            std::vector<ArtDrop> drops;
-            if (!flow.ctl.active()) {
-                drops.swap(pending_drops);
-            } else {
-                drop_budget = false;
-                drops.push_back(std::move(pending_drops.front()));
-                pending_drops.erase(pending_drops.begin());
-            }
-            for (const ArtDrop& drp : drops)
-                apply_drop(drp);
-        }
 
         if (!p.activated() || child.pid > 0)
             repeat.release_all();
@@ -1059,10 +1161,11 @@ static int run()
             if (repeat.sources(ra) == kFromPad && pad_ok && pad.held(ra) == Held::No)
                 repeat.release(ra, kFromPad, tn);
             else
-                apply(ra, true);
+                keys.repeat(ra, tn);
         }
 
         int64_t fnow = now_ms();
+        launch.step(fnow);
         GateStep g = gate.step(gate_in(fnow, -1));
         if (g.report_done)
             fstats.done(now_us());
@@ -1076,7 +1179,10 @@ static int run()
             flow.redraw();
             need_redraw = false;
         }
-        if (g.draw && frame(fnow))
+        LaunchDraw kind = launch.draw(g.draw);
+        if (kind == LaunchDraw::Black)
+            black_frame(fnow);
+        else if (kind == LaunchDraw::Home && frame(fnow))
             need_redraw = false;
     }
     if (child.pid > 0)

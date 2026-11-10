@@ -55,12 +55,13 @@ bool draw_toast(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme
         return true;
     Rect sr = c.surface().rect();
     int y = fx_round(to_px(fx_mul(-tok::motion_toastTravel, kOne - v.e)));
-    Rect strip = Rect{sr.x0, y, sr.x1, y + px(tok::toastHeight)}.intersect(sr);
+    int h = v.strip_h > 0 ? v.strip_h : px(tok::toastHeight);
+    Rect strip = Rect{sr.x0, y, sr.x1, y + h}.intersect(sr);
     c.fill(strip, th.light ? th.bg : tok::color_black);
     regions.push_back({strip, alpha256(fx_mul(v.e, tok::scrim_overlay_alpha))});
     int edge = px(tok::edge);
     Canvas& k = ink.begin(strip);
-    k.set_clip(Rect{edge, y, sr.x1 - edge, y + px(tok::toastHeight)}.intersect(k.clip()));
+    k.set_clip(Rect{edge, y, sr.x1 - edge, y + h}.intersect(k.clip()));
     bool ok = f.draw(k, role::toastArtist.style(), v.line1.c_str(), edge * 64, y + px(tok::toastArtistBaseline), kWhite,
                      alpha256(fx_mul(v.text, role::toastArtist.alpha)));
     if (!v.line2.empty())

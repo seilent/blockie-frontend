@@ -285,6 +285,65 @@ int main(int argc, char** argv)
                                                " 33 are the forward frames at 16 and 0");
     }
 
+    {
+        HomeFlow g(fonts, FlowOpts{});
+        g.model.systems = {{"GBA", 12, ""}};
+        g.kinds = {MenuKind::System};
+        g.games = [](int) {
+            std::vector<HomeGame> list;
+            for (int i = 0; i < 12; i++)
+                list.push_back({8000 + i, "Synth Launch Game " + std::to_string(i), "GBA"});
+            return list;
+        };
+        g.home.load = [](const HomeGame& h) -> Art {
+            auto img = std::make_shared<Image>();
+            img->w = 2;
+            img->h = 2;
+            img->mem.assign(4, 0x302010u + (uint32_t)(h.id % 100) * 0x030201u);
+            return img;
+        };
+        Buffer gout;
+        g.last_frame = [&gout](const Surface& s) { copy(gout.surface(), s); };
+        LaunchStart next = LaunchStart::Refused;
+        int asked = 0;
+        g.launch_game = [&](const HomeGame&) {
+            asked++;
+            return next;
+        };
+        g.setup();
+        int64_t gt = settle(g, gout, 0);
+        g.input(PadAction::Accept, false, gt);
+        gt = settle(g, gout, gt);
+        g.input(PadAction::Accept, false, gt);
+        bool refused = asked == 1 && !g.launched() && !g.ctl.active();
+        next = LaunchStart::Cut;
+        g.input(PadAction::Accept, false, gt);
+        bool cut = asked == 2 && g.launched() && !g.ctl.active();
+        check(refused && cut, "a refused launch starts nothing and a cut launch starts no motion");
+        next = LaunchStart::Leave;
+        Buffer press;
+        copy(gout.surface(), press.surface());
+        g.input(PadAction::Accept, false, gt);
+        bool leaving = g.launched() && g.ctl.active() && g.ctl.kind() == FoldKind::Launch &&
+                       g.ctl.run_length() == 33 && g.boundary(gt + 16) == kPaneSplitWide &&
+                       near(g.ctl.from(), press.surface(), 960);
+        g.frame(gt, gout.surface());
+        bool frame0 = near(gout.surface(), press.surface(), 960);
+        g.frame(gt + 33, gout.surface());
+        bool dark = gout.surface().at(10, 10) == LiveF::pack(0) && gout.surface().at(700, 400) == LiveF::pack(0);
+        check(leaving && frame0 && dark, "Accept on a system game leaves from the last presented frame with the"
+                                         " boundary at rest, black at 33");
+        g.ctl.finish(gt + 50);
+        g.come_back(gt + 1000);
+        bool back = g.ctl.active() && g.ctl.kind() == FoldKind::Return && g.boundary(gt + 1100) == kPaneSplitWide;
+        int64_t tl = settle(g, gout, gt + 1000);
+        Buffer fresh;
+        g.at(tl);
+        g.draw(fresh.surface(), g.model, g.nav, false, g.nav.pane, kScreen);
+        check(back && !g.ctl.active() && near(gout.surface(), fresh.surface(), 960),
+              "the return keeps the boundary at rest and ends on a fresh render of the system view");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

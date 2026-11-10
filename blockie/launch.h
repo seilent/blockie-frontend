@@ -14,6 +14,7 @@ struct LaunchSpec {
     std::string system;
     std::string rompath_abs;
     std::string core;
+    std::string theme;
     std::vector<std::pair<std::string, std::string>> overrides;
 };
 

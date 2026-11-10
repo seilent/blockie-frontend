@@ -7,7 +7,10 @@ namespace fd {
 
 namespace {
 
-bool opens(FoldKind k) { return k == FoldKind::Expand || k == FoldKind::Push; }
+bool opens(FoldKind k)
+{
+    return k == FoldKind::Expand || k == FoldKind::Push || k == FoldKind::Launch || k == FoldKind::Return;
+}
 
 bool inverse(FoldKind a, FoldKind b)
 {
@@ -25,6 +28,8 @@ const char* fold_kind_name(FoldKind k)
     case FoldKind::Push: return "push";
     case FoldKind::Pop: return "pop";
     case FoldKind::Startup: return "startup";
+    case FoldKind::Launch: return "launch";
+    case FoldKind::Return: return "return";
     }
     return "?";
 }
@@ -200,19 +205,38 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
         return;
     }
     int64_t c0 = clock_us ? clock_us() : 0;
-    if (opens(k) || after) {
+    if (k == FoldKind::Launch) {
+        copied_ = last != nullptr;
+        if (copied_)
+            last(from_.surface());
+    } else if (k != FoldKind::Return && (opens(k) || after)) {
         copied_ = !after && !moving && !stale_ && !play_.details && last && !(redraw_pending && redraw_pending());
         if (copied_)
             last(from_.surface());
         else if (render_kept)
             render_kept(from_.surface());
-    } else if (last) {
+    } else if (k != FoldKind::Return && last) {
         last(from_.surface());
     }
     from_us_ = clock_us ? (int)(clock_us() - c0) : -1;
     if (settle)
         settle();
     render_to();
+}
+
+bool MotionCtl::reverse(int64_t now)
+{
+    if (!fold_ || reversed_ || !opens(kind_) || !play_.forward)
+        return false;
+    back_e_ = std::min(std::max<int64_t>(0, now - t0_), play_.duration);
+    t0_ = now;
+    reversed_ = true;
+    end_shown_ = false;
+    to_dirty_ = false;
+    part_ = Rect{};
+    prev_t_ = -1;
+    from_us_ = -1;
+    return true;
 }
 
 bool MotionCtl::frame(int64_t now, const Surface& dst)

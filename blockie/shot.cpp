@@ -14,6 +14,8 @@
 #include <vector>
 
 #include <dirent.h>
+#include <strings.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "../core/curves.h"
@@ -28,6 +30,8 @@
 #include "homeflow.h"
 #include "image.h"
 #include "ink.h"
+#include "launch.h"
+#include "launchflow.h"
 #include "layer_mem.h"
 #include "motion.h"
 #include "nav.h"
@@ -39,6 +43,7 @@
 #include "screen_settings.h"
 #include "theme.h"
 #include "tile_grid.h"
+#include "toast_strip.h"
 #include "zones.h"
 
 using namespace fd;
@@ -189,19 +194,31 @@ std::vector<std::string> comma_list(const std::string& s)
     return out;
 }
 
+struct KeyName {
+    const char* name;
+    PadAction a;
+};
+
+constexpr KeyName kKeys[] = {{"up", PadAction::Up},           {"down", PadAction::Down},     {"left", PadAction::Left},
+                             {"right", PadAction::Right},     {"accept", PadAction::Accept}, {"back", PadAction::Back},
+                             {"context", PadAction::Context}};
+
 bool action_of(const std::string& k, PadAction& a)
 {
-    static const struct {
-        const char* name;
-        PadAction a;
-    } kKeys[] = {{"up", PadAction::Up},         {"down", PadAction::Down},     {"left", PadAction::Left},
-                 {"right", PadAction::Right},   {"accept", PadAction::Accept}, {"back", PadAction::Back}};
-    for (const auto& e : kKeys)
+    for (const KeyName& e : kKeys)
         if (k == e.name) {
             a = e.a;
             return true;
         }
     return false;
+}
+
+const char* key_name(PadAction a)
+{
+    for (const KeyName& e : kKeys)
+        if (e.a == a)
+            return e.name;
+    return "?";
 }
 
 struct Step {
@@ -231,8 +248,8 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         Step st;
         st.key = tok.substr(0, a);
         PadAction pa;
-        if (st.key != "ret" && st.key != "theme" && st.key != "fail" && st.key != "missing" && st.key != "term" &&
-            !action_of(st.key, pa))
+        if (st.key != "ret" && st.key != "cover" && st.key != "theme" && st.key != "fail" && st.key != "missing" &&
+            st.key != "term" && !action_of(st.key, pa))
             return false;
         std::string ud = tok.substr(a + 1, b - a - 1);
         if (ud != "d" && ud != "u")
@@ -339,10 +356,15 @@ struct DriveOpts {
     int tail = 0;
     double cadence = 0;
     bool repeat_covers = false;
+    std::string exit_class = "quit";
+    bool quit_stamp = false;
+    std::string libretro;
     PageOpts page;
 };
 
 constexpr const char* kNames[] = {"GB", "GBC", "NES", "SNES", "Genesis", "GBA", "PS1", "N64", "PSP", "DC"};
+constexpr const char* kCores[] = {"gambatte", "gambatte",     "nestopia",         "snes9x", "genesis_plus_gx",
+                                  "mgba",     "pcsx_rearmed", "mupen64plus_next", "ppsspp", "flycast"};
 constexpr int kCounts[] = {28, 19, 63, 47, 35, 52, 31, 22, 14, 9};
 constexpr int kRecentIds = 900000;
 constexpr int kSystemIds = 1000;
@@ -352,23 +374,45 @@ constexpr int64_t kDriveCapMs = 20000;
 constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
 constexpr uint32_t kPlainPlate = 0x808080;
 
+const char* core_of(const std::string& system)
+{
+    for (size_t i = 0; i < sizeof kNames / sizeof kNames[0]; i++)
+        if (strcasecmp(kNames[i], system.c_str()) == 0)
+            return kCores[i];
+    return "";
+}
+
+bool exit_status(const std::string& name, int& status)
+{
+    static const struct {
+        const char* name;
+        int code;
+    } kExits[] = {{"quit", 0},   {"crash", 70}, {"busy", 75}, {"config", 64},
+                  {"exec", 127}, {"core", 69},  {"audio", 71}};
+    for (const auto& e : kExits)
+        if (name == e.name) {
+            status = W_EXITCODE(e.code, 0);
+            return true;
+        }
+    return false;
+}
+
+bool all_black(const Surface& s)
+{
+    uint32_t v = LiveF::pack(launch_ground());
+    for (int y = 0; y < s.h; y++)
+        for (int x = 0; x < s.w; x++)
+            if (s.at(x, y) != v)
+                return false;
+    return true;
+}
+
 bool same_px(const Surface& a, const Surface& b)
 {
     for (int y = 0; y < a.h; y++)
         if (!std::equal(a.row(y), a.row(y) + a.w, b.row(y)))
             return false;
     return true;
-}
-
-unsigned long long px_hash(const Surface& s)
-{
-    unsigned long long h = 1469598103934665603ull;
-    for (int y = 0; y < s.h; y++)
-        for (int x = 0; x < s.w; x++) {
-            h ^= s.at(x, y);
-            h *= 1099511628211ull;
-        }
-    return h;
 }
 
 void copy_surface(const Surface& src, const Surface& dst)
@@ -411,10 +455,24 @@ public:
             return sys >= 0 && sys < (int)games.size() ? games[sys] : std::vector<HomeGame>();
         };
         flow.launch_game = [this](const HomeGame& g) {
+            std::string core = core_of(g.system);
+            bool absent = !o_.libretro.empty() && !Launcher(".", o_.libretro).core_installed(core);
+            if (absent || o_.exit_class == "spawn") {
+                LaunchOutcome r = launch_refused(absent, core);
+                toast_.show(now_, r.line1, r.line2, flow.nav.top() == Screen::Home);
+                refused_ = r.line1;
+                fprintf(stderr, "blockie-shot: %lld ms launch refused, %s\n", (long long)now_,
+                        absent ? ("core " + core + " is not in the libretro dir").c_str() : "the spawn failed");
+                return LaunchStart::Refused;
+            }
             played_ = g;
             playing_ = true;
-            flow.land_all(now_, "child");
-            return true;
+            core_ = core;
+            repeat_.release_all();
+            launch_.start(true, active_);
+            toast_.hide();
+            fprintf(stderr, "blockie-shot: %lld ms launch on %s\n", (long long)now_, core.c_str());
+            return LaunchStart::Leave;
         };
         flow.draw_page = [this](Canvas& c, Screen, int64_t now) {
             draw_settings(c, fonts_, ink_, page.view(now), theme());
@@ -427,11 +485,47 @@ public:
             return s == Screen::Settings ? page.action(a, rep, now_) : a == PadAction::Back && !rep;
         };
         flow.rearm = [this](int64_t now) { repeat_.rearm(now); };
-        flow.last_frame = [this](const Surface& s) { copy_surface(last_.surface(), s); };
+        flow.last_frame = [this](const Surface& s) {
+            copy_surface(launch_.phase() == LaunchPhase::Leaving ? shown_.surface() : last_.surface(), s);
+        };
         flow.setup();
         flow.ctl.can_animate = []() { return true; };
+        LaunchHooks& h = launch_.hooks;
+        h.land = [this](int64_t now, const char* why) { flow.land_all(now, why); };
+        h.reverse = [this](int64_t now) { return flow.launch_back(now); };
+        h.fold_end = [this]() { return flow.ctl.active() ? flow.ctl.t0() + flow.ctl.run_length() : (int64_t)-1; };
+        h.finish = [this](int64_t now) { flow.ctl.finish(now); };
+        h.come_back = [this](int64_t now) {
+            fprintf(stderr, "blockie-shot: %lld ms return after a cover wait of %lld ms\n", (long long)now,
+                    (long long)(now - launch_.cover_until() + kCoverWaitMs));
+            flow.come_back(now);
+        };
+        h.covers_pending = [this]() {
+            return covers_pending(flow.home, flow.model, [this](int64_t id) { return late_.count(id) && !arrived_; });
+        };
+        h.played = [this]() { flow.game_ran(played_first(flow.home.recent, played_, flow.home.recent_cap)); };
+        h.theme = [this](bool light) {
+            set_theme_light(light);
+            page.set_light(light);
+            flow.theme_changed();
+        };
+        h.drops = [this]() {
+            if (!arrive_held_)
+                return;
+            fprintf(stderr, "blockie-shot: %lld ms held covers arrive\n", (long long)now_);
+            arrive();
+        };
+        h.toast = [this](const std::string& line1, const std::string& line2) {
+            toast_.show(now_, line1, line2, flow.nav.top() == Screen::Home);
+        };
+        h.act = [this](PadAction a, int64_t now) { keys_.act(a, now); };
+        keys_.apply = [this](PadAction a, bool rep, int64_t now) {
+            fprintf(stderr, "blockie-shot: %lld ms input %s%s\n", (long long)now, key_name(a), rep ? " repeat" : "");
+            flow.input(a, rep, now);
+        };
         flow.ctl.landed = [this](const char* what, const char* why) {
             fprintf(stderr, "blockie-shot: %lld ms %s landed (%s)\n", (long long)now_, what, why);
+            launch_.landed(what);
             bool by_input = !in_frame_ && !flow.ctl.navigating();
             if (by_input && std::strcmp(why, "end") == 0 && std::strcmp(what, "startup") != 0)
                 end_check_input();
@@ -464,6 +558,7 @@ public:
         if (o_.startup)
             flow.startup(0);
         flow.draw(last_.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
+        copy_surface(last_.surface(), shown_.surface());
         FILE* side = nullptr;
         if (!frames_dir.empty() && !(side = fopen((frames_dir + "/frames.txt").c_str(), "w"))) {
             fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
@@ -485,17 +580,63 @@ public:
             bool was_details = ctl.details();
             FoldKind was_kind = ctl.kind();
             bool step_in = flow.take_step_in();
-            bool motion =
-                was_moving || flow.animating(tf) || (flow.nav.top() == Screen::Settings && page.animating(tf));
-            Rect art_r = flow.take_art_rect();
+            bool motion = was_moving || flow.animating(tf) ||
+                          (flow.nav.top() == Screen::Settings && page.animating(tf)) || toast_.animating(tf);
             copy_surface(last_.surface(), prev_.surface());
+            copy_surface(shown_.surface(), seen_frame_.surface());
             in_frame_ = true;
-            bool more = flow.frame(tf, last_.surface());
+            launch_.step(tf);
+            Rect art_r = flow.take_art_rect();
+            bool more = false;
+            LaunchDraw kind = launch_.draw(true);
+            const char* black = kind == LaunchDraw::Black ? launch_phase_name(launch_.phase()) : nullptr;
+            if (black) {
+                Canvas bc(last_.surface());
+                bc.fill(kScreen, launch_ground());
+                launch_.black_shown();
+                more = flow.animating(tf);
+            } else if (kind == LaunchDraw::Home) {
+                more = flow.frame(tf, last_.surface());
+            }
             more = more || (flow.nav.top() == Screen::Settings && page.animating(tf));
             in_frame_ = false;
+            more = more || toast_.visible(tf);
             was_moving = more;
             int step = 0, ok = input_ok_;
             input_ok_ = 1;
+            if (black)
+                fprintf(stderr, "blockie-shot: %lld ms black frame in %s\n", (long long)tf, black);
+            if (!refused_.empty()) {
+                bool held = !ctl.active() && launch_.phase() == LaunchPhase::Idle && toast_.visible(tf) &&
+                            toast_.line1(tf) == refused_;
+                ok = ok && held;
+                fprintf(stderr, "blockie-shot: %lld ms precheck refusal check %s%s toast shows\n", (long long)tf,
+                        held ? "no launch motion starts and the " : "FAILED, ", refused_.c_str());
+                refused_.clear();
+            }
+            bool launching = ctl.active() && ctl.kind() == FoldKind::Launch;
+            bool back = ctl.active() && ctl.kind() == FoldKind::Return;
+            if (launching && !ctl.reversed() && tf == ctl.t0()) {
+                bool held = same_px(last_.surface(), seen_frame_.surface());
+                ok = ok && held;
+                fprintf(stderr,
+                        "blockie-shot: %lld ms launch frame 0 check %s, frame hash (FNV-1a over pixels) %016llx\n",
+                        (long long)tf, held ? "the frame is the last presented frame" : "FAILED",
+                        frame_hash(last_.surface()));
+            } else if (launching || back) {
+                Buffer ref;
+                bool held = ctl.compose_at(ctl.forward_time(tf), ref.surface());
+                held = held && same_px(ref.surface(), last_.surface());
+                ok = ok && held;
+                const char* what = back ? "return" : ctl.reversed() ? "launch reversal" : "launch leave";
+                const char* res = back             ? "the home at rest over black"
+                                  : ctl.reversed() ? "a fresh render of the home at rest over black"
+                                                   : "the press frame over black";
+                fprintf(stderr,
+                        "blockie-shot: %lld ms %s check %s%s at its time, frame hash (FNV-1a over pixels) %016llx\n",
+                        (long long)tf, what, held ? "the frame is " : "FAILED, the frame is not ", res,
+                        frame_hash(last_.surface()));
+            }
             if (step_in) {
                 step = 1;
                 Buffer ref;
@@ -512,11 +653,22 @@ public:
                     Buffer ref;
                     flow.draw(ref.surface(), flow.model, flow.nav, false, Pane::Details, kScreen);
                     ok = same_px(ref.surface(), prev_.surface());
+                } else if (was_kind == FoldKind::Launch && launch_.phase() != LaunchPhase::Idle) {
+                    ok = all_black(last_.surface());
+                } else if (was_kind == FoldKind::Launch) {
+                    Buffer ref;
+                    flow.draw(ref.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
+                    ok = same_px(ref.surface(), last_.surface());
+                } else if (was_kind == FoldKind::Return) {
+                    Buffer ref;
+                    ok = ctl.compose_end(ref.surface()) && same_px(ref.surface(), last_.surface());
                 } else {
                     ok = same_px(prev_.surface(), last_.surface());
                 }
+                bool waits = was_kind == FoldKind::Launch && launch_.phase() != LaunchPhase::Idle;
                 fprintf(stderr, "blockie-shot: %lld ms %s end check %s\n", (long long)tf, fold_kind_name(was_kind),
                         ok ? (collapse_step ? "the last composed frame equals the destination with Details focus"
+                              : waits       ? "the leave lands on the wait's black"
                                             : "the composite at T equals a fresh render")
                            : "FAILED");
             }
@@ -535,7 +687,7 @@ public:
                 const char* res = held ? "the frame is the new expand composed fresh from the landed rest" : "FAILED";
                 fprintf(stderr,
                         "blockie-shot: %lld ms rule 3 landing check %s, frame hash (FNV-1a over pixels) %016llx\n",
-                        (long long)tf, res, px_hash(last_.surface()));
+                        (long long)tf, res, frame_hash(last_.surface()));
             }
             collapse_landed_ = false;
             if (ctl.active() && ctl.reversed() && ctl.t0() != back_logged_) {
@@ -566,7 +718,7 @@ public:
                                         : " the T5 rows arrive after the leave";
                 const char* res = held ? "the frame is the row swap composed fresh at its time" : "FAILED";
                 fprintf(stderr, "blockie-shot: %lld ms T5 %s check %s, frame hash (FNV-1a over pixels) %016llx\n",
-                        (long long)tf, what, res, px_hash(last_.surface()));
+                        (long long)tf, what, res, frame_hash(last_.surface()));
             }
             swap_seen_ = swap;
             swap_k_ = k;
@@ -583,9 +735,29 @@ public:
             seen_ = true;
             seen_sys_ = sys;
             seen_title_a_ = title_a;
+            copy_surface(last_.surface(), shown_.surface());
+            toast_.draw(fonts_, ink_, shown_.surface(), tf);
+            fx toast_e = toast_.visible(tf) ? toast_.eased(tf) : 0;
+            if (!step && toast_e != seen_toast_e_ && same_px(prev_.surface(), last_.surface())) {
+                Buffer ref;
+                copy_surface(last_.surface(), ref.surface());
+                ToastStrip probe = toast_;
+                probe.draw(fonts_, ink_, ref.surface(), tf);
+                bool held = same_px(ref.surface(), shown_.surface());
+                step = 1;
+                ok = ok && held;
+                cause = toast_e < seen_toast_e_ ? " the F11 toast leaves on expOut6"
+                                                : " the F11 toast rises on expOut6";
+                const char* res = held ? "the home is the frame before and the strip is the toast composed fresh at its"
+                                         " time"
+                                       : "FAILED";
+                fprintf(stderr, "blockie-shot: %lld ms toast check %s, frame hash (FNV-1a over pixels) %016llx\n",
+                        (long long)tf, res, frame_hash(shown_.surface()));
+            }
+            seen_toast_e_ = toast_e;
             if (!frames_dir.empty() && tf >= o_.from) {
                 std::string png = frame_path(frames_dir, written);
-                if (!write_png(png, last_.surface())) {
+                if (!write_png(png, shown_.surface())) {
                     fprintf(stderr, "blockie-shot: cannot write %s\n", png.c_str());
                     fclose(side);
                     return 1;
@@ -608,17 +780,16 @@ public:
                 return 1;
             }
             bool pending = next_ < steps_.size() || repeat_.active() || (o_.arrive >= 0 && !arrived_);
-            if (!pending && !more && o_.at < 0) {
-                if (tail-- > 0)
-                    continue;
+            if (pending || more)
+                tail = o_.tail;
+            else if (o_.at < 0 && tail-- <= 0)
                 break;
-            }
         }
         if (side && fclose(side) != 0) {
             fprintf(stderr, "blockie-shot: cannot close %s/frames.txt\n", frames_dir.c_str());
             return 1;
         }
-        if (!out.empty() && !write_png(out, last_.surface())) {
+        if (!out.empty() && !write_png(out, shown_.surface())) {
             fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
             return 1;
         }
@@ -697,10 +868,13 @@ private:
         if (!playing_)
             return;
         playing_ = false;
-        flow.game_ran(played_first(flow.home.recent, played_, flow.home.recent_cap));
+        int status = 0;
+        exit_status(o_.exit_class, status);
+        LaunchPhase at = launch_.phase();
+        LaunchOutcome out = launch_.reap(status, o_.quit_stamp, core_, now_, now_ + kCoverWaitMs);
+        fprintf(stderr, "blockie-shot: %lld ms game exited %s in %s, %s\n", (long long)now_, o_.exit_class.c_str(),
+                launch_phase_name(at), out.played ? "played" : "not played");
     }
-
-    void input(PadAction a, bool rep) { flow.input(a, rep, now_); }
 
     int64_t step_time(size_t i)
     {
@@ -711,7 +885,8 @@ private:
         }
         if (i > 0)
             st.ms = std::max(st.ms, steps_[i - 1].ms);
-        st.ms = snap(st.ms);
+        if (st.key != "ret" && st.key != "cover")
+            st.ms = snap(st.ms);
         return st.ms;
     }
 
@@ -722,11 +897,15 @@ private:
                 game_returned();
             return;
         }
+        if (st.key == "cover") {
+            active_ = !st.down;
+            launch_.edges(active_, playing_, now_);
+            return;
+        }
         if (st.key == "theme") {
             if (st.down) {
-                set_theme_light(!theme().light);
-                page.set_light(theme().light);
-                flow.theme_changed();
+                want_light_ = !want_light_;
+                launch_.theme(want_light_);
             }
             return;
         }
@@ -743,18 +922,16 @@ private:
         PadAction a;
         if (!action_of(st.key, a))
             return;
-        if (st.down) {
-            input(a, false);
-            if (is_direction(a) && !playing_)
-                repeat_.press(a, kFromKeys, now_);
-        } else if (is_direction(a)) {
+        if (st.down)
+            keys_.press(a, kFromKeys, !playing_, now_);
+        else if (is_direction(a))
             repeat_.release(a, kFromKeys, now_);
-        }
     }
 
     void arrive()
     {
         arrived_ = true;
+        arrive_held_ = false;
         for (int64_t id : late_) {
             auto it = art.find(id);
             if (it != art.end())
@@ -767,13 +944,16 @@ private:
         for (;;) {
             int64_t te = next_ < steps_.size() ? step_time(next_) : kNever;
             int64_t tr = repeat_.active() ? repeat_.deadline() : kNever;
-            int64_t ta = o_.arrive >= 0 && !arrived_ ? o_.arrive : kNever;
+            int64_t ta = o_.arrive >= 0 && !arrived_ && !arrive_held_ ? o_.arrive : kNever;
             int64_t t = std::min({te, tr, ta});
             if (t > tf || t == kNever)
                 return;
             set_now(t);
             if (t == ta) {
-                arrive();
+                if (launch_.holds())
+                    arrive_held_ = true;
+                else
+                    arrive();
                 continue;
             }
             if (te <= tr) {
@@ -782,7 +962,7 @@ private:
             }
             PadAction a = PadAction::Up;
             if (repeat_.due(t, a))
-                input(a, true);
+                keys_.repeat(a, t);
         }
     }
 
@@ -792,13 +972,23 @@ private:
     InkLayer ink_;
     Buffer last_;
     Buffer prev_;
+    Buffer shown_;
+    Buffer seen_frame_;
     int64_t now_ = 0;
     bool playing_ = false;
     HomeGame played_;
+    std::string core_;
+    LaunchFlow launch_;
+    LaunchKeys keys_{launch_, repeat_};
+    ToastStrip toast_;
+    bool active_ = true;
+    std::string refused_;
+    bool want_light_ = theme().light;
     std::vector<Step> steps_;
     size_t next_ = 0;
     std::unordered_set<int64_t> late_;
     bool arrived_ = false;
+    bool arrive_held_ = false;
     bool in_frame_ = false;
     int input_ok_ = 1;
     bool seen_ = false;
@@ -808,6 +998,7 @@ private:
     int64_t swap_k_ = 0;
     int64_t swap_t0_ = 0;
     bool swap_back_ = false;
+    fx seen_toast_e_ = 0;
     bool collapse_landed_ = false;
     int64_t back_logged_ = -1;
     Buffer rest_sel_;
@@ -1724,6 +1915,18 @@ int main(int argc, char** argv)
         }
         else if (a == "--startup")
             drive.startup = true;
+        else if (a == "--exit" && i + 1 < argc) {
+            drive.exit_class = argv[++i];
+            int status = 0;
+            if (drive.exit_class != "spawn" && !exit_status(drive.exit_class, status)) {
+                fprintf(stderr, "blockie-shot: --exit takes quit, crash, busy, config, exec, core, audio or spawn\n");
+                return 2;
+            }
+        }
+        else if (a == "--quitstamp")
+            drive.quit_stamp = true;
+        else if (a == "--libretro" && i + 1 < argc)
+            drive.libretro = argv[++i];
         else if (a == "--arrive" && i + 1 < argc)
             drive.arrive = atoll(argv[++i]);
         else if (a == "--script" && i + 1 < argc)
@@ -1778,11 +1981,13 @@ int main(int argc, char** argv)
                 "       blockie-shot --page settings --frames DIR [--script KEY|fail|missing:d|u:MS,...] [--from MS]"
                 " [--tail N]"
                 " [same options]\n"
-                "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY:d|u:MS|PCT%%,...] [--at MS] [--from MS]"
+                "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY|ret|cover|theme:d|u:MS|PCT%%,...]"
+                " [--at MS] [--from MS]"
                 " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
                 " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
                 " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band|full] [--startup] [--arrive MS]"
-                " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [same options]\n"
+                " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT]"
+                " [--exit quit|crash|busy|config|exec|core|audio|spawn] [--quitstamp] [--libretro DIR] [same options]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"
                 " [--pickgates FILE] [--plate home|plain] [--idle MS] [--script KEY|fail|term:d|u:MS,...] [--arrive MS]"

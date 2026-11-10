@@ -142,9 +142,12 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
         for (size_t i = 1; i < first; i++)
             if (!diffs[i].same)
                 still = false;
-        if (first < (size_t)kStillFrames || !still) {
-            lines.push_back("FAIL " + num((long long)first) + " still frames before the input, want " +
-                            num(kStillFrames) + " identical");
+        if (!still) {
+            lines.push_back("FAIL " + num((long long)first) + " frames before the input, not all identical");
+            fails++;
+        } else if (first < (size_t)kStillFrames) {
+            lines.push_back("FAIL " + num((long long)first) + " identical still frames before the input, want " +
+                            num(kStillFrames));
             fails++;
         } else {
             lines.push_back("PASS " + num((long long)first) + " identical still frames before the input");
@@ -152,14 +155,23 @@ int pop_judge(const std::vector<PopRow>& rows, const std::vector<PopDiff>& diffs
     } else {
         lines.push_back("PASS no lead check, the motion starts at launch");
     }
-    size_t trail = first == n ? 0 : n - 1 - last;
+    size_t settle = last;
     bool still = true;
-    for (size_t i = last + 1; i < n; i++)
-        if (!diffs[i].same)
+    for (size_t i = last + 1; i < n; i++) {
+        if (diffs[i].same)
+            continue;
+        if (rows[i].art.empty())
             still = false;
-    if (trail < (size_t)kStillFrames || !still) {
-        lines.push_back("FAIL " + num((long long)trail) + " still frames after landing, want " + num(kStillFrames) +
-                        " identical");
+        else
+            settle = i;
+    }
+    size_t trail = first == n ? 0 : n - 1 - settle;
+    if (!still) {
+        lines.push_back("FAIL " + num((long long)trail) + " frames after landing, not all identical");
+        fails++;
+    } else if (trail < (size_t)kStillFrames) {
+        lines.push_back("FAIL " + num((long long)trail) + " identical still frames after landing, want " +
+                        num(kStillFrames));
         fails++;
     } else {
         lines.push_back("PASS " + num((long long)trail) + " identical still frames after landing");

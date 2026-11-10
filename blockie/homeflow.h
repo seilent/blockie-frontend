@@ -8,6 +8,7 @@
 #include "../gfx/font.h"
 #include "glide.h"
 #include "home.h"
+#include "launchflow.h"
 #include "motion.h"
 #include "nav.h"
 #include "pagemove.h"
@@ -38,7 +39,7 @@ public:
     std::vector<MenuKind> kinds;
 
     std::function<std::vector<HomeGame>(int sys)> games;
-    std::function<bool(const HomeGame&)> launch_game;
+    std::function<LaunchStart(const HomeGame&)> launch_game;
     std::function<void(Canvas&, Screen, int64_t now)> draw_page;
     std::function<bool(Screen, PadAction, bool)> page_input;
     std::function<void(Screen, int64_t now)> page_open;
@@ -49,6 +50,8 @@ public:
 
     void setup();
     void startup(int64_t now);
+    void come_back(int64_t now);
+    bool launch_back(int64_t now);
     bool input(PadAction a, bool rep, int64_t now);
     bool frame(int64_t now, const Surface& dst);
     bool art(int64_t id, int side, int64_t epoch, const Art& img);
@@ -90,7 +93,7 @@ public:
     void recent_moved() override;
 
 private:
-    enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop };
+    enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop, Leave };
 
     Pane fold_focus(const Nav& n) const { return ctl.details() ? Pane::Details : n.pane; }
     SelectorModel posed(const SelectorModel& base, const Nav& n, bool at_target, Pane focus) const;
@@ -101,6 +104,7 @@ private:
     void show_recent(int k);
     FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open);
     FoldPlay page_play();
+    FoldPlay launch_play();
     void start_wanted();
     void launch(const HomeGame& g);
     void sync(bool instant);

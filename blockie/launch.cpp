@@ -174,6 +174,10 @@ Launcher::Child Launcher::spawn(const LaunchSpec& spec)
         args.push_back("--config");
         args.push_back(cfg_path);
     }
+    if (!spec.theme.empty()) {
+        args.push_back("--theme");
+        args.push_back(spec.theme);
+    }
     std::vector<char*> argv;
     argv.reserve(args.size() + 1);
     for (std::string& a : args)
@@ -228,6 +232,10 @@ LaunchExit Launcher::run(const LaunchSpec& spec, const std::function<void()>& on
     if (!cfg_path.empty()) {
         args.push_back("--config");
         args.push_back(cfg_path);
+    }
+    if (!spec.theme.empty()) {
+        args.push_back("--theme");
+        args.push_back(spec.theme);
     }
     std::vector<char*> argv;
     argv.reserve(args.size() + 1);

@@ -11,6 +11,7 @@
 #include "layer_present.h"
 #include "screen_settings.h"
 #include "theme.h"
+#include "toast_clock.h"
 
 namespace fd {
 
@@ -50,6 +51,7 @@ struct PmView {
     std::string line1, line2;
     fx e = 0;
     fx text = kOne;
+    int strip_h = 0;
 };
 
 class PowerMenu {
@@ -70,11 +72,7 @@ public:
     void abort(const std::string& line, int64_t now);
     void term(int64_t now);
     void set_idle_ms(int ms) { idle_ms_ = ms; }
-    void set_toast_ms(int in, int out)
-    {
-        in_ms_ = in;
-        out_ms_ = out;
-    }
+    void set_toast_ms(int in, int out) { toast_.set_ms(in, out); }
     bool peek_line(std::string& out, int64_t& at, bool& closing) const;
     bool take_line(std::string& out);
     bool done() const { return done_; }
@@ -105,11 +103,6 @@ private:
     void accept(int64_t now);
     void pick(const std::string& t, int64_t now);
     void start_pick(int64_t at);
-    void toast(int64_t at, const std::string& l1, const std::string& l2, bool forever);
-    int toast_phase(int64_t now) const;
-    fx toast_eased(int64_t now) const;
-    fx toast_text(int64_t now) const;
-    int64_t toast_end() const;
 
     BootGates gates_;
     std::vector<const char*> power_, sheet_, confirm_;
@@ -120,16 +113,13 @@ private:
     int focus_ = 0, prev_ = -1;
     Tween fade_, scale_, prog_, bar_, alpha_in_, alpha_out_;
     int idle_ms_ = kIdleAwakeMs;
-    int in_ms_ = fx_round(tok::motion_toastIn), out_ms_ = fx_round(tok::motion_toastOut);
     int64_t last_input_ = 0;
     std::string pick_, pick_reason_;
     bool pick_ok_ = false;
     int64_t pick_at_ = 0;
     bool probing_ = false;
     int64_t boot_at_ = -1;
-    bool toast_on_ = false, toast_forever_ = false;
-    int64_t toast_in_ = 0, toast_hold_ = 0, toast_swap_ = -1;
-    std::string l1_, l2_, next_l1_, next_l2_;
+    ToastClock toast_;
     std::string fail_line_;
     std::string line_;
     int64_t line_at_ = 0;

@@ -424,6 +424,9 @@ build_app() {
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     pool "$appobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
+    for s in launchflow toast_strip toast_clock powermenu_draw layer_present layer_mem; do
+        pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
     for s in homeflow home motion slide glide t9 scale bench; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags $(cpp_extra "blockie/$s.cpp") "$root/blockie/$s.cpp"
     done
@@ -444,7 +447,8 @@ build_app() {
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
-        "$appobj/leftmove.o" \
+        "$appobj/leftmove.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
+        "$appobj/powermenu_draw.o" "$appobj/layer_present.o" "$appobj/layer_mem.o" \
         "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/wl_keys.o" "$appobj/frame_gate.o" \
         "$appobj/main.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
@@ -849,6 +853,14 @@ build_vtext_test() {
     pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$testobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
     pool "$testobj/zones_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/zones.cpp"
+    for s in launchflow toast_strip launch repeat; do
+        pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    for s in powermenu_draw layer_present layer_mem toast_clock; do
+        pool "$testobj/pm_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    pool "$testobj/frame_gate.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/frame_gate.cpp"
+    pool "$testobj/launchmove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/launchmove_test.cpp"
     pool "$testobj/settings_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/settings_test.cpp"
     pool "$testobj/vtext_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/vtext_test.cpp"
     pool "$testobj/t9_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/t9_test.cpp"
@@ -876,20 +888,30 @@ build_vtext_test() {
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
     "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
-        "$testobj/leftmove.o" \
+        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
         "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
         "$testobj/homeflow_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
         -o "$out/vtext/blockie-homeflow-test.tmp" || return 1
     mv "$out/vtext/blockie-homeflow-test.tmp" "$out/vtext/blockie-homeflow-test"
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+        "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
+        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" "$testobj/toast_strip.o" \
+        "$testobj/pm_powermenu_draw.o" "$testobj/pm_layer_present.o" "$testobj/pm_layer_mem.o" \
+        "$testobj/pm_toast_clock.o" "$testobj/frame_gate.o" \
+        "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/zones_g.o" \
+        "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
+        "$testobj/launchmove_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/vtext/blockie-launchmove-test.tmp" || return 1
+    mv "$out/vtext/blockie-launchmove-test.tmp" "$out/vtext/blockie-launchmove-test"
     echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test" \
-        "$out/vtext/blockie-settings-test $out/vtext/blockie-homeflow-test"
+        "$out/vtext/blockie-settings-test $out/vtext/blockie-homeflow-test $out/vtext/blockie-launchmove-test"
     local cjk
     cjk=$(fc-list ':family=Noto Sans CJK JP:style=Light' file 2> /dev/null | head -n 1 | sed 's/: *$//' || true)
     [[ -n $cjk && -f $cjk ]] || cjk=
     echo "build.sh: vtext CJK fallback ${cjk:-none}"
     "$out/vtext/blockie-vtext-test" "$fonts_dir" "$cjk" && "$out/vtext/blockie-t9-test" "$fonts_dir" &&
         "$out/vtext/blockie-selector-test" "$fonts_dir" && "$out/vtext/blockie-settings-test" "$fonts_dir" &&
-        "$out/vtext/blockie-homeflow-test" "$fonts_dir"
+        "$out/vtext/blockie-homeflow-test" "$fonts_dir" && "$out/vtext/blockie-launchmove-test" "$fonts_dir"
 }
 
 build_powermenu_test() {
@@ -905,8 +927,8 @@ build_powermenu_test() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    for s in powermenu powermenu_draw layer_present layer_mem pm_input pm_run input_pad repeat screen_settings theme ink \
-        zones; do
+    for s in powermenu powermenu_draw toast_clock layer_present layer_mem pm_input pm_run input_pad repeat \
+        screen_settings theme ink zones; do
         pool "$testobj/pm_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
         pobjs+=("$testobj/pm_$s.o")
     done
@@ -946,7 +968,7 @@ build_shot() {
     pool "$shotobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops powermenu powermenu_draw layer_present \
-        layer_mem; do
+        layer_mem launchflow toast_strip toast_clock launch; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
@@ -961,7 +983,8 @@ build_shot() {
         "$shotobj/leftmove.o" \
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
         "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
-        "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/shot.o" \
+        "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/launchflow.o" \
+        "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"

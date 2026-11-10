@@ -86,6 +86,37 @@ void title(Canvas& c, int shift, int a) { c.blend({700, 100 - shift, 760, 680 - 
 
 int64_t frame_ms(int n) { return (int64_t)n * 1000 / 60; }
 
+FoldPlay leave_play(int64_t dur)
+{
+    FoldPlay p;
+    p.duration = dur;
+    p.to_bound = Rect{};
+    p.forward = [dur](const Surface& a, const Surface&, const Surface& dst, int64_t t, int64_t) {
+        Canvas c(dst);
+        if (t < dur)
+            copy(a, dst);
+        else
+            c.fill(dst.rect(), 0);
+        return dst.rect();
+    };
+    return p;
+}
+
+FoldPlay return_play(int64_t dur)
+{
+    FoldPlay p;
+    p.duration = dur;
+    p.forward = [dur](const Surface&, const Surface& b, const Surface& dst, int64_t t, int64_t) {
+        Canvas c(dst);
+        if (t >= dur)
+            copy(b, dst);
+        else
+            c.fill(dst.rect(), 0);
+        return dst.rect();
+    };
+    return p;
+}
+
 enum class Want { None, Enter, Exit, In, Out, Push, Pop };
 
 class Host : public NavHost {
@@ -911,6 +942,79 @@ int main()
         Buffer live = h.render_now(false, h.nav.pane);
         check(h.saw("expand:hidden") && !h.ctl.animating(200) && equal(out.surface(), live.surface()),
               "hidden lands with one frame of the landed state");
+    }
+
+    {
+        Host h(0, 12, false);
+        h.press(PadAction::Down, 0);
+        h.frame(16, out);
+        int renders = 0, kept = 0;
+        auto render = h.ctl.render;
+        auto render_kept = h.ctl.render_kept;
+        h.ctl.render = [&](const Surface& s, Rect b) {
+            renders++;
+            render(s, b);
+        };
+        h.ctl.render_kept = [&](const Surface& s) {
+            kept++;
+            render_kept(s);
+        };
+        Buffer press;
+        copy(h.last.surface(), press.surface());
+        h.now = 30;
+        h.ctl.start(FoldKind::Launch, leave_play(33), 30);
+        check(h.saw("bar:fold") && h.ctl.active() && h.ctl.copied() && equal(h.ctl.from(), press.surface()) &&
+                  renders == 0 && kept == 0,
+              "a launch mid glide lands the bar in the model, takes the last presented frame as from and renders"
+              " nothing");
+        h.frame(46, out);
+        check(equal(out.surface(), press.surface()), "the launch frame before its end is the press frame");
+        check(h.ctl.reverse(50) && h.ctl.reversed() && h.ctl.kind() == FoldKind::Launch && h.ctl.run_length() == 20 &&
+                  h.ctl.forward_time(50) == 20 && equal(h.ctl.from(), press.surface()) && renders == 0,
+              "reverse 20 ms into a launch swaps nothing, keeps the press frame, calls no render_to and runs back"
+              " from e 20");
+        check(!h.ctl.reverse(60), "a reversed launch does not reverse again");
+        h.frame(70, out);
+        h.frame(86, out);
+        check(!h.ctl.active() && h.saw("launch:end"), "the reversed launch lands at its end");
+        Host q(0, 12, false);
+        check(!q.ctl.reverse(0), "reverse with no fold running does nothing");
+    }
+
+    {
+        Host h(0, 12, false);
+        int renders = 0, kept = 0, lasts = 0;
+        auto render = h.ctl.render;
+        auto render_kept = h.ctl.render_kept;
+        auto last = h.ctl.last;
+        h.ctl.render = [&](const Surface& s, Rect b) {
+            renders++;
+            render(s, b);
+        };
+        h.ctl.render_kept = [&](const Surface& s) {
+            kept++;
+            render_kept(s);
+        };
+        h.ctl.last = [&](const Surface& s) {
+            lasts++;
+            last(s);
+        };
+        h.ctl.start(FoldKind::Return, return_play(367), 0);
+        check(h.ctl.active() && renders == 1 && kept == 0 && lasts == 0 &&
+                  equal(h.ctl.to(), h.render_now(false, Pane::Selector).surface()),
+              "a return builds no from and renders its destination once");
+        h.frame(16, out);
+        h.press(PadAction::Down, 40);
+        check(h.saw("return:input") && !h.ctl.active() && h.nav.focus == 1,
+              "an input during a return lands it and acts, as during the startup");
+        h.frame(56, out);
+        check(equal(out.surface(), h.render_now(false, Pane::Selector).surface()),
+              "the frame after is the moved menu at its pose");
+        Host r(0, 12, false);
+        r.ctl.start(FoldKind::Return, return_play(367), 0);
+        r.press(PadAction::Accept, 100);
+        check(r.saw("return:input") && r.ctl.kind() == FoldKind::Expand && !r.ctl.reversed(),
+              "a fold started during a return lands it and starts fresh, a return has no inverse");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

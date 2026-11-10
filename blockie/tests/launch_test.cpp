@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -270,6 +271,46 @@ int main()
         spec.core = "";
         fd::LaunchExit got = l.run(spec);
         check(got == fd::LaunchExit::Quit, "run with empty overrides and no core still launches (Quit)");
+    }
+
+    {
+        std::string argf = root + "/stub-args";
+        std::string astub = root + "/args.sh";
+        std::string synth = data_root + "/roms/gba/synth.gba";
+        write_file(astub, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argf + "\"\nexit 0\n", 0755);
+        fd::Launcher la(data_root, libretro, astub);
+        auto args_of = [&](const std::string& theme) {
+            remove(argf.c_str());
+            fd::LaunchSpec spec;
+            spec.system = "gba";
+            spec.rompath_abs = synth;
+            spec.core = "mgba";
+            spec.theme = theme;
+            fd::Launcher::Child ch = la.spawn(spec);
+            int status = 0;
+            while (ch.pid > 0 && waitpid(ch.pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            std::vector<std::string> lines;
+            FILE* f = std::fopen(argf.c_str(), "rb");
+            char buf[512];
+            while (f && std::fgets(buf, sizeof buf, f)) {
+                std::string l = buf;
+                if (!l.empty() && l.back() == '\n')
+                    l.pop_back();
+                lines.push_back(l);
+            }
+            if (f)
+                std::fclose(f);
+            return lines;
+        };
+        std::vector<std::string> light = args_of("light");
+        std::vector<std::string> want = {"gba", synth, "--core", "mgba", "--theme", "light"};
+        check(light == want, "spawn passes --theme light after the core");
+        std::vector<std::string> dark = args_of("dark");
+        check(dark.size() == 6 && dark[4] == "--theme" && dark[5] == "dark", "spawn passes --theme dark");
+        std::vector<std::string> none = args_of("");
+        check(none.size() == 4 && std::find(none.begin(), none.end(), "--theme") == none.end(),
+              "spawn with no theme passes no --theme");
     }
 
     rm_rf(root);

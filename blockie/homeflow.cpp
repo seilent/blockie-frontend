@@ -62,6 +62,27 @@ void HomeFlow::startup(int64_t now)
     ctl.start(FoldKind::Startup, p, now);
 }
 
+void HomeFlow::come_back(int64_t now)
+{
+    now_ = now;
+    FoldPlay p;
+    p.duration = return_ms();
+    p.forward = [](const Surface&, const Surface& b, const Surface& dst, int64_t t, int64_t) {
+        return_compose(b, dst, t);
+        return dst.rect();
+    };
+    ctl.start(FoldKind::Return, p, now);
+}
+
+bool HomeFlow::launch_back(int64_t now)
+{
+    now_ = now;
+    if (!ctl.reverse(now))
+        return false;
+    ctl.render(ctl.to(), kScreen);
+    return true;
+}
+
 bool HomeFlow::input(PadAction a, bool rep, int64_t now)
 {
     now_ = now;
@@ -84,7 +105,7 @@ bool HomeFlow::frame(int64_t now, const Surface& dst)
 {
     now_ = now;
     bool more = ctl.frame(now, dst);
-    if (!ctl.active() || ctl.kind() == FoldKind::Startup) {
+    if (!ctl.active() || ctl.kind() == FoldKind::Startup || ctl.kind() == FoldKind::Return) {
         drawn_gy_ = grid_.at(now);
         drawn_first_ = home.first;
         drawn_focus_ = nav.system_view ? nav.sys_focus - home.first : nav.tile_focus;
@@ -140,7 +161,7 @@ Nav HomeFlow::kept_focus() const
 
 int HomeFlow::boundary(int64_t t) const
 {
-    if (ctl.active() && plan_)
+    if (ctl.active() && plan_ && (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse))
         return slide_pose(*plan_, ctl.forward_time(t)).boundary;
     if (nav.pane != Pane::Details || nav.top() != Screen::Home)
         return kPaneSplit;
@@ -306,6 +327,19 @@ FoldPlay HomeFlow::page_play()
     return p;
 }
 
+FoldPlay HomeFlow::launch_play()
+{
+    int64_t dur = launch_leave_ms(theme().light);
+    FoldPlay p;
+    p.duration = dur;
+    p.to_bound = Rect{};
+    p.forward = [dur](const Surface& a, const Surface&, const Surface& dst, int64_t t, int64_t) {
+        launch_compose(a, dst, t, dur);
+        return dst.rect();
+    };
+    return p;
+}
+
 void HomeFlow::start_wanted()
 {
     Want w = want_;
@@ -330,6 +364,9 @@ void HomeFlow::start_wanted()
     case Want::Pop:
         ctl.start(FoldKind::Pop, page_play(), now_);
         break;
+    case Want::Leave:
+        ctl.start(FoldKind::Launch, launch_play(), now_);
+        break;
     case Want::None:
         break;
     }
@@ -337,8 +374,12 @@ void HomeFlow::start_wanted()
 
 void HomeFlow::launch(const HomeGame& g)
 {
-    if (launch_game && launch_game(g))
-        launched_ = true;
+    LaunchStart s = launch_game ? launch_game(g) : LaunchStart::Refused;
+    if (s == LaunchStart::Refused)
+        return;
+    launched_ = true;
+    if (s == LaunchStart::Leave)
+        want_ = Want::Leave;
 }
 
 void HomeFlow::sync(bool instant)

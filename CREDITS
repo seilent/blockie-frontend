@@ -49,6 +49,12 @@ Page and menu motion reuse:
   in player/ui/hub.cpp:1195: the left pane row swap, forward on an expand and back on a collapse.
 - funeOS c60cb3ca1, the T3m LeaveHeader leg in player/ui/pagemove.cpp:573-579: the header leaving during the row
   swap.
+- funeOS 9988f306c, the T7 Page leave in player/ui/pagemove.cpp:298-302 with its ink time :261-272 (motion.t7Leave,
+  motion.npDark, player/ui/tokens.txt:743, :722) and its quad in player/ui/app.cpp:18761-18763: the launch, the last
+  presented frame fading over black.
+- funeOS 9988f306c, the T8 Page form in player/ui/pagemove.cpp:290-293 (motion.t8PageFadeDelay, motion.t8PageFade,
+  motion.t8PageX, motion.t8Page, player/ui/tokens.txt:739-742), its offset in player/ui/app.cpp:18608 and its quad
+  :18753-18756: the return from a game, the home shifted in over black.
 
 Settings value sheet:
 
