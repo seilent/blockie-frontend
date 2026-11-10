@@ -270,6 +270,18 @@ int main()
           "the saved wi-fi profile, the wired one left out");
     check(wifi_saved_count(s) == 1 && s.aps.empty() && count_prefix(strings("Log"), "RequestScan") == 0,
           "one saved, no scan and no access points before the page");
+    check(rig.until([&] { return s.radio_ok; }) && wifi_radio_shown(s) &&
+              count_prefix(strings("Log"), "GetPermissions yes") == 1,
+          "the wi-fi row shows with enable-disable-wifi yes, read once at start");
+    for (const char* p : {"no", "auth", "yes"}) {
+        int before = count_prefix(strings("Log"), "GetPermissions ");
+        test_call("Permission", p);
+        bool asked = rig.until([&] { return count_prefix(strings("Log"), "GetPermissions ") == before + 1; });
+        rig.settle(200);
+        bool yes = std::string(p) == "yes";
+        std::string what = std::string("CheckPermissions with ") + p + ": the wi-fi row " + (yes ? "shows" : "hides");
+        check(asked && s.radio_ok == yes && wifi_radio_shown(s) == yes && s.up, what.c_str());
+    }
 
     size_t mark = log_size();
     rig.wifi.set_page_open(true, now_ms());
@@ -404,7 +416,12 @@ int main()
     uint32_t serial = rig.wifi.serial();
     test_call("Restart");
     check(rig.until([&] { return !s.up; }, 1000) || rig.wifi.serial() != serial, "nm leaving drops the model");
-    check(rig.until([&] { return s.up && s.radio && rig.saved(kOffice, WifiSec::Psk); }), "nm back: fetched again");
+    check(rig.until([&] { return s.up && s.radio && s.radio_ok && rig.saved(kOffice, WifiSec::Psk); }),
+          "nm back: fetched again, the permission included");
+    test_call("Permission", "no");
+    check(rig.until([&] { return !s.radio_ok; }), "after the restart CheckPermissions with no hides the row");
+    test_call("Permission", "yes");
+    check(rig.until([&] { return s.radio_ok; }), "and yes shows it again");
 
     auto exists = [&]() { return access(txt.c_str(), F_OK) == 0; };
     auto present = [&]() {

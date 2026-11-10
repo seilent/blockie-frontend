@@ -322,8 +322,8 @@ headerXHeightBottom 66 u
 pivotTop 58 u
 pivotBottom 86 u
 pivotBaseline 79 u
-pivotGap 6.6 u
-pivotActiveGap 7.7 u
+pivotGap 18 u
+pivotActiveGap 17.2 u
 pivotLeadGap 22 u
 contentTop 98 u
 page.headerX -22 u

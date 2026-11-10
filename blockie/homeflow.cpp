@@ -313,10 +313,18 @@ FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& col
     return p;
 }
 
-FoldPlay HomeFlow::page_play()
+Screen page_under(const Nav& n, bool push)
+{
+    if (!push)
+        return n.top();
+    return n.stack.size() >= 2 ? n.stack[n.stack.size() - 2] : Screen::Home;
+}
+
+FoldPlay HomeFlow::page_play(Screen base)
 {
     plan_.reset();
-    FoldPlan plan = fold_page(nav.focus - nav.menu_top);
+    page_seed_ = base != Screen::Home && page_seed_y ? page_seed_y(base) : -1;
+    FoldPlan plan = page_seed_ >= 0 ? fold_page_row(page_seed_) : fold_page(nav.focus - nav.menu_top);
     FoldPlay p;
     p.duration = fold_duration(plan);
     auto shared = std::make_shared<const FoldPlan>(plan);
@@ -359,10 +367,10 @@ void HomeFlow::start_wanted()
         ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, true, false), now_);
         break;
     case Want::Push:
-        ctl.start(FoldKind::Push, page_play(), now_);
+        ctl.start(FoldKind::Push, page_play(page_under(nav, true)), now_);
         break;
     case Want::Pop:
-        ctl.start(FoldKind::Pop, page_play(), now_);
+        ctl.start(FoldKind::Pop, page_play(page_under(nav, false)), now_);
         break;
     case Want::Leave:
         ctl.start(FoldKind::Launch, launch_play(), now_);

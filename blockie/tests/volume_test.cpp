@@ -160,14 +160,28 @@ int main()
                "d='" + root + "'\n"
                "echo \"$*\" >> \"$d/log\"\n"
                "case \"$1\" in\n"
+               "up | down)\n"
+               "    [ $# -eq 1 ] || exit 2\n"
+               "    ;;\n"
+               "mute)\n"
+               "    case \"${2:-}\" in '' | on | off) ;; *) exit 2 ;; esac\n"
+               "    [ $# -le 2 ] || exit 2\n"
+               "    ;;\n"
+               "set)\n"
+               "    case \"${2:-}\" in '' | *[!0-9]*) exit 2 ;; esac\n"
+               "    case \"${3:-}\" in '' | muted | unmuted) ;; *) exit 2 ;; esac\n"
+               "    [ $# -le 3 ] || exit 2\n"
+               "    sleep 0.2\n"
+               "    exit \"$(cat \"$d/setrc\")\"\n"
+               "    ;;\n"
                "get)\n"
+               "    [ $# -eq 1 ] || exit 2\n"
                "    sleep \"$(cat \"$d/delay\")\"\n"
                "    cat \"$d/out\"\n"
                "    exit \"$(cat \"$d/rc\")\"\n"
                "    ;;\n"
-               "set)\n"
-               "    sleep 0.2\n"
-               "    exit \"$(cat \"$d/setrc\")\"\n"
+               "*)\n"
+               "    exit 2\n"
                "    ;;\n"
                "esac\n",
                0755);
@@ -194,6 +208,11 @@ int main()
     write_file(root + "/rc", "1\n");
     rig.vol.get();
     check(rig.until([&] { return rig.fails == 2; }), "a get that exits non zero fails");
+    write_file(root + "/out", "");
+    rig.vol.get();
+    check(rig.until([&] { return rig.fails == 3; }) && rig.values.size() == 2,
+          "a get with no output and rc 1 (wpctl's line not parsed) fails");
+    write_file(root + "/out", "40 unmuted\n");
     write_file(root + "/rc", "0\n");
     rig.until([&] { return rig.idle(); });
 
@@ -237,6 +256,25 @@ int main()
     check(rig.until([&] { return rig.idle() && rig.sets.size() == outcomes + 1; }) && !rig.sets.back(),
           "a failed set reports false");
     write_file(root + "/setrc", "0\n");
+
+    write_file(root + "/log", "");
+    outcomes = rig.sets.size();
+    rig.vol.set(10);
+    rig.vol.set(35);
+    rig.vol.set(35, true);
+    check(rig.until([&] { return rig.idle() && rig.sets.size() == outcomes + 1; }) && rig.sets.back(),
+          "a restore asked during a set gives one outcome");
+    {
+        std::vector<std::string> c = rig.calls();
+        check(c.size() == 2 && c[0] == "set 10" && c[1] == "set 35 muted",
+              "the restore is the newest queued and carries its muted word in the one call");
+    }
+    write_file(root + "/log", "");
+    outcomes = rig.sets.size();
+    check(rig.vol.set(40, false) && !rig.vol.set(101, true), "a restore takes a level 0 to 100 only");
+    check(rig.until([&] { return rig.idle() && rig.sets.size() == outcomes + 1; }) && rig.sets.back() &&
+              rig.calls().size() == 1 && rig.calls()[0] == "set 40 unmuted",
+          "a restore on its own is one set with unmuted, no bare mute");
 
     Children kids;
     check(!kids.reaped(1, 0), "a pid the children map does not hold is not taken");

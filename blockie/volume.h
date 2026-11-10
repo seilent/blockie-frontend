@@ -31,7 +31,8 @@ public:
     std::function<void(bool ok)> on_set;
 
     void get();
-    bool set(int pct);
+    bool set(int pct) { return put(pct, -1); }
+    bool set(int pct, bool muted) { return put(pct, muted ? 1 : 0); }
     int fd() const { return fd_; }
     void readable();
     bool getting() const { return get_pid_ > 0; }
@@ -40,7 +41,8 @@ public:
 private:
     void run_get();
     void got(int status);
-    bool run_set(int pct);
+    bool put(int pct, int muted);
+    bool run_set(int pct, int muted);
     void set_done(int status);
     void finish_set(bool ok);
     void drain();
@@ -56,6 +58,7 @@ private:
     bool again_ = false;
     bool stale_ = false;
     int next_ = -1;
+    int next_muted_ = -1;
 };
 
 }

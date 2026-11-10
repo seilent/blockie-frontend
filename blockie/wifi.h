@@ -45,6 +45,7 @@ private:
     void fetch(int64_t now);
     void find_device(int64_t now);
     void fetch_state(int64_t now);
+    void fetch_permissions(int64_t now);
     void fetch_active(int64_t now);
     void fetch_saved(int64_t now);
     void fetch_aps(int64_t now, bool order);
@@ -75,7 +76,7 @@ private:
     WifiState s_;
     uint32_t serial_ = 1;
     std::string owner_;
-    uint32_t gen_ = 1, saved_gen_ = 0, ap_gen_ = 0, join_seq_ = 0;
+    uint32_t gen_ = 1, saved_gen_ = 0, ap_gen_ = 0, perm_gen_ = 0, join_seq_ = 0;
     bool started_ = false, fetch_due_ = false, page_ = false, saved_ok_ = false;
     bool txt_due_ = false, importing_ = false, import_failed_ = false;
     int import_left_ = 0, import_n_ = 0;

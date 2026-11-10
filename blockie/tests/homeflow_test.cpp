@@ -343,6 +343,46 @@ int main(int argc, char** argv)
         check(back && !g.ctl.active() && near(gout.surface(), fresh.surface(), 960),
               "the return keeps the boundary at rest and ends on a fresh render of the system view");
     }
+    {
+        Nav n;
+        n.stack = {Screen::Settings};
+        bool home_push = page_under(n, true) == Screen::Home;
+        bool settings_pop = page_under(n, false) == Screen::Settings;
+        n.stack = {Screen::Settings, Screen::Bluetooth};
+        bool settings_push = page_under(n, true) == Screen::Settings;
+        n.stack.clear();
+        bool home_pop = page_under(n, false) == Screen::Home;
+        check(home_push && settings_push && settings_pop && home_pop,
+              "page seed base: the home under a push from the menu, settings under a push from its row, the pop mirrors");
+    }
+    {
+        HomeFlow g(fonts, FlowOpts{});
+        g.model.systems = {{"bluetooth", 0, ""}, {"settings", 0, ""}};
+        g.kinds = {MenuKind::Bluetooth, MenuKind::Settings};
+        int row_y = 196 + 4 * 86 + 43;
+        g.page_seed_y = [&](Screen s) { return s == Screen::Settings ? row_y : -1; };
+        g.page_input = [&](Screen s, PadAction a, bool rep) {
+            if (s == Screen::Settings && a == PadAction::Accept && !rep) {
+                g.nav.stack.push_back(Screen::Bluetooth);
+                g.push(Screen::Bluetooth);
+                return false;
+            }
+            return a == PadAction::Back && !rep;
+        };
+        g.setup();
+        int64_t pt = 1000;
+        g.nav.focus = 1;
+        g.input(PadAction::Accept, false, pt);
+        bool from_home = g.nav.top() == Screen::Settings && g.page_seed() == -1;
+        g.input(PadAction::Accept, false, pt += 2000);
+        bool from_row = g.nav.top() == Screen::Bluetooth && g.page_seed() == row_y;
+        g.input(PadAction::Back, false, pt += 2000);
+        bool back_to_row = g.nav.top() == Screen::Settings && g.page_seed() == row_y;
+        g.input(PadAction::Back, false, pt += 2000);
+        bool back_home = g.nav.top() == Screen::Home && g.page_seed() == -1;
+        check(from_home && from_row && back_to_row && back_home,
+              "page seed: a push from settings and its pop plan the row fold at focus_y, the home keeps the menu fold");
+    }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

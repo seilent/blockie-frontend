@@ -155,7 +155,7 @@ std::string storage_value(const Storage& s)
 
 std::vector<InfoLine> storage_lines(const Storage& s)
 {
-    return {{"data", s.mounted ? space_words(s.data) : "no card data"}, {"system", space_words(s.system)}};
+    return {{"data", s.mounted ? space_words(s.data) : "no card"}, {"system", space_words(s.system)}};
 }
 
 std::string os_release_value(const std::string& text, const std::string& key)
@@ -196,7 +196,7 @@ std::vector<InfoLine> about_lines(const std::string& os_release, const std::stri
     return {{"blockie", or_unknown(image)},
             {"frontend", or_unknown(frontend)},
             {"kernel", or_unknown(kernel)},
-            {"wi-fi country", "jp"}};
+            {"wi-fi country", "JP"}};
 }
 
 }

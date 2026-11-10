@@ -52,7 +52,7 @@ struct WifiNote {
 };
 
 struct WifiState {
-    bool up = false, radio = false, scanning = false, scan_failed = false, scanned = false;
+    bool up = false, radio = false, scanning = false, scan_failed = false, scanned = false, radio_ok = false;
     std::string device, active_ap;
     uint32_t dev_state = 0;
     int64_t ip_since = -1;
@@ -105,6 +105,7 @@ int wifi_txt(const std::string& text, std::vector<WifiTxtNet>& out);
 std::vector<WifiTxtNet> wifi_txt_unique(const std::vector<WifiTxtNet>& nets);
 std::string wifi_error_word(const std::string& name);
 std::string wifi_networks_saved(int n);
+bool wifi_radio_shown(const WifiState& s);
 void wifi_wipe(std::string& secret);
 
 }

@@ -127,23 +127,28 @@ void Volume::got(int status)
         run_get();
 }
 
-bool Volume::set(int pct)
+bool Volume::put(int pct, int muted)
 {
     if (pct < 0 || pct > 100)
         return false;
-    if (set_pid_ > 0)
+    if (set_pid_ > 0) {
         next_ = pct;
-    else if (!run_set(pct))
+        next_muted_ = muted;
+    } else if (!run_set(pct, muted)) {
         finish_set(false);
+    }
     return true;
 }
 
-bool Volume::run_set(int pct)
+bool Volume::run_set(int pct, int muted)
 {
     if (get_pid_ > 0)
         stale_ = true;
+    std::vector<std::string> argv = {tool_, "set", std::to_string(pct)};
+    if (muted >= 0)
+        argv.push_back(muted ? "muted" : "unmuted");
     std::weak_ptr<int> alive = life_;
-    pid_t pid = kids_.spawn({tool_, "set", std::to_string(pct)}, [this, alive](int status) {
+    pid_t pid = kids_.spawn(argv, [this, alive](int status) {
         if (!alive.expired())
             set_done(status);
     });
@@ -160,7 +165,7 @@ void Volume::set_done(int status)
     if (next_ >= 0) {
         int pct = next_;
         next_ = -1;
-        if (run_set(pct))
+        if (run_set(pct, next_muted_))
             return;
         ok = false;
     }

@@ -41,6 +41,7 @@
 #include "screen_bt.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
+#include "sysinfo.h"
 #include "theme.h"
 #include "tile_grid.h"
 #include "toast_strip.h"
@@ -115,11 +116,10 @@ BtDevice shot_device(const char* mac, const char* alias, bool paired, bool conne
     return d;
 }
 
-int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
+BtState shot_bt_state(const std::string& state, int64_t now)
 {
     const char* sink = "0000110b-0000-1000-8000-00805f9b34fb";
     const char* hid = "00001124-0000-1000-8000-00805f9b34fb";
-    int64_t now = 1000000;
     BtState s;
     if (state != "unavailable") {
         s.up = true;
@@ -139,6 +139,13 @@ int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
         s.pair_target = s.devices[3].path;
         s.prompt = BtPrompt{BtPrompt::Confirm, s.devices[3].path, "", 123456};
     }
+    return s;
+}
+
+int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
+{
+    int64_t now = 1000000;
+    BtState s = shot_bt_state(state, now);
     GlyphCache glyphs;
     BtPage page(fonts, glyphs);
     page.open(now);
@@ -201,7 +208,8 @@ struct KeyName {
 
 constexpr KeyName kKeys[] = {{"up", PadAction::Up},           {"down", PadAction::Down},     {"left", PadAction::Left},
                              {"right", PadAction::Right},     {"accept", PadAction::Accept}, {"back", PadAction::Back},
-                             {"context", PadAction::Context}};
+                             {"context", PadAction::Context}, {"prev", PadAction::Prev},     {"next", PadAction::Next},
+                             {"start", PadAction::Start}};
 
 bool action_of(const std::string& k, PadAction& a)
 {
@@ -268,6 +276,16 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
 }
 
 struct PageOpts {
+    std::string pivot;
+    std::vector<std::string> sets;
+    std::vector<std::string> hides;
+    std::string battery = "62:Charging";
+    std::string volume = "35";
+    std::string radio = "on";
+    std::string storage = "82:106:4.3:7.8";
+    std::string about = "|0a1b2c3|5.10.233-blockie-test";
+    std::string btsub = "not connected";
+    std::string toast;
     std::string zone;
     bool zone_set = false;
     bool zone_missing = false;
@@ -279,15 +297,112 @@ struct PageOpts {
     int sheet_focus = -1;
 };
 
-void page_base(SettingsPage& sp, Fonts& fonts, const PageOpts& o, const Zones& z)
+std::vector<std::string> split(const std::string& s, char sep)
+{
+    std::vector<std::string> out;
+    size_t at = 0;
+    for (;;) {
+        size_t e = s.find(sep, at);
+        out.push_back(s.substr(at, e == std::string::npos ? std::string::npos : e - at));
+        if (e == std::string::npos)
+            return out;
+        at = e + 1;
+    }
+}
+
+uint64_t gb_bytes(const std::string& s) { return (uint64_t)(atof(s.c_str()) * (double)(1ull << 30)); }
+
+bool page_fixtures(SettingsPage& sp, const PageOpts& o)
+{
+    std::vector<std::pair<std::string, std::string>> keys = {
+        {kBrightnessRow, "40"},      {"sound.volume_step", "5"},       {"controls.rumble", "100"},
+        {"games.shader", "true"},    {"games.integer_scale", "false"}, {"games.resume", "false"},
+        {"games.rewind", "false"},   {"power.screen_off", "300"},      {"android.gpu", "mali"},
+        {"android.perf", "policy"}};
+    for (const std::string& a : o.sets) {
+        size_t eq = a.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            fprintf(stderr, "blockie-shot: --set takes ID=VALUE, not %s\n", a.c_str());
+            return false;
+        }
+        bool found = false;
+        for (auto& k : keys)
+            if (k.first == a.substr(0, eq)) {
+                k.second = a.substr(eq + 1);
+                found = true;
+            }
+        if (!found) {
+            fprintf(stderr, "blockie-shot: --set %s is not a setd row\n", a.c_str());
+            return false;
+        }
+    }
+    for (const auto& k : keys) {
+        SettingsRowState st;
+        st.shown = true;
+        st.value = k.second;
+        sp.set_row(k.first, st, 0);
+    }
+    std::vector<std::string> v = split(o.volume, ':');
+    if (o.volume == "fail")
+        sp.set_row(kVolumeRow, volume_row(false, 0, false), 0);
+    else
+        sp.set_row(kVolumeRow, volume_row(true, atoi(v[0].c_str()), v.size() > 1 && v[1] == "muted"), 0);
+    if (o.radio != "on" && o.radio != "off" && o.radio != "gone") {
+        fprintf(stderr, "blockie-shot: --radio takes on, off or gone\n");
+        return false;
+    }
+    sp.set_row(kRadioRow, radio_row(o.radio != "gone", o.radio == "on"), 0);
+    sp.set_row(kBluetoothRow, info_row(o.btsub), 0);
+    Battery b;
+    std::vector<std::string> bv = split(o.battery, ':');
+    if (o.battery != "unknown") {
+        b.ok = true;
+        b.capacity = atoi(bv[0].c_str());
+        b.status = bv.size() > 1 ? bv[1] : "";
+    }
+    sp.set_row(kBatteryRow, info_row(battery_words(b)), 0);
+    std::vector<std::string> sv = split(o.storage, ':');
+    if (sv.size() != 4 && !(sv.size() == 3 && sv[0] == "nocard")) {
+        fprintf(stderr, "blockie-shot: --storage takes FREE:TOTAL:SYSFREE:SYSTOTAL or nocard:SYSFREE:SYSTOTAL in GB\n");
+        return false;
+    }
+    Storage st;
+    st.mounted = sv.size() == 4;
+    size_t k = 0;
+    if (st.mounted) {
+        st.data = {true, gb_bytes(sv[0]), gb_bytes(sv[1])};
+        k = 2;
+    } else {
+        k = 1;
+    }
+    st.system = {true, gb_bytes(sv[k]), gb_bytes(sv[k + 1])};
+    sp.set_row(kStorageRow, info_row(storage_value(st), storage_lines(st)), 0);
+    std::vector<std::string> av = split(o.about, '|');
+    if (av.size() != 3) {
+        fprintf(stderr, "blockie-shot: --about takes OS_RELEASE|FRONTEND|KERNEL\n");
+        return false;
+    }
+    sp.set_row(kAboutRow, info_row("", about_lines(av[0], av[1], av[2])), 0);
+    for (const std::string& h : o.hides)
+        sp.set_row(h, SettingsRowState{}, 0);
+    if (!o.toast.empty()) {
+        std::vector<std::string> tv = split(o.toast, '|');
+        sp.toast(-fx_round(tok::motion_toastIn), tv[0], tv.size() > 1 ? tv[1] : "");
+    }
+    return true;
+}
+
+bool page_base(SettingsPage& sp, Fonts& fonts, const PageOpts& o, const Zones& z)
 {
     sp.set_sheet_rows(sheet_rows(fonts, o.rows > 0 ? o.rows : SettingsPage::kSheetRows));
     sp.set_zones(z);
-    sp.reset(theme().light);
     if (o.zone_set && !o.zone_missing)
         sp.set_zone(o.zone);
     else
         sp.set_zone_missing(0);
+    bool ok = page_fixtures(sp, o);
+    sp.reset(theme().light);
+    return ok;
 }
 
 bool page_pose(SettingsPage& sp, const PageOpts& o, const Zones& z)
@@ -307,12 +422,29 @@ bool page_pose(SettingsPage& sp, const PageOpts& o, const Zones& z)
         return true;
     };
     bool tz = !o.sheet_arg.empty();
-    for (int i = 0; i < (tz ? 1 : o.focus); i++)
-        press(PadAction::Down);
     if (tz && !sp.view(0).zone_row) {
         fprintf(stderr, "blockie-shot: --sheet %s needs --zone\n", o.sheet_arg.c_str());
         return false;
     }
+    std::string pivot = o.pivot;
+    for (const SettingsRowSpec& r : settings_rows())
+        if (tz && std::strcmp(r.id, kZoneRow) == 0)
+            pivot = r.pivot;
+    if (!pivot.empty()) {
+        SettingsView v = sp.view(0);
+        int want = -1;
+        for (size_t k = 0; k < v.pivots.size(); k++)
+            if (pivot == v.pivots[k])
+                want = (int)k;
+        if (want < 0) {
+            fprintf(stderr, "blockie-shot: --pivot %s is not shown\n", pivot.c_str());
+            return false;
+        }
+        while (sp.view(0).pivot != want)
+            press(sp.view(0).pivot < want ? PadAction::Next : PadAction::Prev);
+    }
+    for (int i = 0; i < (tz ? 0 : o.focus); i++)
+        press(PadAction::Down);
     if (!o.sheet)
         return true;
     press(PadAction::Accept);
@@ -474,17 +606,36 @@ public:
             fprintf(stderr, "blockie-shot: %lld ms launch on %s\n", (long long)now_, core.c_str());
             return LaunchStart::Leave;
         };
-        flow.draw_page = [this](Canvas& c, Screen, int64_t now) {
-            draw_settings(c, fonts_, ink_, page.view(now), theme());
+        bt_ = std::make_unique<BtPage>(fonts_, glyphs_);
+        flow.draw_page = [this](Canvas& c, Screen s, int64_t now) {
+            if (s == Screen::Bluetooth)
+                bt_->draw(c, ink_, now);
+            else
+                draw_settings(c, fonts_, ink_, page.view(now), theme());
         };
-        flow.page_open = [this](Screen s, int64_t) {
+        flow.page_open = [this](Screen s, int64_t now) {
             if (s == Screen::Settings)
                 page.reset(theme().light);
+            if (s == Screen::Bluetooth) {
+                bt_->open(now);
+                bt_->set_model(shot_bt_state("list", now), now);
+            }
         };
         flow.page_input = [this](Screen s, PadAction a, bool rep) {
-            return s == Screen::Settings ? page.action(a, rep, now_) : a == PadAction::Back && !rep;
+            if (s == Screen::Settings)
+                return page.action(a, rep, now_);
+            if (s == Screen::Bluetooth)
+                return bt_->action(a, rep, now_) == BtPage::Act::Pop;
+            return a == PadAction::Back && !rep;
+        };
+        page.on_push = [this](const std::string& id) {
+            if (id != kBluetoothRow)
+                return;
+            flow.nav.stack.push_back(Screen::Bluetooth);
+            flow.push(Screen::Bluetooth);
         };
         flow.rearm = [this](int64_t now) { repeat_.rearm(now); };
+        flow.page_seed_y = [this](Screen s) { return s == Screen::Settings ? page.focus_y() : -1; };
         flow.last_frame = [this](const Surface& s) {
             copy_surface(launch_.phase() == LaunchPhase::Leaving ? shown_.surface() : last_.surface(), s);
         };
@@ -580,8 +731,7 @@ public:
             bool was_details = ctl.details();
             FoldKind was_kind = ctl.kind();
             bool step_in = flow.take_step_in();
-            bool motion = was_moving || flow.animating(tf) ||
-                          (flow.nav.top() == Screen::Settings && page.animating(tf)) || toast_.animating(tf);
+            bool motion = was_moving || flow.animating(tf) || page_moving(tf) || toast_.animating(tf);
             copy_surface(last_.surface(), prev_.surface());
             copy_surface(shown_.surface(), seen_frame_.surface());
             in_frame_ = true;
@@ -598,7 +748,7 @@ public:
             } else if (kind == LaunchDraw::Home) {
                 more = flow.frame(tf, last_.surface());
             }
-            more = more || (flow.nav.top() == Screen::Settings && page.animating(tf));
+            more = more || page_moving(tf);
             in_frame_ = false;
             more = more || toast_.visible(tf);
             was_moving = more;
@@ -966,10 +1116,18 @@ private:
         }
     }
 
+    bool page_moving(int64_t t) const
+    {
+        Screen top = flow.nav.top();
+        return (top == Screen::Settings && page.animating(t)) || (top == Screen::Bluetooth && bt_->animating(t));
+    }
+
     Fonts& fonts_;
     DriveOpts o_;
     Repeat repeat_;
     InkLayer ink_;
+    GlyphCache glyphs_;
+    std::unique_ptr<BtPage> bt_;
     Buffer last_;
     Buffer prev_;
     Buffer shown_;
@@ -1010,7 +1168,8 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
               const std::string& recent_dir, const Zones& zones)
 {
     auto d = std::make_unique<Drive>(fonts, o);
-    page_base(d->page, fonts, o.page, zones);
+    if (!page_base(d->page, fonts, o.page, zones))
+        return 2;
     if (!o.noart && !load_tiles(tiles_dir, d->sys_covers, kCoverCap, o.big ? kBigTileSide : kTileSide))
         return 1;
     std::vector<std::string> titles, rtitles;
@@ -1205,8 +1364,8 @@ std::string designed(Fonts& fonts, const PageEvent& e, const SettingsView& v, in
         held = !v.zone_row && v.focus == 0 && v.bar == fx_int(0) &&
                (!closes || (!v.sheet.open && v.sheet.progress == t12(el, false) &&
                             panel_probe(fonts, v, t12(el, false), now)));
-        return closes ? "the zone key goes: row 1 goes, the bar lands on row 0, the sheet closes from 1"
-                      : "the zone key goes: row 1 goes, the bar lands on row 0";
+        return closes ? "the zone key goes: its row goes, the bar lands on row 0, the sheet closes from 1"
+                      : "the zone key goes: its row goes, the bar lands on row 0";
     }
     if (b.progress > 0 && b.progress < kOne) {
         fx want = t12_start ? t12(el, open) : a.progress;
@@ -1841,6 +2000,24 @@ int main(int argc, char** argv)
                 return 2;
             }
         }
+        else if (a == "--pivot" && i + 1 < argc)
+            page_opts.pivot = argv[++i];
+        else if (a == "--set" && i + 1 < argc)
+            page_opts.sets.push_back(argv[++i]);
+        else if (a == "--hide" && i + 1 < argc)
+            page_opts.hides.push_back(argv[++i]);
+        else if (a == "--battery" && i + 1 < argc)
+            page_opts.battery = argv[++i];
+        else if (a == "--volume" && i + 1 < argc)
+            page_opts.volume = argv[++i];
+        else if (a == "--radio" && i + 1 < argc)
+            page_opts.radio = argv[++i];
+        else if (a == "--storage" && i + 1 < argc)
+            page_opts.storage = argv[++i];
+        else if (a == "--about" && i + 1 < argc)
+            page_opts.about = argv[++i];
+        else if (a == "--toast" && i + 1 < argc)
+            page_opts.toast = argv[++i];
         else if (a == "--pagefocus" && i + 1 < argc)
             page_opts.focus = std::max(0, atoi(argv[++i]));
         else if (a == "--zone" && i + 1 < argc) {
@@ -1974,8 +2151,11 @@ int main(int argc, char** argv)
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
-                " [--light] [--page settings] [--pagefocus N] [--sheet [tz|tz:REGION]] [--sheetfocus N]"
-                " [--sheetrows 6|7] [--zone ID] [--zone-missing] [--zonetab PATH] [--scatter]"
+                " [--light] [--page settings] [--pivot WORD] [--pagefocus N] [--sheet [tz|tz:REGION]] [--sheetfocus N]"
+                " [--sheetrows 6|7] [--zone ID] [--zone-missing] [--zonetab PATH] [--set ID=VALUE] [--hide ID]"
+                " [--battery CAP:STATUS|unknown] [--volume PCT[:muted]|fail] [--radio on|off|gone]"
+                " [--storage FREE:TOTAL:SYSFREE:SYSTOTAL|nocard:SYSFREE:SYSTOTAL] [--about OS_RELEASE|FRONTEND|KERNEL]"
+                " [--toast LINE1|LINE2] [--scatter]"
                 " [--gamedetail SYSTEM|TITLE] [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
                 "       blockie-shot --pageflip push|pop --frames DIR [same options]\n"
                 "       blockie-shot --page settings --frames DIR [--script KEY|fail|missing:d|u:MS,...] [--from MS]"
@@ -2010,6 +2190,8 @@ int main(int argc, char** argv)
     if (!page_opts.zonetab.empty() && access(page_opts.zonetab.c_str(), R_OK) != 0)
         fprintf(stderr, "blockie-shot: cannot read %s, the sheet lists only utc\n", page_opts.zonetab.c_str());
     Zones zones = page_opts.zonetab.empty() ? Zones() : load_zones(page_opts.zonetab);
+    if (!bt_sub.empty())
+        page_opts.btsub = bt_sub;
     drive.page = page_opts;
     if (drive.on)
         return run_drive(fonts, drive, out, frames_dir, systems, items, bt_sub, sys_focus, tiles_dir, recent_dir,
@@ -2053,9 +2235,15 @@ int main(int argc, char** argv)
 
     InkLayer ink;
     SettingsPage sp;
-    page_base(sp, fonts, page_opts, zones);
-    if (!page_pose(sp, page_opts, zones))
+    if (!page_base(sp, fonts, page_opts, zones) || !page_pose(sp, page_opts, zones))
         return 2;
+    if (page_opts.sheet) {
+        SettingsView pv = sp.view(0);
+        if (pv.sheet.open)
+            fprintf(stderr, "blockie-shot: sheet %s rows %d\n", pv.sheet.title, pv.sheet.count);
+        else if (pv.rowsheet.open)
+            fprintf(stderr, "blockie-shot: row sheet %s lines %zu\n", pv.rowsheet.title, pv.rowsheet.lines.size());
+    }
     if (page_frames)
         return run_page_frames(sp, fonts, drive, zones, frames_dir, out);
     SettingsView sv = sp.view(0);

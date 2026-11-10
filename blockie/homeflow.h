@@ -28,6 +28,8 @@ struct FlowOpts {
     bool menu_glide = true;
 };
 
+Screen page_under(const Nav& n, bool push);
+
 class HomeFlow : public NavHost {
 public:
     HomeFlow(Fonts& fonts, const FlowOpts& o) : fonts_(fonts), o_(o) {}
@@ -43,6 +45,7 @@ public:
     std::function<void(Canvas&, Screen, int64_t now)> draw_page;
     std::function<bool(Screen, PadAction, bool)> page_input;
     std::function<void(Screen, int64_t now)> page_open;
+    std::function<int(Screen)> page_seed_y;
     std::function<void(const std::vector<HomeGame>& want, int scroll)> covers_wanted;
     std::function<void()> system_left;
     std::function<void(int64_t now)> rearm;
@@ -65,6 +68,7 @@ public:
     void at(int64_t now) { now_ = now; }
     int64_t now() const { return now_; }
     bool launched() const { return launched_; }
+    int page_seed() const { return page_seed_; }
     const T9& t9() const { return t9_; }
 
     Nav kept_focus() const;
@@ -103,7 +107,7 @@ private:
     int grid_y_px(int first, int gy) const;
     void show_recent(int k);
     FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open);
-    FoldPlay page_play();
+    FoldPlay page_play(Screen base);
     FoldPlay launch_play();
     void start_wanted();
     void launch(const HomeGame& g);
@@ -121,6 +125,7 @@ private:
     Nav kept_nav_;
     int64_t now_ = 0;
     bool launched_ = false;
+    int page_seed_ = -1;
     bool redraw_ = false;
     Rect art_rect_;
     bool step_in_ = false;

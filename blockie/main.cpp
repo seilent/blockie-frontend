@@ -33,6 +33,7 @@
 #include "../gfx/pixel.h"
 #include "../gfx/wayland.h"
 #include "../ui/roles.h"
+#include "backlight.h"
 #include "bench.h"
 #include "bt.h"
 #include "bus.h"
@@ -61,6 +62,7 @@
 #include "tile_grid.h"
 #include "toast_strip.h"
 #include "volume.h"
+#include "wifi.h"
 #include "wl_keys.h"
 #include "zones.h"
 
@@ -117,6 +119,9 @@ const char* action_name(PadAction a)
     case PadAction::Accept: return "accept";
     case PadAction::Back: return "back";
     case PadAction::Context: return "context";
+    case PadAction::Prev: return "prev";
+    case PadAction::Next: return "next";
+    case PadAction::Start: return "start";
     }
     return "?";
 }
@@ -149,6 +154,13 @@ static int run()
     theme_set.attach(bus);
     SetdKey zone_key(kZoneKey);
     zone_key.attach(bus);
+    std::vector<SettingsRowSpec> row_specs = settings_rows();
+    std::vector<std::unique_ptr<SetdKey>> row_keys;
+    for (const SettingsRowSpec& r : row_specs)
+        if (r.setd) {
+            row_keys.push_back(std::make_unique<SetdKey>(r.id, r.type));
+            row_keys.back()->attach(bus);
+        }
     int64_t t = now_ms();
     if (bus.open(t)) {
         int64_t until = t + kThemeWaitMs;
@@ -188,6 +200,10 @@ static int run()
     }
     Bt bt(bus);
     bt.start();
+    Wifi wifi(bus);
+    wifi.start();
+    uint32_t wifi_seen = 0, wifi_note = 0;
+    Backlight backlight(bus);
     std::vector<WlTouch> touch_scratch;
     auto wl_wait = [&](int ms) {
         struct pollfd wf;
@@ -661,10 +677,18 @@ static int run()
                 settings_page.set_zones(load_zones(kZoneTab));
                 zones_loaded = true;
             }
-            settings_page.reset(theme().light);
             sync_zone();
             if (!zone_key.has_value())
                 zone_key.fetch(now);
+            for (auto& k : row_keys)
+                if (!k->has_value())
+                    k->fetch(now);
+            Storage st = read_storage(data_root, kVarDir, kSystemDir);
+            settings_page.set_row(kStorageRow, info_row(storage_value(st), storage_lines(st)), now);
+            settings_page.set_row(kAboutRow, info_row("", about_lines(kOsRelease, frontend_commit(), kernel_release())),
+                                  now);
+            settings_page.reset(theme().light);
+            volume.get();
             battery.restart();
         }
         if (sc == Screen::Bluetooth) {
@@ -685,6 +709,7 @@ static int run()
         return true;
     };
     flow.rearm = [&](int64_t now) { repeat.rearm(now); };
+    flow.page_seed_y = [&](Screen s) { return s == Screen::Settings ? settings_page.focus_y() : -1; };
     flow.last_frame = [&](const Surface& s) {
         copy_surface(p.draw_target(), s);
         if (launch.phase() != LaunchPhase::Leaving)
@@ -724,8 +749,9 @@ static int run()
         need_redraw = true;
     };
     theme_set.on_value = [&](bool light) { launch.theme(light); };
-    theme_set.on_fail = [&](const std::string&, const std::string&) {
+    theme_set.on_fail = [&](const std::string& error, const std::string& text) {
         settings_page.set_light(theme().light);
+        settings_page.refused(kThemeRow, error, text, now_ms());
         need_redraw = true;
     };
     settings_page.on_theme = [&](bool light) { theme_set.set(light, now_ms()); };
@@ -734,8 +760,9 @@ static int run()
         if (nav.top() == Screen::Settings)
             need_redraw = true;
     };
-    zone_key.on_fail = [&](const std::string&, const std::string&) {
+    zone_key.on_fail = [&](const std::string& error, const std::string& text) {
         sync_zone();
+        settings_page.refused(kZoneRow, error, text, now_ms());
         if (nav.top() == Screen::Settings)
             need_redraw = true;
     };
@@ -745,6 +772,114 @@ static int run()
             need_redraw = true;
     };
     settings_page.on_zone = [&](const std::string& id) { zone_key.set(id, now_ms()); };
+    auto settings_dirty = [&]() {
+        if (nav.top() == Screen::Settings)
+            need_redraw = true;
+    };
+    auto sync_key = [&](const SetdKey& k) {
+        SettingsRowState st;
+        st.shown = k.has_value();
+        st.value = k.value();
+        settings_page.set_row(k.key(), st, now_ms());
+    };
+    for (auto& k : row_keys) {
+        SetdKey* kp = k.get();
+        kp->on_value = [&, kp](const std::string&) {
+            sync_key(*kp);
+            settings_dirty();
+        };
+        kp->on_missing = [&, kp]() {
+            sync_key(*kp);
+            settings_dirty();
+        };
+        kp->on_fail = [&, kp](const std::string& error, const std::string& text) {
+            sync_key(*kp);
+            settings_page.refused(kp->key(), error, text, now_ms());
+            settings_dirty();
+        };
+        sync_key(*kp);
+    }
+    VolumeLevel vol_now, vol_open;
+    bool vol_restore = false;
+    int vol_last_set = -1;
+    volume.on_value = [&](const VolumeLevel& v) {
+        vol_now = v;
+        if (vol_restore) {
+            vol_restore = false;
+            if (v.pct == vol_last_set)
+                volume.set(vol_open.pct, vol_open.muted);
+            vol_last_set = -1;
+        }
+        settings_page.set_row(kVolumeRow, volume_row(true, v.pct, v.muted), now_ms());
+        settings_dirty();
+    };
+    volume.on_fail = [&]() {
+        vol_restore = false;
+        settings_page.set_row(kVolumeRow, volume_row(false, 0, false), now_ms());
+        settings_dirty();
+    };
+    volume.on_set = [&](bool) { volume.get(); };
+    backlight.on_blank = [&]() {
+        settings_page.close_row(kBrightnessRow, now_ms());
+        settings_dirty();
+    };
+    backlight.on_fail = [&](const std::string& word) {
+        settings_page.toast(now_ms(), settings_page.title(kBrightnessRow), word);
+        settings_dirty();
+    };
+    settings_page.on_open = [&](const std::string& id) {
+        if (id == kBrightnessRow)
+            backlight.open();
+        if (id == kVolumeRow) {
+            vol_open = vol_now;
+            vol_last_set = -1;
+            vol_restore = false;
+        }
+    };
+    settings_page.on_close = [&](const std::string& id) {
+        if (id == kBrightnessRow)
+            backlight.drop();
+    };
+    settings_page.on_preview = [&](const std::string& id, const std::string& v) {
+        int pct = std::atoi(v.c_str());
+        if (id == kBrightnessRow)
+            backlight.preview(pct, now_ms());
+        if (id == kVolumeRow && volume.set(pct))
+            vol_last_set = pct;
+    };
+    settings_page.on_restore = [&](const std::string& id) {
+        if (id == kBrightnessRow)
+            backlight.restore(now_ms());
+        if (id == kVolumeRow && vol_last_set >= 0) {
+            vol_restore = true;
+            volume.get();
+        }
+    };
+    settings_page.on_pick = [&](const std::string& id, const std::string& v) {
+        int64_t now = now_ms();
+        for (auto& k : row_keys)
+            if (k->key() == id) {
+                SettingsRowState st;
+                st.shown = true;
+                st.value = v;
+                settings_page.set_row(id, st, now);
+                k->set(v, now);
+                return;
+            }
+        if (id == kRadioRow) {
+            WifiCmd c;
+            c.type = WifiCmd::Radio;
+            c.on = v == "on";
+            wifi.run(c, now);
+        }
+    };
+    settings_page.on_push = [&](const std::string& id) {
+        if (id != kBluetoothRow)
+            return;
+        nav.stack.push_back(Screen::Bluetooth);
+        flow.push(Screen::Bluetooth);
+    };
+    settings_page.set_row(kBluetoothRow, info_row(bt_subtitle(bt.state(), now_ms())), now_ms());
     auto launch_edges = [&]() {
         bool active = p.activated();
         if (active != was_active) {
@@ -1027,6 +1162,7 @@ static int run()
     need_redraw = true;
     key_edges.clear();
     leave_at = -1;
+    volume.get();
 
     while (!bench && gate_runs(p.lost(), p.closed())) {
         p.flush();
@@ -1044,10 +1180,24 @@ static int run()
             std::string sub = bt_subtitle(bt.state(), bnow);
             if (bt_item < (int)model.systems.size() && model.systems[bt_item].subtitle != sub) {
                 model.systems[bt_item].subtitle = sub;
+                settings_page.set_row(kBluetoothRow, info_row(sub), bnow);
+                settings_dirty();
                 if (nav.top() == Screen::Home) {
                     flow.redraw();
                     need_redraw = true;
                 }
+            }
+            wifi.tick(bnow);
+            if (wifi.serial() != wifi_seen) {
+                wifi_seen = wifi.serial();
+                const WifiState& ws = wifi.state();
+                settings_page.set_row(kRadioRow, radio_row(wifi_radio_shown(ws), ws.radio), bnow);
+                if (ws.note.seq != wifi_note) {
+                    wifi_note = ws.note.seq;
+                    if (nav.top() == Screen::Settings)
+                        settings_page.toast(bnow, ws.note.title, ws.note.text);
+                }
+                settings_dirty();
             }
             if (nav.top() == Screen::Bluetooth && btp.dirty(bnow))
                 need_redraw = true;
@@ -1085,9 +1235,12 @@ static int run()
         until(bus.deadline());
         until(bt.deadline());
         until(bt_tick_at(bt.state(), pnow));
+        until(wifi.deadline());
         if (nav.top() == Screen::Bluetooth)
             until(btp.deadline(pnow));
-        if (nav.top() == Screen::Settings && art_evfd >= 0) {
+        if (nav.top() == Screen::Settings)
+            until(settings_page.deadline(pnow));
+        if ((nav.top() == Screen::Settings || battery.reads() == 0) && art_evfd >= 0) {
             if (battery.due(pnow)) {
                 {
                     std::lock_guard<std::mutex> lk(dmutex);
@@ -1159,7 +1312,10 @@ static int run()
 
         if (ai >= 0 && (fds[ai].revents & POLLIN)) {
             take_drops();
-            battery.take(battery_now);
+            if (battery.take(battery_now)) {
+                settings_page.set_row(kBatteryRow, info_row(battery_words(battery_now)), now_ms());
+                settings_dirty();
+            }
         }
         if (vi >= 0 && (fds[vi].revents & (POLLIN | POLLHUP | POLLERR)))
             volume.readable();

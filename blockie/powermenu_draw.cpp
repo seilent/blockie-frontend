@@ -48,26 +48,14 @@ void draw_sheet(Canvas& c, Fonts& f, const PmView& v, const Theme& th, std::vect
     regions.push_back({{sr.x0, g.top, sr.x1, g.rows_top + g.shown * g.pitch + px(tok::edge)}, a});
 }
 
-bool draw_toast(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
-                std::vector<AlphaRegion>& regions)
+bool draw_pm_toast(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
+                   std::vector<AlphaRegion>& regions)
 {
     if (v.e <= 0)
         return true;
-    Rect sr = c.surface().rect();
-    int y = fx_round(to_px(fx_mul(-tok::motion_toastTravel, kOne - v.e)));
-    int h = v.strip_h > 0 ? v.strip_h : px(tok::toastHeight);
-    Rect strip = Rect{sr.x0, y, sr.x1, y + h}.intersect(sr);
-    c.fill(strip, th.light ? th.bg : tok::color_black);
+    Rect strip{};
+    bool ok = draw_toast(c, f, ink, ToastView{v.e, v.text, v.line1, v.line2, v.strip_h}, th, &strip);
     regions.push_back({strip, alpha256(fx_mul(v.e, tok::scrim_overlay_alpha))});
-    int edge = px(tok::edge);
-    Canvas& k = ink.begin(strip);
-    k.set_clip(Rect{edge, y, sr.x1 - edge, y + h}.intersect(k.clip()));
-    bool ok = f.draw(k, role::toastArtist.style(), v.line1.c_str(), edge * 64, y + px(tok::toastArtistBaseline), kWhite,
-                     alpha256(fx_mul(v.text, role::toastArtist.alpha)));
-    if (!v.line2.empty())
-        ok = f.draw(k, role::toastTitle.style(), v.line2.c_str(), edge * 64, y + px(tok::toastTitleBaseline), kWhite,
-                    alpha256(fx_mul(v.text, role::toastTitle.alpha))) && ok;
-    ink.compose(c.surface(), th.ink);
     return ok;
 }
 
@@ -86,7 +74,7 @@ bool draw_powermenu(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const T
         draw_sheet(c, f, v, th, regions);
         return true;
     case PmSurface::Toast:
-        return draw_toast(c, f, ink, v, th, regions);
+        return draw_pm_toast(c, f, ink, v, th, regions);
     case PmSurface::None:
         break;
     }

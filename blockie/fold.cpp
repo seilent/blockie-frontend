@@ -137,6 +137,31 @@ FoldPlan fold_page(int v)
     return p;
 }
 
+FoldPlan fold_page_row(int cy)
+{
+    FoldPlan p;
+    double mx = 0, my = 0;
+    for (const SeedU& s : kPageSeeds) {
+        mx += std_px(fx_int(s.x));
+        my += std_px(fx_int(s.y));
+    }
+    mx /= kSeeds;
+    my /= kSeeds;
+    double sx[kSeeds], sy[kSeeds];
+    for (int k = 0; k < kSeeds; k++) {
+        sx[k] = std_px(fx_int(kPageSeeds[k].x)) - mx + kPortraitW / 2.0;
+        sy[k] = std_px(fx_int(kPageSeeds[k].y)) - my + cy;
+    }
+    uint32_t rnd = kPageSeed;
+    for (int x = 0; x < kPortraitW; x += kCell)
+        for (int y = 0; y < kPortraitH; y += kCell) {
+            FoldCell c = make_cell(x, y, sx, sy, kSeeds, rnd);
+            p.maxring = std::max(p.maxring, c.ring);
+            p.cells.push_back(c);
+        }
+    return p;
+}
+
 void left_fade(const Surface& a, const Surface& b, const Surface& dst, int to_a256)
 {
     Rect r{0, 0, std::min(kEdge, dst.w), dst.h};

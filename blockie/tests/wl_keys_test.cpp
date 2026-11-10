@@ -87,6 +87,9 @@ int main()
               acts(KEY_RIGHT, PadAction::Right) && acts(KEY_ENTER, PadAction::Accept) &&
               acts(KEY_ESC, PadAction::Back) && acts(KEY_X, PadAction::Context),
           "K1 the evdev codes map to Up, Down, Left, Right, Accept, Back, Context");
+    check(acts(KEY_LEFTBRACE, PadAction::Prev) && acts(KEY_RIGHTBRACE, PadAction::Next) &&
+              acts(KEY_S, PadAction::Start),
+          "K1 [ and ] map to Prev and Next, s to Start");
     check(!evdev_action(KEY_A, a) && !evdev_action(KEY_UP + 8, a) && !evdev_action(0, a),
           "K1 any other evdev code maps to none");
 #ifdef BLOCKIE_KEYS_XKB
@@ -99,6 +102,9 @@ int main()
               sym_acts(XKB_KEY_Return, PadAction::Accept) && sym_acts(XKB_KEY_Escape, PadAction::Back) &&
               sym_acts(XKB_KEY_x, PadAction::Context),
           "K1 the keysyms map to Up, Down, Left, Right, Accept, Back, Context");
+    check(sym_acts(XKB_KEY_bracketleft, PadAction::Prev) && sym_acts(XKB_KEY_bracketright, PadAction::Next) &&
+              sym_acts(XKB_KEY_s, PadAction::Start),
+          "K1 the bracket keysyms map to Prev and Next, s to Start");
     check(!keysym_action(XKB_KEY_a, a) && !keysym_action(XKB_KEY_X, a) && !keysym_action(XKB_KEY_space, a),
           "K1 any other keysym maps to none");
 #endif

@@ -5,7 +5,7 @@
 
 namespace fd {
 
-enum class PadAction { Up, Down, Left, Right, Accept, Back, Context };
+enum class PadAction { Up, Down, Left, Right, Accept, Back, Context, Prev, Next, Start };
 
 struct PadEdge {
     PadAction action;

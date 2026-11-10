@@ -35,7 +35,10 @@ const char* const kMatches[] = {
     "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'",
     "type='signal',sender='org.freedesktop.NetworkManager',interface='org.freedesktop.NetworkManager.Device',"
     "member='StateChanged'",
+    "type='signal',sender='org.freedesktop.NetworkManager',path='/org/freedesktop/NetworkManager',"
+    "interface='org.freedesktop.NetworkManager',member='CheckPermissions'",
 };
+const char* const kRadioPermission = "org.freedesktop.NetworkManager.enable-disable-wifi";
 
 const char* const kPageMatches[] = {
     "type='signal',sender='org.freedesktop.NetworkManager',interface='org.freedesktop.NetworkManager.Device.Wireless'",
@@ -547,7 +550,43 @@ void Wifi::fetch(int64_t now)
                   changed();
               }),
               now, kCallMs);
+    fetch_permissions(now);
     fetch_saved(now);
+}
+
+void Wifi::fetch_permissions(int64_t now)
+{
+    uint32_t g = gen_, pg = ++perm_gen_;
+    bus_.call(method(kNmPath, kNm, "GetPermissions"), guard([this, g, pg](DBusMessage* r) {
+                  if (g != gen_ || pg != perm_gen_)
+                      return;
+                  DBusMessageIter it, a, e;
+                  if (!ok_reply(r) || !dbus_message_has_signature(r, "a{ss}") || !dbus_message_iter_init(r, &it)) {
+                      log_failed("GetPermissions", r);
+                      if (s_.radio_ok) {
+                          s_.radio_ok = false;
+                          changed();
+                      }
+                      return;
+                  }
+                  bool ok = false;
+                  dbus_message_iter_recurse(&it, &a);
+                  while (dbus_message_iter_get_arg_type(&a) == DBUS_TYPE_DICT_ENTRY) {
+                      const char *k = nullptr, *v = nullptr;
+                      dbus_message_iter_recurse(&a, &e);
+                      dbus_message_iter_get_basic(&e, &k);
+                      dbus_message_iter_next(&e);
+                      dbus_message_iter_get_basic(&e, &v);
+                      if (k && v && std::strcmp(k, kRadioPermission) == 0)
+                          ok = std::strcmp(v, "yes") == 0;
+                      dbus_message_iter_next(&a);
+                  }
+                  if (ok != s_.radio_ok) {
+                      s_.radio_ok = ok;
+                      changed();
+                  }
+              }),
+              now, kCallMs);
 }
 
 void Wifi::find_device(int64_t now)
@@ -757,6 +796,11 @@ bool Wifi::on_message(DBusMessage* m)
     const char* path = dbus_message_get_path(m);
     if (owner_.empty() || !sender || owner_ != sender || !path)
         return false;
+    if (dbus_message_is_signal(m, kNm, "CheckPermissions")) {
+        if (std::strcmp(path, kNmPath) == 0)
+            fetch_permissions(now);
+        return false;
+    }
     if (dbus_message_is_signal(m, kDeviceIface, "StateChanged")) {
         dbus_uint32_t st = 0, old = 0, reason = 0;
         if (s_.device == path && dbus_message_get_args(m, nullptr, DBUS_TYPE_UINT32, &st, DBUS_TYPE_UINT32, &old,

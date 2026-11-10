@@ -370,6 +370,8 @@ void PowerMenu::action(PadAction a, bool repeat, int64_t now)
 {
     if (done_ || !menu())
         return;
+    if (a == PadAction::Prev || a == PadAction::Next || a == PadAction::Start)
+        return;
     last_input_ = now;
     if (a == PadAction::Left || a == PadAction::Right || a == PadAction::Context)
         return;

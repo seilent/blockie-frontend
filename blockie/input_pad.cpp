@@ -167,6 +167,18 @@ std::vector<PadEdge> PadReader::poll_edges()
                 if (down)
                     out.push_back({PadAction::Context, true});
                 break;
+            case BTN_TL:
+                if (down)
+                    out.push_back({PadAction::Prev, true});
+                break;
+            case BTN_TR:
+                if (down)
+                    out.push_back({PadAction::Next, true});
+                break;
+            case BTN_START:
+                if (down)
+                    out.push_back({PadAction::Start, true});
+                break;
             default:
                 for (int i = 0; i < 4; i++)
                     if (ev.code == kDpadCodes[i]) {

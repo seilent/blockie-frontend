@@ -126,6 +126,19 @@ int main()
             pinned = false;
     }
     check(pinned, "page cells fold away from their nearest seed, the ring within the jitter of the seed distance");
+    auto ring_at = [](const FoldPlan& p, int x, int y) {
+        for (const FoldCell& k : p.cells)
+            if (x >= k.x && x < k.x + 48 && y >= k.y && y < k.y + 48)
+                return k.ring;
+        return -1;
+    };
+    int row_cy = 196 + 4 * 86 + 43;
+    FoldPlan from_row = fold_page_row(row_cy);
+    check(from_row.cells.size() == push.cells.size() && ring_at(from_row, 480, row_cy) >= 0 &&
+              ring_at(from_row, 480, row_cy) <= 2 && ring_at(push, 480, row_cy) >= ring_at(from_row, 480, row_cy) + 3,
+          "a push from a settings row seeds at that row's centre, not at the home menu row");
+    check(ring_at(from_row, 192, 240) >= ring_at(push, 192, 240) + 2,
+          "a push from a settings row has no tile seeds: left of 432 the cells ring out from the row too");
     bool moved = false;
     for (size_t i = 0; i < push.cells.size(); i++)
         if (push.cells[i].x >= 432 && push.cells[i].ring != row3.cells[i].ring)

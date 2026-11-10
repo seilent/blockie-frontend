@@ -108,6 +108,15 @@ int main()
     check(eq(pad.poll(), {PadAction::Accept, PadAction::Back}),
           "east accept, release ignored, south back");
 
+    push(p[1], EV_KEY, BTN_TL, 1);
+    push(p[1], EV_KEY, BTN_TL, 0);
+    push(p[1], EV_KEY, BTN_TR, 1);
+    push(p[1], EV_KEY, BTN_TR, 0);
+    push(p[1], EV_KEY, BTN_START, 1);
+    push(p[1], EV_KEY, BTN_START, 0);
+    check(eq(pad.poll(), {PadAction::Prev, PadAction::Next, PadAction::Start}),
+          "tl prev, tr next, start start, releases ignored");
+
     push(p[1], EV_KEY, BTN_DPAD_UP, 1);
     push(p[1], EV_KEY, BTN_DPAD_DOWN, 1);
     push(p[1], EV_KEY, BTN_DPAD_LEFT, 1);

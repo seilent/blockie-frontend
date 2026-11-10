@@ -19,6 +19,9 @@ bool evdev_action(uint32_t code, PadAction& a)
     else if (code == KEY_ENTER) a = PadAction::Accept;
     else if (code == KEY_ESC) a = PadAction::Back;
     else if (code == KEY_X) a = PadAction::Context;
+    else if (code == KEY_LEFTBRACE) a = PadAction::Prev;
+    else if (code == KEY_RIGHTBRACE) a = PadAction::Next;
+    else if (code == KEY_S) a = PadAction::Start;
     else return false;
     return true;
 }
@@ -33,6 +36,9 @@ bool keysym_action(uint32_t sym, PadAction& a)
     else if (sym == XKB_KEY_Return) a = PadAction::Accept;
     else if (sym == XKB_KEY_Escape) a = PadAction::Back;
     else if (sym == XKB_KEY_x) a = PadAction::Context;
+    else if (sym == XKB_KEY_bracketleft) a = PadAction::Prev;
+    else if (sym == XKB_KEY_bracketright) a = PadAction::Next;
+    else if (sym == XKB_KEY_s) a = PadAction::Start;
     else return false;
     return true;
 }

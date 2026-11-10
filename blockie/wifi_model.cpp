@@ -385,6 +385,8 @@ std::string wifi_error_word(const std::string& name)
 
 std::string wifi_networks_saved(int n) { return n == 1 ? "1 network saved" : std::to_string(n) + " networks saved"; }
 
+bool wifi_radio_shown(const WifiState& s) { return s.up && s.radio_ok; }
+
 void wifi_wipe(std::string& secret)
 {
     std::fill(secret.begin(), secret.end(), '\0');

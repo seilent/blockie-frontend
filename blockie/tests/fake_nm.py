@@ -30,6 +30,8 @@ XML = f"""
 <node>
   <interface name="{NM}">
     <method name="GetDeviceByIpIface"><arg type="s" direction="in"/><arg type="o" direction="out"/></method>
+    <method name="GetPermissions"><arg type="a{{ss}}" direction="out"/></method>
+    <signal name="CheckPermissions"/>
     <method name="AddAndActivateConnection2">
       <arg type="a{{sa{{sv}}}}" direction="in"/><arg type="o" direction="in"/><arg type="o" direction="in"/>
       <arg type="a{{sv}}" direction="in"/><arg type="o" direction="out"/><arg type="o" direction="out"/>
@@ -90,6 +92,7 @@ XML = f"""
     <method name="Key"><arg type="s" direction="in"/><arg type="s" direction="in"/></method>
     <method name="Hold"><arg type="b" direction="in"/></method>
     <method name="FailOnce"><arg type="s" direction="in"/></method>
+    <method name="Permission"><arg type="s" direction="in"/></method>
   </interface>
 </node>
 """
@@ -156,6 +159,7 @@ class Fake:
         self.info = Gio.DBusNodeInfo.new_for_xml(XML)
         self.log = []
         self.mode = "ok"
+        self.permission = "yes"
         self.radio = True
         self.state = 30
         self.active = "/"
@@ -325,6 +329,12 @@ class Fake:
         return NM_PATH + "/ActiveConnection/" + str(self.n_active)
 
     def nm_call(self, method, params, inv):
+        if method == "GetPermissions":
+            self.log.append(f"GetPermissions {self.permission}")
+            perms = {"org.freedesktop.NetworkManager.enable-disable-wifi": self.permission,
+                     "org.freedesktop.NetworkManager.network-control": "yes"}
+            inv.return_value(GLib.Variant("(a{ss})", (perms,)))
+            return
         if method == "GetDeviceByIpIface":
             (name,) = params.unpack()
             if name != "wlan0":
@@ -529,6 +539,9 @@ class Fake:
             GLib.timeout_add(100, lambda: self.own(True) or False)
         elif method == "FailOnce":
             self.fail_once.add(args[0])
+        elif method == "Permission":
+            self.permission = args[0]
+            self.emit(NM_PATH, NM, "CheckPermissions", None)
         elif method == "Key":
             self.keys[args[0].encode()] = args[1]
         elif method == "Hold":

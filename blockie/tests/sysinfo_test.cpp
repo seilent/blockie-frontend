@@ -141,10 +141,10 @@ int main(int argc, char** argv)
     Storage s = read_storage(data, var, root);
     check(!s.mounted && storage_value(s) == "no card data", "data on /var's device reads no card data");
     std::vector<InfoLine> lines = storage_lines(s);
-    check(lines.size() == 2 && lines[0].title == "data" && lines[0].value == "no card data" &&
+    check(lines.size() == 2 && lines[0].title == "data" && lines[0].value == "no card" &&
               lines[1].title == "system" && ends_with(lines[1].value, " gb free") &&
               lines[1].value.find(" of ") != std::string::npos,
-          "row sheet: data no card data, system <free> of <total> gb free");
+          "row sheet: data no card, system <free> of <total> gb free");
     s = read_storage("/proc", var, root);
     check(s.mounted && s.data.ok && ends_with(storage_value(s), " gb free"), "data on its own device reads free space");
     s = read_storage(root + "/none", var, root + "/none");
@@ -164,7 +164,7 @@ int main(int argc, char** argv)
     lines = about_lines(osr, "0abc123", "5.10.0-test");
     check(lines.size() == 4 && lines[0].title == "blockie" && lines[0].value == "20261109.abc1234" &&
               lines[1].title == "frontend" && lines[1].value == "0abc123" && lines[2].title == "kernel" &&
-              lines[2].value == "5.10.0-test" && lines[3].title == "wi-fi country" && lines[3].value == "jp",
+              lines[2].value == "5.10.0-test" && lines[3].title == "wi-fi country" && lines[3].value == "JP",
           "about lines from os-release, the build and uname");
     check(os_release_value("A=1\nIMAGE_VERSION=\"20261109.q\"\n", "IMAGE_VERSION") == "20261109.q" &&
               os_release_value("IMAGE_VERSION='x'", "IMAGE_VERSION") == "x" &&

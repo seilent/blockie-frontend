@@ -223,6 +223,17 @@ int main()
               wifi_error_word("org.freedesktop.NetworkManager.Failed") == "failed",
           "error words");
     check(wifi_networks_saved(1) == "1 network saved" && wifi_networks_saved(3) == "3 networks saved", "saved words");
+    {
+        WifiState w;
+        bool none = !wifi_radio_shown(w);
+        w.up = true;
+        bool no_grant = !wifi_radio_shown(w);
+        w.radio_ok = true;
+        bool shown = wifi_radio_shown(w);
+        w.up = false;
+        check(none && no_grant && shown && !wifi_radio_shown(w),
+              "the wi-fi row shows only with wlan0 from NM and enable-disable-wifi yes");
+    }
     std::string secret = "blockie-test-psk-01";
     wifi_wipe(secret);
     check(secret.empty(), "wipe clears the secret");

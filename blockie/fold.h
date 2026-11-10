@@ -23,6 +23,7 @@ struct FoldPlan {
 constexpr int kFoldCell = 48;
 
 FoldPlan fold_page(int v);
+FoldPlan fold_page_row(int cy);
 void left_fade(const Surface& a, const Surface& b, const Surface& dst, int to_a256);
 int64_t fold_duration(const FoldPlan& p);
 void fold_compose(const Surface& from, const Surface& to, const Surface& dst, const FoldPlan& p, int64_t t_ms);

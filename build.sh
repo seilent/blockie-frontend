@@ -416,6 +416,9 @@ build_app() {
     pool "$appobj/children.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/children.cpp"
     pool "$appobj/volume.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/volume.cpp"
     pool "$appobj/ready.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ready.cpp"
+    pool "$appobj/backlight.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/backlight.cpp"
+    pool "$appobj/wifi_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/wifi_model.cpp"
+    pool "$appobj/wifi.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/wifi.cpp"
     pool "$appobj/sysinfo.o" "$cxx" "${gflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
         "$root/blockie/sysinfo.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
@@ -444,8 +447,8 @@ build_app() {
     "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/vtext.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
-        "$appobj/children.o" "$appobj/volume.o" "$appobj/ready.o" "$appobj/sysinfo.o" \
-        "$appobj/library.o" "$appobj/image.o" \
+        "$appobj/children.o" "$appobj/volume.o" "$appobj/ready.o" "$appobj/backlight.o" "$appobj/wifi_model.o" \
+        "$appobj/wifi.o" "$appobj/sysinfo.o" "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
         "$appobj/leftmove.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
@@ -783,6 +786,9 @@ build_test_dbus() {
     pool "$testobj/wifi.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/wifi.cpp"
     pool "$testobj/wifi_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags \
         "$root/blockie/tests/wifi_dbus_test.cpp"
+    pool "$testobj/backlight.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/backlight.cpp"
+    pool "$testobj/backlight_dbus_test.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags \
+        "$root/blockie/tests/backlight_dbus_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/btdbus"
@@ -795,11 +801,15 @@ build_test_dbus() {
     "$cxx" "$testobj/wifi_model.o" "$testobj/wifi.o" "$testobj/bus.o" "$testobj/wifi_dbus_test.o" $appldflags \
         $dbus_libs -o "$out/btdbus/blockie-wifi-dbus-test.tmp" || return 1
     mv "$out/btdbus/blockie-wifi-dbus-test.tmp" "$out/btdbus/blockie-wifi-dbus-test"
+    "$cxx" "$testobj/backlight.o" "$testobj/wifi_model.o" "$testobj/bus.o" "$testobj/backlight_dbus_test.o" \
+        $appldflags $dbus_libs -o "$out/btdbus/blockie-backlight-dbus-test.tmp" || return 1
+    mv "$out/btdbus/blockie-backlight-dbus-test.tmp" "$out/btdbus/blockie-backlight-dbus-test"
     echo "build.sh: $out/btdbus/blockie-bt-dbus-test $out/btdbus/blockie-setd-dbus-test" \
-        "$out/btdbus/blockie-wifi-dbus-test"
+        "$out/btdbus/blockie-wifi-dbus-test $out/btdbus/blockie-backlight-dbus-test"
     python3 "$root/blockie/tests/fake_bluez.py" "$out/btdbus/blockie-bt-dbus-test" &&
         python3 "$root/blockie/tests/fake_setd.py" "$out/btdbus/blockie-setd-dbus-test" &&
-        python3 "$root/blockie/tests/fake_nm.py" "$out/btdbus/blockie-wifi-dbus-test"
+        python3 "$root/blockie/tests/fake_nm.py" "$out/btdbus/blockie-wifi-dbus-test" &&
+        python3 "$root/blockie/tests/fake_logind.py" "$out/btdbus/blockie-backlight-dbus-test"
 }
 
 build_wrap_test() {
@@ -890,8 +900,8 @@ build_vtext_test() {
         -o "$out/vtext/blockie-selector-test.tmp" || return 1
     mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
     "$cxx" "${gobjs[@]}" "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/theme.o" "$testobj/zones_g.o" \
-        "$testobj/settings_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
-        -o "$out/vtext/blockie-settings-test.tmp" || return 1
+        "$testobj/leftmove.o" "$testobj/pm_toast_clock.o" "$testobj/settings_test.o" "${dobjs[@]}" $appldflags \
+        $wl_libs -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" || return 1
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
     "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
@@ -935,7 +945,7 @@ build_powermenu_test() {
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
     for s in powermenu powermenu_draw toast_clock layer_present layer_mem pm_input pm_run input_pad repeat \
-        screen_settings theme ink zones; do
+        screen_settings theme ink zones leftmove; do
         pool "$testobj/pm_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
         pobjs+=("$testobj/pm_$s.o")
     done
@@ -975,7 +985,7 @@ build_shot() {
     pool "$shotobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops powermenu powermenu_draw layer_present \
-        layer_mem launchflow toast_strip toast_clock launch; do
+        layer_mem launchflow toast_strip toast_clock launch sysinfo; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
@@ -991,7 +1001,7 @@ build_shot() {
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
         "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
         "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/launchflow.o" \
-        "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/shot.o" \
+        "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/sysinfo.o" "$shotobj/shot.o" \
         "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
