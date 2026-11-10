@@ -415,6 +415,7 @@ build_app() {
     pool "$appobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$appobj/children.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/children.cpp"
     pool "$appobj/volume.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/volume.cpp"
+    pool "$appobj/ready.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ready.cpp"
     pool "$appobj/sysinfo.o" "$cxx" "${gflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
         "$root/blockie/sysinfo.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
@@ -443,7 +444,7 @@ build_app() {
     "$cxx" "${gobjs[@]}" "$appobj/screen_selector.o" "$appobj/vtext.o" "$appobj/text_wrap.o" "$appobj/theme.o" "$appobj/ink.o" \
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
-        "$appobj/children.o" "$appobj/volume.o" "$appobj/sysinfo.o" \
+        "$appobj/children.o" "$appobj/volume.o" "$appobj/ready.o" "$appobj/sysinfo.o" \
         "$appobj/library.o" "$appobj/image.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
@@ -730,6 +731,8 @@ build_sysinfo_test() {
     pool "$testobj/children.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/children.cpp"
     pool "$testobj/volume.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/volume.cpp"
     pool "$testobj/volume_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/volume_test.cpp"
+    pool "$testobj/ready.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/ready.cpp"
+    pool "$testobj/ready_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/ready_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/sysinfo"
@@ -739,8 +742,12 @@ build_sysinfo_test() {
     "$cxx" "$testobj/children.o" "$testobj/volume.o" "$testobj/volume_test.o" $appldflags \
         -o "$out/sysinfo/blockie-volume-test.tmp" || return 1
     mv "$out/sysinfo/blockie-volume-test.tmp" "$out/sysinfo/blockie-volume-test"
-    echo "build.sh: $out/sysinfo/blockie-sysinfo-test $out/sysinfo/blockie-volume-test"
-    "$out/sysinfo/blockie-sysinfo-test" "$fe_commit" && "$out/sysinfo/blockie-volume-test"
+    "$cxx" "$testobj/children.o" "$testobj/ready.o" "$testobj/ready_test.o" $appldflags \
+        -o "$out/sysinfo/blockie-ready-test.tmp" || return 1
+    mv "$out/sysinfo/blockie-ready-test.tmp" "$out/sysinfo/blockie-ready-test"
+    echo "build.sh: $out/sysinfo/blockie-sysinfo-test $out/sysinfo/blockie-volume-test $out/sysinfo/blockie-ready-test"
+    "$out/sysinfo/blockie-sysinfo-test" "$fe_commit" && "$out/sysinfo/blockie-volume-test" &&
+        "$out/sysinfo/blockie-ready-test"
 }
 
 build_wifi_model_test() {

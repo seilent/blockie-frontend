@@ -48,6 +48,7 @@
 #include "launchflow.h"
 #include "library.h"
 #include "nav.h"
+#include "ready.h"
 #include "repeat.h"
 #include "screen_bt.h"
 #include "scraper.h"
@@ -251,6 +252,7 @@ static int run()
 
     Launcher launcher(data_root);
     Children kids;
+    ReadyReport ready_report(kids, now_ms);
     Volume volume(kids);
     BatteryFeed battery;
     Battery battery_now;
@@ -432,6 +434,8 @@ static int run()
         p.present(kScreen);
         p.flip();
         bool ok = p.posted();
+        if (ok)
+            ready_report.posted(pad_ok, p.activated());
         if (ok && folding)
             fstats.frame(t0, now_us());
         gate.posted(ok, more, now);
@@ -1095,6 +1099,7 @@ static int run()
         }
         until(toast.deadline(pnow));
         until(launch.deadline());
+        until(ready_report.deadline());
         timeout = gate.timeout(gate_in(pnow, timeout));
         if (bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty() && !launch.holds()))
             timeout = 0;
@@ -1125,6 +1130,12 @@ static int run()
             if (quit)
                 break;
         }
+
+        if (p.ready())
+            ready_report.shown(pad_ok, p.activated());
+        ready_report.tick();
+        if (ready_report.wants_frame(pad_ok, p.activated()))
+            need_redraw = true;
 
         if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
             std::vector<PadEdge> edges = pad.poll_edges();
