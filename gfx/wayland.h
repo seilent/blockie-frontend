@@ -18,17 +18,44 @@ struct wl_array;
 struct wl_seat;
 struct wl_keyboard;
 struct wl_touch;
+struct wl_output;
 struct xdg_wm_base;
 struct xdg_surface;
 struct xdg_toplevel;
 struct zwlr_layer_shell_v1;
 struct zwlr_layer_surface_v1;
+struct wp_presentation;
+struct wp_presentation_feedback;
 
 namespace fd {
 
 enum class WlTouchKind : uint8_t { Down, Motion, Up, Frame, Cancel };
+enum class WlRole : uint8_t { Toplevel, Layer };
+
+struct WlAlpha {
+    Rect r;
+    uint8_t a;
+};
+
+constexpr int kWlAlphaMax = 16;
+
+struct WlFeedback {
+    uint32_t commit;
+    bool presented;
+    bool visible;
+};
 
 uint32_t layer_px(uint32_t rgb);
+
+constexpr uint32_t premul_px(uint32_t px, uint32_t a)
+{
+    uint32_t out = a << 24;
+    for (int s = 0; s < 24; s += 8) {
+        uint32_t t = ((px >> s) & 0xFF) * a + 128;
+        out |= ((t + (t >> 8)) >> 8) << s;
+    }
+    return out;
+}
 
 struct WlTouch {
     WlTouchKind kind;
@@ -55,6 +82,8 @@ public:
     void set_key_handler(std::function<void(uint32_t code, bool pressed)> f) { key_cb_ = std::move(f); }
     void set_keymap_handler(std::function<void(int fd, uint32_t size)> f) { keymap_cb_ = std::move(f); }
     void set_focus_handler(std::function<void(bool in)> f) { focus_cb_ = std::move(f); }
+    void set_role(WlRole role);
+    bool set_alpha(const WlAlpha* v, int n);
 
     bool open(const std::string& spec, bool screen);
     S draw_target() const { return inner_.draw_target(); }
@@ -88,6 +117,10 @@ public:
     uint32_t frame_presents() const { return inner_.frame_presents(); }
     uint32_t fulls() const { return inner_.fulls(); }
     uint32_t commits() const { return commits_; }
+    bool has_presentation() const { return pres_ != nullptr; }
+    bool take_feedback(std::vector<WlFeedback>& out);
+    uint64_t copy_ns() const { return copy_ns_; }
+    uint32_t copies() const { return copies_; }
 
     bool activated() const { return activated_; }
     bool background() const { return background_; }
@@ -98,8 +131,11 @@ public:
     bool layer_live() const { return live_ == &layer_; }
     bool layer_shown() const { return layer_.wl != nullptr; }
     bool take_touch(std::vector<WlTouch>& out);
+    void cancel_touch();
 
 private:
+    static constexpr int kFbMax = 8;
+    enum class Px : uint8_t { Opaque, Layer, Regions };
     struct Surf;
     struct Buf {
         Surf* surf = nullptr;
@@ -121,19 +157,30 @@ private:
         Rect owed[2];
         wl_callback* cb = nullptr;
         uint32_t serial = 0;
-        bool serial_due = false, configured = false, closed = false, fresh = false, argb = false;
+        int cw = 0, ch = 0;
+        Px px = Px::Opaque;
+        bool serial_due = false, configured = false, closed = false, fresh = false;
+    };
+    struct Fb {
+        WaylandPresenter* self = nullptr;
+        struct wp_presentation_feedback* wl = nullptr;
+        uint32_t commit = 0;
+        bool visible = false;
     };
 
     void bind_global(wl_registry* reg, uint32_t name, const char* iface, uint32_t version);
     bool make_pool(Surf& s);
+    bool open_layer();
     void drop_surf(Surf& s);
     int pick_buf(const Surf& s) const;
     void copy_rows(Buf& b, Rect r);
+    void region_row(uint32_t* d, const uint32_t* s, int y, int x0, int x1);
+    void ask_feedback(wl_surface* surf);
+    void owe_feedback(Fb* f, bool presented);
     void signal();
     void settle();
     void lose();
     void check();
-    void cancel_touch();
     void seat_caps(uint32_t caps);
 
     static void reg_global(void* data, wl_registry* reg, uint32_t name, const char* iface, uint32_t version);
@@ -147,6 +194,11 @@ private:
     static void layer_configure(void* data, zwlr_layer_surface_v1* ls, uint32_t serial, uint32_t w, uint32_t h);
     static void layer_closed(void* data, zwlr_layer_surface_v1* ls);
     static void buf_release(void* data, wl_buffer* wl);
+    static void pres_clock(void* data, wp_presentation* pres, uint32_t clock);
+    static void fb_sync(void* data, struct wp_presentation_feedback* fb, wl_output* out);
+    static void fb_presented(void* data, struct wp_presentation_feedback* fb, uint32_t sec_hi, uint32_t sec_lo,
+                             uint32_t nsec, uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags);
+    static void fb_discarded(void* data, struct wp_presentation_feedback* fb);
     static void frame_done(void* data, wl_callback* cb, uint32_t time);
     static void on_seat_caps(void* data, wl_seat* seat, uint32_t caps);
     static void on_seat_name(void* data, wl_seat* seat, const char* name);
@@ -185,6 +237,7 @@ private:
     wl_seat* seat_ = nullptr;
     wl_touch* touch_ = nullptr;
     wl_keyboard* kbd_ = nullptr;
+    wp_presentation* pres_ = nullptr;
     uint32_t comp_ver_ = 0, shell_ver_ = 0, seat_ver_ = 0;
     Surf top_, layer_;
     Surf* live_ = &top_;
@@ -193,6 +246,14 @@ private:
     std::function<void(bool)> focus_cb_;
     std::vector<WlTouch> touches_;
     std::vector<KeyEv> keys_;
+    std::vector<uint8_t> arow_;
+    WlAlpha alpha_[kWlAlphaMax];
+    Fb fb_[kFbMax];
+    WlFeedback fq_[kFbMax];
+    int alpha_n_ = 0, fq_n_ = 0;
+    WlRole role_ = WlRole::Toplevel;
+    uint64_t copy_ns_ = 0;
+    uint32_t copies_ = 0;
     int connect_fd_ = -1;
     int efd_ = -1;
     int out_w_ = kPortraitW, out_h_ = kPortraitH, off_x_ = 0, off_y_ = 0, told_w_ = 0, told_h_ = 0;
@@ -200,7 +261,7 @@ private:
     uint32_t ping_ = 0, commits_ = 0, activations_ = 0;
     bool ping_due_ = false;
     bool full_ = false, posted_ = false, waiting_ = false, blocked_ = false, lost_ = false, closed_ = false;
-    bool kbd_on_ = false, layer_focus_ = false;
+    bool kbd_on_ = false, layer_focus_ = false, role_told_ = false, alpha_told_ = false;
     bool act_ = false, activated_ = false, ever_ = false, background_ = false;
 };
 

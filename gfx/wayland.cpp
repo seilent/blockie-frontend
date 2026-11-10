@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 
+#include <presentation-time-client-protocol.h>
 #include <wlr-layer-shell-unstable-v1-client-protocol.h>
 #include <xdg-shell-client-protocol.h>
 
@@ -33,6 +34,8 @@ wl_callback_listener g_frame_l{};
 wl_seat_listener g_seat_l{};
 wl_touch_listener g_touch_l{};
 wl_keyboard_listener g_kbd_l{};
+wp_presentation_listener g_pres_l{};
+wp_presentation_feedback_listener g_fb_l{};
 
 enum : uint8_t { kKey, kKeymap, kEnter, kLeave };
 
@@ -44,6 +47,13 @@ int64_t mono_ms()
     timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+uint64_t mono_ns()
+{
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000 + (uint64_t)t.tv_nsec;
 }
 
 bool parse_mode(const std::string& spec, PresentMode& mode)
@@ -63,6 +73,52 @@ bool parse_mode(const std::string& spec, PresentMode& mode)
 }
 
 WaylandPresenter::~WaylandPresenter() { stop(); }
+
+void WaylandPresenter::set_role(WlRole role)
+{
+    if (dpy_) {
+        if (!role_told_)
+            fprintf(stderr, "funeos: wayland: set_role after open\n");
+        role_told_ = true;
+        return;
+    }
+    role_ = role;
+}
+
+bool WaylandPresenter::set_alpha(const WlAlpha* v, int n)
+{
+    if (role_ != WlRole::Layer || n < 0 || n > kWlAlphaMax) {
+        if (!alpha_told_ && role_ != WlRole::Layer)
+            fprintf(stderr, "funeos: wayland: set_alpha outside the layer role\n");
+        else if (!alpha_told_)
+            fprintf(stderr, "funeos: wayland: set_alpha with %d regions refused\n", n);
+        alpha_told_ = true;
+        return false;
+    }
+    WlAlpha next[kWlAlphaMax];
+    int m = 0;
+    Rect box{};
+    for (int i = 0; i < n; i++) {
+        Rect r = v[i].r.intersect(kScreen);
+        if (r.empty())
+            continue;
+        next[m++] = {r, v[i].a};
+        box = box.unite(r);
+    }
+    bool same = m == alpha_n_;
+    for (int i = 0; same && i < m; i++) {
+        Rect a = next[i].r, b = alpha_[i].r;
+        same = next[i].a == alpha_[i].a && a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1;
+    }
+    if (same)
+        return true;
+    for (int i = 0; i < alpha_n_; i++)
+        box = box.unite(alpha_[i].r);
+    std::copy(next, next + m, alpha_);
+    alpha_n_ = m;
+    dmg_ = dmg_.unite(box);
+    return true;
+}
 
 void WaylandPresenter::set_output(int w, int h)
 {
@@ -117,11 +173,13 @@ void WaylandPresenter::top_bounds(void*, xdg_toplevel*, int32_t, int32_t) {}
 
 void WaylandPresenter::top_caps(void*, xdg_toplevel*, wl_array*) {}
 
-void WaylandPresenter::layer_configure(void* data, zwlr_layer_surface_v1*, uint32_t serial, uint32_t, uint32_t)
+void WaylandPresenter::layer_configure(void* data, zwlr_layer_surface_v1*, uint32_t serial, uint32_t w, uint32_t h)
 {
     auto* s = static_cast<Surf*>(data);
     s->serial = serial;
     s->serial_due = true;
+    s->cw = (int)w;
+    s->ch = (int)h;
 }
 
 void WaylandPresenter::layer_closed(void* data, zwlr_layer_surface_v1*) { static_cast<Surf*>(data)->closed = true; }
@@ -132,6 +190,64 @@ void WaylandPresenter::buf_release(void* data, wl_buffer*)
     b->busy = false;
     if (b->surf->self->waiting_)
         b->surf->self->signal();
+}
+
+void WaylandPresenter::pres_clock(void*, wp_presentation*, uint32_t) {}
+
+void WaylandPresenter::fb_sync(void*, struct wp_presentation_feedback*, wl_output*) {}
+
+void WaylandPresenter::fb_presented(void* data, struct wp_presentation_feedback*, uint32_t, uint32_t, uint32_t,
+                                    uint32_t, uint32_t, uint32_t, uint32_t)
+{
+    auto* f = static_cast<Fb*>(data);
+    f->self->owe_feedback(f, true);
+}
+
+void WaylandPresenter::fb_discarded(void* data, struct wp_presentation_feedback*)
+{
+    auto* f = static_cast<Fb*>(data);
+    f->self->owe_feedback(f, false);
+}
+
+void WaylandPresenter::owe_feedback(Fb* f, bool presented)
+{
+    wp_presentation_feedback_destroy(f->wl);
+    if (fq_n_ == kFbMax) {
+        std::copy(fq_ + 1, fq_ + kFbMax, fq_);
+        fq_n_--;
+    }
+    fq_[fq_n_++] = {f->commit, presented, f->visible};
+    *f = {};
+}
+
+void WaylandPresenter::ask_feedback(wl_surface* surf)
+{
+    Fb* f = nullptr;
+    for (Fb& o : fb_)
+        if (!o.wl && !f)
+            f = &o;
+    if (!f) {
+        f = &fb_[0];
+        for (Fb& o : fb_)
+            if (o.commit < f->commit)
+                f = &o;
+        wp_presentation_feedback_destroy(f->wl);
+    }
+    bool vis = false;
+    for (int i = 0; i < alpha_n_; i++)
+        vis = vis || alpha_[i].a > 0;
+    *f = {this, wp_presentation_feedback(pres_, surf), commits_ + 1, vis};
+    g_fb_l.sync_output = fb_sync;
+    g_fb_l.presented = fb_presented;
+    g_fb_l.discarded = fb_discarded;
+    wp_presentation_feedback_add_listener(f->wl, &g_fb_l, f);
+}
+
+bool WaylandPresenter::take_feedback(std::vector<WlFeedback>& out)
+{
+    out.assign(fq_, fq_ + fq_n_);
+    fq_n_ = 0;
+    return !out.empty();
 }
 
 void WaylandPresenter::frame_done(void* data, wl_callback* cb, uint32_t)
@@ -256,14 +372,18 @@ void WaylandPresenter::bind_global(wl_registry* reg, uint32_t name, const char* 
         comp_ = static_cast<wl_compositor*>(wl_registry_bind(reg, name, &wl_compositor_interface, comp_ver_));
     } else if (std::strcmp(iface, wl_shm_interface.name) == 0 && !shm_) {
         shm_ = static_cast<wl_shm*>(wl_registry_bind(reg, name, &wl_shm_interface, 1));
-    } else if (std::strcmp(iface, xdg_wm_base_interface.name) == 0 && !wm_) {
+    } else if (std::strcmp(iface, xdg_wm_base_interface.name) == 0 && !wm_ && role_ == WlRole::Toplevel) {
         uint32_t v = version < 2 ? version : 2;
         wm_ = static_cast<xdg_wm_base*>(wl_registry_bind(reg, name, &xdg_wm_base_interface, v));
     } else if (std::strcmp(iface, zwlr_layer_shell_v1_interface.name) == 0 && !shell_) {
         shell_ver_ = version < 4 ? version : 4;
         shell_ = static_cast<zwlr_layer_shell_v1*>(
             wl_registry_bind(reg, name, &zwlr_layer_shell_v1_interface, shell_ver_));
-    } else if (std::strcmp(iface, wl_seat_interface.name) == 0 && !seat_) {
+    } else if (std::strcmp(iface, wp_presentation_interface.name) == 0 && !pres_ && role_ == WlRole::Layer) {
+        pres_ = static_cast<wp_presentation*>(wl_registry_bind(reg, name, &wp_presentation_interface, 1));
+        g_pres_l.clock_id = pres_clock;
+        wp_presentation_add_listener(pres_, &g_pres_l, this);
+    } else if (std::strcmp(iface, wl_seat_interface.name) == 0 && !seat_ && role_ == WlRole::Toplevel) {
         seat_ver_ = version < 5 ? version : 5;
         seat_ = static_cast<wl_seat*>(wl_registry_bind(reg, name, &wl_seat_interface, seat_ver_));
         g_seat_l.capabilities = on_seat_caps;
@@ -295,13 +415,15 @@ bool WaylandPresenter::make_pool(Surf& s)
         size_t off = (size_t)i * frame;
         b.surf = &s;
         b.wl = wl_shm_pool_create_buffer(s.pool, (int32_t)off, out_w_, out_h_, out_w_ * 4,
-                                         s.argb ? WL_SHM_FORMAT_ARGB8888 : WL_SHM_FORMAT_XRGB8888);
+                                         s.px == Px::Opaque ? WL_SHM_FORMAT_XRGB8888 : WL_SHM_FORMAT_ARGB8888);
         b.px = reinterpret_cast<uint32_t*>(static_cast<char*>(s.map) + off);
         b.busy = false;
-        std::fill(b.px, b.px + (size_t)out_w_ * out_h_, s.argb ? kLayerSide : 0u);
+        std::fill(b.px, b.px + (size_t)out_w_ * out_h_, s.px == Px::Layer ? kLayerSide : 0u);
         s.owed[i] = kScreen;
         wl_buffer_add_listener(b.wl, &g_buf_l, &b);
     }
+    if (s.px == Px::Regions)
+        arow_.assign((size_t)out_w_, 0);
     s.fresh = true;
     return true;
 }
@@ -346,6 +468,9 @@ bool WaylandPresenter::open(const std::string& spec, bool screen)
     if (!screen)
         return true;
     top_.self = layer_.self = this;
+    lost_ = closed_ = blocked_ = false;
+    commits_ = 0;
+    fq_n_ = alpha_n_ = 0;
     efd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     dpy_ = connect_fd_ >= 0 ? wl_display_connect_to_fd(connect_fd_) : wl_display_connect(nullptr);
     connect_fd_ = -1;
@@ -359,6 +484,8 @@ bool WaylandPresenter::open(const std::string& spec, bool screen)
     g_reg_l.global_remove = reg_remove;
     wl_registry_add_listener(reg_, &g_reg_l, this);
     wl_display_roundtrip(dpy_);
+    if (role_ == WlRole::Layer)
+        return open_layer();
     if (!comp_ || !shm_ || !wm_) {
         fprintf(stderr, "funeos: wayland: no %s\n", !comp_ ? "wl_compositor" : !shm_ ? "wl_shm" : "xdg_wm_base");
         stop();
@@ -400,6 +527,52 @@ bool WaylandPresenter::open(const std::string& spec, bool screen)
     return !lost_;
 }
 
+bool WaylandPresenter::open_layer()
+{
+    if (!comp_ || !shm_ || !shell_) {
+        fprintf(stderr, "funeos: wayland: no %s\n",
+                !comp_ ? "wl_compositor" : !shm_ ? "wl_shm" : "zwlr_layer_shell_v1");
+        stop();
+        return false;
+    }
+    live_ = &layer_;
+    layer_.px = Px::Regions;
+    layer_.wl = wl_compositor_create_surface(comp_);
+    layer_.layer = zwlr_layer_shell_v1_get_layer_surface(shell_, layer_.wl, nullptr, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+                                                         app_id_.empty() ? "funeos" : app_id_.c_str());
+    g_layer_l.configure = layer_configure;
+    g_layer_l.closed = layer_closed;
+    zwlr_layer_surface_v1_add_listener(layer_.layer, &g_layer_l, &layer_);
+    zwlr_layer_surface_v1_set_anchor(layer_.layer,
+                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+                                         ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+    zwlr_layer_surface_v1_set_size(layer_.layer, 0, 0);
+    zwlr_layer_surface_v1_set_exclusive_zone(layer_.layer, -1);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(layer_.layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+    wl_surface_set_input_region(layer_.wl, nullptr);
+    wl_surface_commit(layer_.wl);
+    wl_display_roundtrip(dpy_);
+    if (layer_.closed || !layer_.serial_due) {
+        fprintf(stderr, "funeos: wayland: %s\n", layer_.closed ? "closed at open" : "no configure");
+        stop();
+        return false;
+    }
+    if (layer_.cw > 0 && layer_.ch > 0)
+        set_output(layer_.cw, layer_.ch);
+    settle();
+    if (!make_pool(layer_)) {
+        fprintf(stderr, "funeos: wayland: no shm pool\n");
+        stop();
+        return false;
+    }
+    layer_.configured = true;
+    full_ = true;
+    flip();
+    flush();
+    check();
+    return !lost_;
+}
+
 void WaylandPresenter::present(Rect dirty)
 {
     dmg_ = dmg_.unite(dirty);
@@ -425,11 +598,43 @@ void WaylandPresenter::copy_rows(Buf& b, Rect r)
     for (int y = r.y0; y < r.y1; y++) {
         uint32_t* d = b.px + (size_t)(y + off_y_) * out_w_ + off_x_ + r.x0;
         const uint32_t* s = src.row(y) + r.x0;
-        if (!b.surf->argb)
+        if (b.surf->px == Px::Opaque)
             std::memcpy(d, s, (size_t)n * 4);
-        else
+        else if (b.surf->px == Px::Layer)
             for (int x = 0; x < n; x++)
                 d[x] = layer_px(s[x]);
+        else
+            region_row(d, s, y, r.x0, r.x1);
+    }
+}
+
+void WaylandPresenter::region_row(uint32_t* d, const uint32_t* s, int y, int x0, int x1)
+{
+    uint8_t* a = arow_.data();
+    std::memset(a + x0, 0, (size_t)(x1 - x0));
+    for (int i = 0; i < alpha_n_; i++) {
+        const Rect& g = alpha_[i].r;
+        int l = std::max(g.x0, x0), h = std::min(g.x1, x1);
+        if (y >= g.y0 && y < g.y1 && l < h)
+            std::memset(a + l, alpha_[i].a, (size_t)(h - l));
+    }
+    for (int x = x0; x < x1;) {
+        uint8_t v = a[x];
+        int e = x + 1;
+        while (e < x1 && a[e] == v)
+            e++;
+        uint32_t* o = d + (x - x0);
+        const uint32_t* p = s + (x - x0);
+        int n = e - x;
+        if (v == 0)
+            std::fill(o, o + n, 0u);
+        else if (v == 255)
+            for (int i = 0; i < n; i++)
+                o[i] = 0xFF000000u | (p[i] & 0xFFFFFF);
+        else
+            for (int i = 0; i < n; i++)
+                o[i] = premul_px(p[i], v);
+        x = e;
     }
 }
 
@@ -454,11 +659,18 @@ void WaylandPresenter::flip()
     }
     Surf& s = *live_;
     int bi = pick_buf(s);
-    if (lost_ || !s.configured || s.cb || bi < 0)
+    if (lost_ || closed_ || !s.configured || s.cb || bi < 0)
         return;
     Buf& b = s.buf[bi];
     Rect paint = region.unite(s.owed[bi]).intersect(kScreen);
-    copy_rows(b, paint);
+    if (s.px == Px::Regions) {
+        uint64_t t0 = mono_ns();
+        copy_rows(b, paint);
+        copy_ns_ += mono_ns() - t0;
+        copies_++;
+    } else {
+        copy_rows(b, paint);
+    }
     s.owed[bi] = {};
     s.owed[bi ^ 1] = s.owed[bi ^ 1].unite(region);
     wl_surface_attach(s.wl, b.wl, 0, 0);
@@ -476,6 +688,8 @@ void WaylandPresenter::flip()
     s.cb = wl_surface_frame(s.wl);
     g_frame_l.done = frame_done;
     wl_callback_add_listener(s.cb, &g_frame_l, &s);
+    if (pres_)
+        ask_feedback(s.wl);
     wl_surface_commit(s.wl);
     b.busy = true;
     commits_++;
@@ -490,7 +704,7 @@ bool WaylandPresenter::claim()
     if (!dpy_)
         return true;
     const Surf& s = *live_;
-    if (lost_ || !s.configured || s.cb || pick_buf(s) < 0) {
+    if (lost_ || closed_ || !s.configured || s.cb || pick_buf(s) < 0) {
         waiting_ = true;
         return false;
     }
@@ -551,8 +765,10 @@ void WaylandPresenter::settle()
         top_.serial_due = false;
         top_.configured = true;
     }
-    if (top_.closed)
+    if ((top_.closed || (role_ == WlRole::Layer && layer_.closed)) && !closed_) {
         closed_ = true;
+        signal();
+    }
     if (act_ != activated_) {
         activated_ = act_;
         if (activated_ && background_) {
@@ -564,7 +780,18 @@ void WaylandPresenter::settle()
         }
         ever_ = ever_ || activated_;
     }
-    if (layer_.closed) {
+    if (role_ == WlRole::Layer) {
+        if (layer_.serial_due && !layer_.closed) {
+            zwlr_layer_surface_v1_ack_configure(layer_.layer, layer_.serial);
+            layer_.serial_due = false;
+            int w = layer_.cw, h = layer_.ch;
+            if (w > 0 && h > 0 && (w != out_w_ || h != out_h_) && (w != told_w_ || h != told_h_)) {
+                fprintf(stderr, "funeos: wayland: layer configure %dx%d, the buffer is %dx%d\n", w, h, out_w_, out_h_);
+                told_w_ = w;
+                told_h_ = h;
+            }
+        }
+    } else if (layer_.closed) {
         hide_layer();
     } else if (layer_.serial_due) {
         zwlr_layer_surface_v1_ack_configure(layer_.layer, layer_.serial);
@@ -628,7 +855,7 @@ void WaylandPresenter::flush()
 
 bool WaylandPresenter::show_layer()
 {
-    if (!shell_ || lost_)
+    if (!shell_ || lost_ || role_ == WlRole::Layer)
         return false;
     if (layer_.wl)
         return true;
@@ -639,7 +866,7 @@ bool WaylandPresenter::show_layer()
     g_layer_l.configure = layer_configure;
     g_layer_l.closed = layer_closed;
     zwlr_layer_surface_v1_add_listener(layer_.layer, &g_layer_l, &layer_);
-    layer_.argb = true;
+    layer_.px = Px::Layer;
     zwlr_layer_surface_v1_set_size(layer_.layer, (uint32_t)out_w_, (uint32_t)out_h_);
     zwlr_layer_surface_v1_set_exclusive_zone(layer_.layer, -1);
     zwlr_layer_surface_v1_set_keyboard_interactivity(
@@ -651,7 +878,7 @@ bool WaylandPresenter::show_layer()
 
 void WaylandPresenter::hide_layer()
 {
-    if (!layer_.wl)
+    if (!layer_.wl || role_ == WlRole::Layer)
         return;
     bool was = live_ == &layer_;
     live_ = &top_;
@@ -677,6 +904,12 @@ void WaylandPresenter::stop()
         if (k.kind == kKeymap)
             close(k.fd);
     keys_.clear();
+    for (Fb& f : fb_) {
+        if (f.wl)
+            wp_presentation_feedback_destroy(f.wl);
+        f = {};
+    }
+    fq_n_ = 0;
     live_ = &top_;
     drop_surf(layer_);
     drop_surf(top_);
@@ -697,6 +930,9 @@ void WaylandPresenter::stop()
     if (wm_)
         xdg_wm_base_destroy(wm_);
     wm_ = nullptr;
+    if (pres_)
+        wp_presentation_destroy(pres_);
+    pres_ = nullptr;
     if (shm_)
         wl_shm_destroy(shm_);
     shm_ = nullptr;

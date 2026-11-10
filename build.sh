@@ -54,7 +54,9 @@ xdg_sha=f241ab95c262eb45af6507bf0178b8dcd88d5e1cc8fc6ec4a9944d9e5b15ac98
 wlr_rev=1106a4a1c57562ddd438c547da4c0d6dc150d624
 wlr_url=https://gitlab.freedesktop.org/wlroots/wlr-protocols/-/raw/$wlr_rev/unstable/wlr-layer-shell-unstable-v1.xml
 wlr_sha=87e0b9c837aecd6977f76f3c47d73088b7159871f5d979dc1840f6cadb5e2ed8
-wl_proto=(xdg-shell wlr-layer-shell-unstable-v1)
+pt_url=https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/1.41/stable/presentation-time/presentation-time.xml
+pt_sha=dffac93bcb2bb1d8c385e72b8a8c2c0d4d79a336866322f3ba886dce2b27b1e2
+wl_proto=(xdg-shell wlr-layer-shell-unstable-v1 presentation-time)
 sqlite_ver=3540100
 sqlite_year=2026
 sqlite_url=https://www.sqlite.org/$sqlite_year/sqlite-amalgamation-$sqlite_ver.zip
@@ -309,7 +311,9 @@ wl_gen() {
     mkdir -p "$gen" "$cache"
     fetch "$xdg_url" "$cache/xdg-shell-1.41.xml" "$xdg_sha"
     fetch "$wlr_url" "$cache/wlr-layer-shell-${wlr_rev:0:8}.xml" "$wlr_sha"
+    fetch "$pt_url" "$cache/presentation-time-1.41.xml" "$pt_sha"
     cp "$cache/xdg-shell-1.41.xml" "$gen/xdg-shell.xml"
+    cp "$cache/presentation-time-1.41.xml" "$gen/presentation-time.xml"
     sed 's/<arg name="namespace"/<arg name="layer_namespace"/' "$cache/wlr-layer-shell-${wlr_rev:0:8}.xml" \
         > "$gen/wlr-layer-shell-unstable-v1.xml"
     wl_cflags=$(pkg-config --cflags wayland-client)
@@ -952,6 +956,7 @@ build_powermenu_test() {
     done
     pool "$testobj/powermenu_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/powermenu_test.cpp"
     pool "$testobj/powermenu_main.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/powermenu_main.cpp"
+    pool "$testobj/present_layer.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/present_layer.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/powermenu"

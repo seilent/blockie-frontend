@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "../board/kinds.h"
 #include "../core/curves.h"
@@ -98,6 +99,24 @@ constexpr bool kMemSet = std::is_same_v<decltype(ref<P>().open(PresentMode::Copy
                          std::is_same_v<decltype(ref<P>().frame_presents()), uint32_t> &&
                          std::is_same_v<decltype(ref<P>().fulls()), uint32_t>;
 
+template <class P>
+constexpr bool kLayerSet = std::is_same_v<decltype(ref<P>().set_role(WlRole::Layer)), void> &&
+                           std::is_same_v<decltype(ref<P>().set_alpha(ref<const WlAlpha*>(), 0)), bool> &&
+                           std::is_same_v<decltype(ref<const P>().has_presentation()), bool> &&
+                           std::is_same_v<decltype(ref<P>().take_feedback(ref<std::vector<WlFeedback>>())), bool> &&
+                           std::is_same_v<decltype(ref<const P>().posted()), bool> &&
+                           std::is_same_v<decltype(ref<const P>().commits()), uint32_t> &&
+                           std::is_same_v<decltype(ref<const P>().lost()), bool> &&
+                           std::is_same_v<decltype(ref<const P>().closed()), bool> &&
+                           std::is_same_v<decltype(ref<const P>().display_fd()), int> &&
+                           std::is_same_v<decltype(ref<const P>().event_fd()), int> &&
+                           std::is_same_v<decltype(ref<P>().pump()), bool> &&
+                           std::is_same_v<decltype(ref<P>().flush()), void> &&
+                           std::is_same_v<decltype(ref<P>().set_app_id(ref<const std::string>())), void> &&
+                           std::is_same_v<decltype(ref<P>().set_output(0, 0)), void> &&
+                           std::is_same_v<decltype(ref<const P>().copy_ns()), uint64_t> &&
+                           std::is_same_v<decltype(ref<const P>().copies()), uint32_t>;
+
 #ifndef FD_BOARD_HEADER
 static_assert(kCore<Presenter>, "the board presenter keeps the core set");
 #endif
@@ -105,6 +124,17 @@ static_assert(kMemSet<PresenterT<X888, Rows>>, "the memory presenter keeps its s
 static_assert(std::is_same_v<decltype(ref<const FrameSources>().retained(ref<const Op>(), ref<RetainedOps>())), bool>,
               "frame sources keep the retained hook");
 static_assert(kCore<WaylandPresenter>, "the wayland presenter keeps the core set");
+static_assert(kLayerSet<WaylandPresenter>, "the wayland presenter keeps the layer set");
+static_assert(premul_px(0xFFFFFF, 245) == 0xF5F5F5F5u && premul_px(0, 245) == 0xF5000000u &&
+                  premul_px(0x0078D7, 0) == 0 && premul_px(0xFFFFFF, 0) == 0 &&
+                  premul_px(0x0078D7, 255) == 0xFF0078D7u && premul_px(0x0078D7, 140) == 0x8C004276u &&
+                  premul_px(0xFF0078D7, 140) == 0x8C004276u,
+              "premul_px rounds per channel and reads no top byte");
+static_assert(std::is_same_v<decltype(WlAlpha::r), Rect> && std::is_same_v<decltype(WlAlpha::a), uint8_t> &&
+                  std::is_same_v<decltype(WlFeedback::commit), uint32_t> &&
+                  std::is_same_v<decltype(WlFeedback::presented), bool> &&
+                  std::is_same_v<decltype(WlFeedback::visible), bool> && kWlAlphaMax == 16,
+              "the region and feedback records keep their fields");
 
 void mem_use()
 {
@@ -126,14 +156,33 @@ void mem_use()
 #endif
 }
 
+void layer_use()
+{
+#if defined(FD_BOARD_PB) || defined(FD_BOARD_HEADER)
+    WaylandPresenter l;
+    l.set_role(WlRole::Layer);
+    std::vector<WlFeedback> fb;
+    if (l.open("direct", true)) {
+        WlAlpha a{kScreen, 255};
+        l.set_alpha(&a, 1);
+        l.present(kScreen);
+        l.flip();
+        l.take_feedback(fb);
+    }
+#endif
 }
 
 }
 
-int main(int argc, char**)
+}
+
+int main(int argc, char** argv)
 {
     void (*volatile use)() = fd::mem_use;
-    if (argc > 1)
+    void (*volatile layer)() = fd::layer_use;
+    if (argc > 1 && std::string(argv[1]) == "--layer")
+        layer();
+    else if (argc > 1)
         use();
     return 0;
 }
