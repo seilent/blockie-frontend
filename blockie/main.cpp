@@ -260,11 +260,7 @@ static int run()
         }
     }
 
-    int bt_item = (int)model.systems.size();
-    model.systems.push_back({"bluetooth", 0, bt_subtitle(bt.state(), now_ms())});
-    kinds.push_back(MenuKind::Bluetooth);
-    model.systems.push_back({"settings", 0, "display"});
-    kinds.push_back(MenuKind::Settings);
+    add_menu_items(model, kinds);
 
     Launcher launcher(data_root);
     Children kids;
@@ -879,7 +875,8 @@ static int run()
         nav.stack.push_back(Screen::Bluetooth);
         flow.push(Screen::Bluetooth);
     };
-    settings_page.set_row(kBluetoothRow, info_row(bt_subtitle(bt.state(), now_ms())), now_ms());
+    std::string bt_sub = bt_subtitle(bt.state(), now_ms());
+    settings_page.set_row(kBluetoothRow, info_row(bt_sub), now_ms());
     auto launch_edges = [&]() {
         bool active = p.activated();
         if (active != was_active) {
@@ -1177,16 +1174,8 @@ static int run()
                 if (nav.top() == Screen::Bluetooth)
                     need_redraw = true;
             }
-            std::string sub = bt_subtitle(bt.state(), bnow);
-            if (bt_item < (int)model.systems.size() && model.systems[bt_item].subtitle != sub) {
-                model.systems[bt_item].subtitle = sub;
-                settings_page.set_row(kBluetoothRow, info_row(sub), bnow);
+            if (sync_bt_row(settings_page, bt_sub, bt_subtitle(bt.state(), bnow), bnow))
                 settings_dirty();
-                if (nav.top() == Screen::Home) {
-                    flow.redraw();
-                    need_redraw = true;
-                }
-            }
             wifi.tick(bnow);
             if (wifi.serial() != wifi_seen) {
                 wifi_seen = wifi.serial();

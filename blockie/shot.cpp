@@ -1164,8 +1164,8 @@ private:
 };
 
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
-              int systems, bool items, const std::string& bt_sub, int sys_focus, const std::string& tiles_dir,
-              const std::string& recent_dir, const Zones& zones)
+              int systems, bool items, int sys_focus, const std::string& tiles_dir, const std::string& recent_dir,
+              const Zones& zones)
 {
     auto d = std::make_unique<Drive>(fonts, o);
     if (!page_base(d->page, fonts, o.page, zones))
@@ -1182,7 +1182,7 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         return 2;
     }
     systems = std::max(1, std::min(systems, 10));
-    int focus = std::clamp(sys_focus, 0, systems + (items ? 2 : 0) - 1);
+    int focus = std::clamp(sys_focus, 0, systems + (items ? 1 : 0) - 1);
     if (!o.repeat_covers) {
         bool enters = o.script.find("accept") != std::string::npos;
         int games_n = focus < systems ? std::min(kDriveGamesMax, o.sys_games > 0 ? o.sys_games : kCounts[focus]) : 0;
@@ -1217,12 +1217,8 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         d->flow.model.systems.push_back({kNames[s], count, ""});
         d->flow.kinds.push_back(MenuKind::System);
     }
-    if (items) {
-        d->flow.model.systems.push_back({"bluetooth", 0, bt_sub.empty() ? "not connected" : bt_sub});
-        d->flow.kinds.push_back(MenuKind::Bluetooth);
-        d->flow.model.systems.push_back({"settings", 0, "display"});
-        d->flow.kinds.push_back(MenuKind::Settings);
-    }
+    if (items)
+        add_menu_items(d->flow.model, d->flow.kinds);
     for (int k = 0; k < kGridColsWide * Nav::kRows; k++) {
         HomeGame g;
         g.id = kRecentIds + k;
@@ -2194,16 +2190,15 @@ int main(int argc, char** argv)
         page_opts.btsub = bt_sub;
     drive.page = page_opts;
     if (drive.on)
-        return run_drive(fonts, drive, out, frames_dir, systems, items, bt_sub, sys_focus, tiles_dir, recent_dir,
-                         zones);
+        return run_drive(fonts, drive, out, frames_dir, systems, items, sys_focus, tiles_dir, recent_dir, zones);
 
     SelectorModel model;
     systems = std::max(1, std::min(systems, 10));
     for (int i = 0; i < systems; i++)
         model.systems.push_back({kNames[i], kCounts[i], ""});
     if (items) {
-        model.systems.push_back({"bluetooth", 0, bt_sub.empty() ? "not connected" : bt_sub});
-        model.systems.push_back({"settings", 0, "display"});
+        std::vector<MenuKind> kinds;
+        add_menu_items(model, kinds);
     }
     int count = (int)model.systems.size();
     model.focus = sys_focus < 0 || sys_focus >= count ? 0 : sys_focus;

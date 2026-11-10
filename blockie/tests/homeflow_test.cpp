@@ -357,8 +357,8 @@ int main(int argc, char** argv)
     }
     {
         HomeFlow g(fonts, FlowOpts{});
-        g.model.systems = {{"bluetooth", 0, ""}, {"settings", 0, ""}};
-        g.kinds = {MenuKind::Bluetooth, MenuKind::Settings};
+        g.model.systems = {{"settings", 0, ""}};
+        g.kinds = {MenuKind::Settings};
         int row_y = 196 + 4 * 86 + 43;
         g.page_seed_y = [&](Screen s) { return s == Screen::Settings ? row_y : -1; };
         g.page_input = [&](Screen s, PadAction a, bool rep) {
@@ -371,7 +371,6 @@ int main(int argc, char** argv)
         };
         g.setup();
         int64_t pt = 1000;
-        g.nav.focus = 1;
         g.input(PadAction::Accept, false, pt);
         bool from_home = g.nav.top() == Screen::Settings && g.page_seed() == -1;
         g.input(PadAction::Accept, false, pt += 2000);

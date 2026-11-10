@@ -6,6 +6,7 @@
 
 #include "../../ui/roles.h"
 #include "../../ui/rows.h"
+#include "../bt_model.h"
 #include "../leftmove.h"
 #include "../screen_settings.h"
 #include "../setd_key.h"
@@ -1017,6 +1018,45 @@ int main(int argc, char** argv)
         bool panel = sf.at(500, 87) == sf.at(500, kPortraitH - 10);
         check(rows == 7 ? !band : band && panel,
               rows == 7 ? "7 rows: the panel fills the screen" : "6 rows: the page top shows under the scrim");
+    }
+    {
+        SettingsPage p;
+        std::vector<std::string> pushes;
+        p.on_push = [&](const std::string& r) { pushes.push_back(r); };
+        BtState bs;
+        bs.up = true;
+        bs.adapter.path = "/org/bluez/hci0";
+        bs.adapter.powered = true;
+        std::string last = bt_subtitle(bs, 0);
+        p.set_row(kRadioRow, radio_row(true, true), 0);
+        p.set_row(kBluetoothRow, info_row(last), 0);
+        p.reset(false);
+        int64_t t = 1000000;
+        p.action(PadAction::Next, false, t);
+        p.action(PadAction::Down, false, t += 1000);
+        SettingsView v = p.view(t += 1000);
+        bool on_row = std::string(p.pivot()) == "network" && v.focus == 1 && v.rows.size() == 2 &&
+                      v.rows[1].title == "bluetooth" && v.rows[1].value == "not connected";
+        BtDevice pad;
+        pad.path = "/org/bluez/hci0/dev_02_00_00_00_00_01";
+        pad.adapter = bs.adapter.path;
+        pad.address = "02:00:00:00:00:01";
+        pad.alias = "blockie-test-pad";
+        pad.paired = true;
+        pad.connected = true;
+        pad.uuids = {"00001124-0000-1000-8000-00805f9b34fb"};
+        bs.devices.push_back(pad);
+        bool changed = sync_bt_row(p, last, bt_subtitle(bs, t), t);
+        SettingsView w = p.view(t);
+        bool shown = w.rows.size() == 2 && w.rows[1].value == "blockie-test-pad";
+        bool again = sync_bt_row(p, last, bt_subtitle(bs, t + 1000), t + 1000);
+        check(on_row && changed && shown && !again && last == "blockie-test-pad",
+              "a BtState change updates the settings bluetooth row with no home entry, the same subtitle leaves it");
+        p.action(PadAction::Accept, false, t += 2000);
+        SettingsView after = p.view(t += 1000);
+        check(pushes.size() == 1 && pushes[0] == kBluetoothRow && std::string(p.pivot()) == "network" &&
+                  after.focus == 1 && after.rows.size() == 2 && after.rows[1].title == "bluetooth",
+              "accept on the bluetooth row asks for the push and keeps network with the row focused for the pop");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

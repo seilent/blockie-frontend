@@ -8,7 +8,7 @@
 namespace fd {
 
 enum class Screen { Home, Settings, Bluetooth };
-enum class MenuKind { System, Bluetooth, Settings };
+enum class MenuKind { System, Settings };
 
 class NavHost {
 public:

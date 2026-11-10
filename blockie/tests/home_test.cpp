@@ -67,6 +67,16 @@ int main()
     auto with_even_art = [](const HomeGame& g) -> Art { return g.id % 2 == 0 ? solid((uint32_t)g.id) : nullptr; };
 
     {
+        SelectorModel m;
+        m.systems = {{"gba", 52, ""}, {"snes", 9, ""}};
+        std::vector<MenuKind> kinds = {MenuKind::System, MenuKind::System};
+        add_menu_items(m, kinds);
+        bool names = m.systems.size() == 3 && m.systems[0].name == "gba" && m.systems[1].name == "snes" &&
+                     m.systems[2].name == "settings" && m.systems[2].subtitle == "display";
+        bool sorts = kinds.size() == 3 && kinds[1] == MenuKind::System && kinds[2] == MenuKind::Settings;
+        check(names && sorts, "the home lists the systems, then settings, and nothing else");
+    }
+    {
         HomeState h;
         h.cols = 3;
         h.rows = 4;

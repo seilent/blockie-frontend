@@ -405,6 +405,15 @@ SettingsRowState info_row(const std::string& text, std::vector<InfoLine> lines)
     return st;
 }
 
+bool sync_bt_row(SettingsPage& p, std::string& last, const std::string& sub, int64_t now)
+{
+    if (sub == last)
+        return false;
+    last = sub;
+    p.set_row(kBluetoothRow, info_row(sub), now);
+    return true;
+}
+
 int64_t settings_switch_ms() { return std::max<int64_t>(swap_ms(), fx_round(tok::motion_pivotStrip)); }
 
 void settings_rows_switch(const Surface& from, const Surface& to, const Surface& dst, Rect area, int64_t t, int dir,

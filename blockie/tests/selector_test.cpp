@@ -84,7 +84,7 @@ int main(int argc, char** argv)
     }
 
     SelectorModel e;
-    e.systems = {{"gba", 52, ""}, {"bluetooth", 0, "not connected"}, {"settings", 0, "display"}};
+    e.systems = {{"gba", 52, ""}, {"settings", 0, "display"}};
     e.tiles = m.tiles;
     e.tile_focus = 0;
     SelectorModel bare = e;

@@ -41,12 +41,10 @@ public:
     Pane last_pane = Pane::Selector;
     int recent_moves = 0;
     bool last_scrolled = false;
+    Nav* row_push = nullptr;
 
-    int menu_count() const override { return n_systems + (pages ? 2 : 0); }
-    MenuKind menu_kind(int i) const override
-    {
-        return i < n_systems ? MenuKind::System : i == n_systems ? MenuKind::Bluetooth : MenuKind::Settings;
-    }
+    int menu_count() const override { return n_systems + (pages ? 1 : 0); }
+    MenuKind menu_kind(int i) const override { return i < n_systems ? MenuKind::System : MenuKind::Settings; }
     int recent_count() const override { return n_recent; }
     int enter_system(int sys) override
     {
@@ -65,8 +63,13 @@ public:
     void launch_system_game(int i) override { launched_game = i; }
     void push(Screen s) override { pushed.push_back(s); }
     void pop(Screen s) override { popped.push_back(s); }
-    bool page_action(Screen, PadAction a, bool repeat) override
+    bool page_action(Screen s, PadAction a, bool repeat) override
     {
+        if (row_push && s == Screen::Settings && a == PadAction::Accept && !repeat) {
+            row_push->stack.push_back(Screen::Bluetooth);
+            push(Screen::Bluetooth);
+            return false;
+        }
         return pop_on_back && a == PadAction::Back && !repeat;
     }
     void pane_moved(Pane p) override
@@ -186,8 +189,8 @@ int main()
     {
         FakeHost h;
         Nav n;
-        check(h.menu_count() == 4 && h.menu_kind(2) == MenuKind::Bluetooth && h.menu_kind(3) == MenuKind::Settings,
-              "the menu is the systems, then bluetooth, then settings");
+        check(h.menu_count() == 3 && h.menu_kind(1) == MenuKind::System && h.menu_kind(2) == MenuKind::Settings,
+              "the menu is the systems, then settings");
 
         nav_apply(n, h, PadAction::Left, false);
         check(n.pane == Pane::Details && !n.system_view, "left from the menu goes to the recent grid");
@@ -256,20 +259,33 @@ int main()
     {
         FakeHost h;
         Nav n;
-        n.focus = 3;
+        n.focus = 2;
         nav_apply(n, h, PadAction::Accept, false);
         check(n.top() == Screen::Settings && h.pushed.size() == 1 && h.pushed[0] == Screen::Settings,
               "accept on settings pushes the settings page");
         nav_apply(n, h, PadAction::Down, true);
-        check(n.top() == Screen::Settings && n.focus == 3, "page keys go to the page, not the menu");
+        check(n.top() == Screen::Settings && n.focus == 2, "page keys go to the page, not the menu");
         nav_apply(n, h, PadAction::Back, true);
         check(n.top() == Screen::Settings, "a repeated back does not pop the page");
         nav_apply(n, h, PadAction::Back, false);
-        check(n.top() == Screen::Home && h.popped.size() == 1 && n.focus == 3,
+        check(n.top() == Screen::Home && h.popped.size() == 1 && n.focus == 2,
               "back pops the page and the menu focus stays on the item that opened it");
+    }
+    {
+        FakeHost h;
+        Nav n;
+        h.row_push = &n;
         n.focus = 2;
         nav_apply(n, h, PadAction::Accept, false);
-        check(n.top() == Screen::Bluetooth, "accept on bluetooth pushes the bluetooth page");
+        nav_apply(n, h, PadAction::Accept, false);
+        bool pushed = n.top() == Screen::Bluetooth && n.stack.size() == 2 && h.pushed.size() == 2 &&
+                      h.pushed[1] == Screen::Bluetooth;
+        nav_apply(n, h, PadAction::Back, false);
+        bool back = n.top() == Screen::Settings && h.popped.size() == 1 && h.popped[0] == Screen::Bluetooth;
+        nav_apply(n, h, PadAction::Back, false);
+        bool home = n.top() == Screen::Home && h.popped.size() == 2 && n.focus == 2;
+        check(pushed && back && home,
+              "the settings bluetooth row pushes the bluetooth page over settings, back returns to settings, then home");
     }
 
     {

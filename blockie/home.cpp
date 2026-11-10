@@ -16,6 +16,12 @@ std::vector<HomeGame> played_first(const std::vector<HomeGame>& recent, const Ho
     return out;
 }
 
+void add_menu_items(SelectorModel& m, std::vector<MenuKind>& kinds)
+{
+    m.systems.push_back({"settings", 0, "display"});
+    kinds.push_back(MenuKind::Settings);
+}
+
 Art HomeState::cover(const HomeGame& g)
 {
     auto it = cache.find(g.id);

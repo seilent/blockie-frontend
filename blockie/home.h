@@ -18,6 +18,7 @@ struct HomeGame {
 };
 
 std::vector<HomeGame> played_first(const std::vector<HomeGame>& recent, const HomeGame& g, int cap);
+void add_menu_items(SelectorModel& m, std::vector<MenuKind>& kinds);
 
 class HomeState {
 public:

@@ -250,5 +250,6 @@ private:
 };
 
 int sheet_rows(Fonts& f, int want = SettingsPage::kSheetRows);
+bool sync_bt_row(SettingsPage& p, std::string& last, const std::string& sub, int64_t now);
 
 }

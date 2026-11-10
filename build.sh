@@ -864,7 +864,8 @@ build_vtext_test() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    for s in vtext theme t9 screen_selector screen_settings ink homeflow home motion nav glide slide pagemove fold; do
+    for s in vtext theme t9 screen_selector screen_settings ink homeflow home motion nav glide slide pagemove fold \
+        bt_model; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
@@ -900,8 +901,8 @@ build_vtext_test() {
         -o "$out/vtext/blockie-selector-test.tmp" || return 1
     mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
     "$cxx" "${gobjs[@]}" "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/theme.o" "$testobj/zones_g.o" \
-        "$testobj/leftmove.o" "$testobj/pm_toast_clock.o" "$testobj/settings_test.o" "${dobjs[@]}" $appldflags \
-        $wl_libs -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" || return 1
+        "$testobj/leftmove.o" "$testobj/pm_toast_clock.o" "$testobj/bt_model.o" "$testobj/settings_test.o" \
+        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" || return 1
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
     "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \

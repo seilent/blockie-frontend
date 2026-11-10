@@ -63,12 +63,9 @@ bool apply_menu(Nav& n, NavHost& h, PadAction a, bool repeat)
             n.pane = Pane::Details;
             return true;
         }
-        {
-            Screen s = h.menu_kind(n.focus) == MenuKind::Bluetooth ? Screen::Bluetooth : Screen::Settings;
-            n.stack.push_back(s);
-            h.push(s);
-            return true;
-        }
+        n.stack.push_back(Screen::Settings);
+        h.push(Screen::Settings);
+        return true;
     default:
         return false;
     }
