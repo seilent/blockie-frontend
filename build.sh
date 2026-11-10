@@ -432,7 +432,8 @@ build_app() {
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     pool "$appobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
-    for s in launchflow toast_strip toast_clock powermenu_draw layer_present layer_mem; do
+    for s in launchflow toast_strip toast_clock powermenu powermenu_draw layer_present layer_mem pm_input pm_run \
+        present_layer powermenu_main; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     for s in homeflow home motion slide glide t9 scale bench; do
@@ -462,6 +463,14 @@ build_app() {
         -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
+    "$cxx" "${gobjs[@]}" "$appobj/powermenu.o" "$appobj/powermenu_draw.o" "$appobj/toast_clock.o" \
+        "$appobj/layer_present.o" "$appobj/pm_input.o" "$appobj/pm_run.o" "$appobj/input_pad.o" "$appobj/repeat.o" \
+        "$appobj/screen_settings.o" "$appobj/theme.o" "$appobj/ink.o" "$appobj/zones.o" "$appobj/leftmove.o" \
+        "$appobj/bus.o" "$appobj/theme_setting.o" "$appobj/setd_key.o" "$appobj/present_layer.o" \
+        "$appobj/powermenu_main.o" "${dobjs[@]}" $appldflags $wl_libs $dbus_libs -lpthread -lm \
+        -o "$out/app/blockie-powermenu.tmp" || return 1
+    mv "$out/app/blockie-powermenu.tmp" "$out/app/blockie-powermenu"
+    echo "build.sh: $out/app/blockie-powermenu"
 }
 
 sqlite_defs=(-DSQLITE_OMIT_LOAD_EXTENSION)
@@ -1015,9 +1024,11 @@ build_shot() {
 }
 
 build_install() {
-    [[ -x $out/app/blockie-frontend ]] || { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
+    [[ -x $out/app/blockie-frontend && -x $out/app/blockie-powermenu ]] ||
+        { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
     deps_fonts
     install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
+    install -Dm755 "$out/app/blockie-powermenu" "$destdir$prefix/libexec/blockie/blockie-powermenu" || return 1
     install -Dm644 "$root/dist/blockie-frontend.service" "$destdir$prefix/lib/systemd/user/blockie-frontend.service" ||
         return 1
     install -Dm644 "$root/LICENSE" "$destdir$prefix/share/licenses/blockie-frontend/LICENSE" || return 1
