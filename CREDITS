@@ -84,7 +84,7 @@ The Bluetooth page ports logic from funeOS and MicroDAP:
 Power menu:
 
 - funeOS 35087dace, player/ui/app.cpp:5637-5651, :8044-8050, :8108-8118 and :19563-19568: the power dialog, the
-  reboot sheet and the android becomes default confirm, their words, order and focus at open.
+  reboot sheet and the boot android confirm, their order and focus at open, and their words except the confirm title.
 - funeOS 35087dace, player/ui/app.cpp:9912-9942 and :18945-18967: a Back during a dialog or sheet open closes it from
   where it is.
 - MicroDAP cb78c74, components/Dialog.qml and components/Toast.qml, through the carved ui/overlay.cpp and ui/hud.cpp:

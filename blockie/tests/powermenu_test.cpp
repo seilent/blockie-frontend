@@ -168,7 +168,7 @@ void focus_cases()
     Rig c;
     c.to_confirm();
     PmView v = c.v();
-    check(v.surface == PmSurface::Confirm && v.focus == 1 && std::string(v.title) == "android becomes default" &&
+    check(v.surface == PmSurface::Confirm && v.focus == 1 && std::string(v.title) == "switch to android" &&
               std::string(v.items[0]) == "boot android" && std::string(v.items[1]) == "cancel",
           "confirm opens on cancel");
 }
