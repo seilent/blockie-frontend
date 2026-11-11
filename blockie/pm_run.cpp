@@ -153,6 +153,7 @@ Spawned spawn_capture(const std::vector<std::string>& argv)
 
 int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOpts& o)
 {
+    std::function<int64_t()> clock = o.clock ? o.clock : now_ms;
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGTERM);
@@ -188,7 +189,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         alive = false;
         live = false;
     }
-    int64_t now = now_ms();
+    int64_t now = clock();
     if (live) {
         m.open(read_gates(o.gates), o.dark, now);
         if (o.idle_ms > 0)
@@ -223,7 +224,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         uint32_t seq = p.present(regions);
         bool visible = regions_visible(regions);
         sent.push_back({seq, visible});
-        dirty = !ok;
+        dirty = !ok || m.animating(t);
         if (m.done() && !committed) {
             committed = true;
             close_seq = seq;
@@ -251,7 +252,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
 
     while (alive) {
         if (!fresh)
-            now = now_ms();
+            now = clock();
         fresh = false;
         PadAction ra = PadAction::Up;
         if (repeat.due(now, ra))
@@ -300,7 +301,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         }
         if (m.animating(now) || dirty || (m.done() && !committed))
             take(now + kFrameMs);
-        int timeout = wake < 0 ? -1 : (int)std::max<int64_t>(0, wake - now_ms());
+        int timeout = wake < 0 ? -1 : (int)std::max<int64_t>(0, wake - clock());
 
         fds.clear();
         fds.push_back({sfd, POLLIN, 0});
@@ -313,7 +314,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
             fds.push_back({g, POLLIN, 0});
         if (poll(fds.data(), fds.size(), timeout) < 0 && errno != EINTR)
             break;
-        now = now_ms();
+        now = clock();
 
         if (fds[0].revents & POLLIN) {
             signalfd_siginfo si;
@@ -403,7 +404,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
     }
 
     stop_probe(probe);
-    now = now_ms();
+    now = clock();
     int64_t until = now + MenuGrab::kReleaseMs;
     grab.begin_release(now);
     for (;;) {
@@ -430,7 +431,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         if (live && !committed)
             left = std::min<int64_t>(left, kFrameMs);
         poll(fds.data(), fds.size(), (int)std::max<int64_t>(0, left));
-        now = now_ms();
+        now = clock();
     }
     if (sfd >= 0)
         close(sfd);

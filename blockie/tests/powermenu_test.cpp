@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -14,6 +15,7 @@
 #include <linux/input.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/eventfd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1649,6 +1651,226 @@ void loop_cases(Fonts& f, const std::string& dir)
     unlink(fifo.c_str());
 }
 
+class StepPresenter : public MemPresenter {
+public:
+    StepPresenter() : wake_(eventfd(1, EFD_NONBLOCK | EFD_CLOEXEC)) {}
+    ~StepPresenter() override
+    {
+        if (wake_ >= 0)
+            ::close(wake_);
+    }
+    int fd() const override { return wake_; }
+    uint32_t present(const std::vector<AlphaRegion>& regions) override
+    {
+        presents++;
+        return MemPresenter::present(regions);
+    }
+    bool pump(std::vector<PresentNote>& out) override
+    {
+        if (on_pass)
+            on_pass();
+        return MemPresenter::pump(out);
+    }
+    int presents = 0;
+    std::function<void()> on_pass;
+
+private:
+    int wake_ = -1;
+};
+
+struct RestRun {
+    std::vector<int> same;
+    size_t rested = 0;
+    int rc = -1;
+    bool capped = false;
+    Loop log;
+};
+
+RestRun run_to_rest(Fonts& f, PmRunOpts o, const std::vector<std::vector<uint32_t>>& want,
+                    const std::vector<std::function<void()>>& acts)
+{
+    RestRun r;
+    r.same.assign(want.size(), -1);
+    int p[2];
+    if (pipe(p) != 0)
+        return r;
+    EvdevOps none;
+    none.list = []() { return std::vector<std::string>(); };
+    none.open = [](const std::string&) { return -1; };
+    none.info = [](int, DevInfo&) { return false; };
+    none.grab = [](int) { return 0; };
+    none.keys_down = [](int) { return false; };
+    StepPresenter mp;
+    mp.log_to(p[1]);
+    int64_t t = 1000000, cap = steady_ms() + 20000;
+    int seen = 0, base = 0, idle = 0;
+    std::vector<uint32_t> last;
+    o.out = p[1];
+    o.clock = [&t]() { return t; };
+    mp.on_pass = [&]() {
+        t += 18;
+        if (!r.capped && steady_ms() > cap) {
+            r.capped = true;
+            raise(SIGTERM);
+        }
+        if (mp.presents != seen) {
+            seen = mp.presents;
+            idle = 0;
+            return;
+        }
+        if (r.rested >= want.size() || seen == base || ++idle < 20)
+            return;
+        idle = 0;
+        base = seen;
+        if (mp.argb() == last)
+            return;
+        last = mp.argb();
+        r.same[r.rested] = mp.argb() == want[r.rested];
+        if (r.rested < acts.size())
+            acts[r.rested]();
+        r.rested++;
+    };
+    sigset_t mask, term;
+    sigprocmask(SIG_SETMASK, nullptr, &mask);
+    MenuGrab g(none);
+    g.start(t);
+    r.rc = run_powermenu(mp, f, g, o);
+    sigemptyset(&term);
+    sigaddset(&term, SIGTERM);
+    timespec zero{0, 0};
+    sigtimedwait(&term, nullptr, &zero);
+    sigprocmask(SIG_SETMASK, &mask, nullptr);
+    close(p[1]);
+    r.log.out = p[0];
+    r.log.eof(1000);
+    return r;
+}
+
+void rest_cases(Fonts& f, const std::string& dir)
+{
+    InkLayer ink;
+    MemPresenter ref;
+    std::vector<AlphaRegion> regions;
+    auto rest_of = [&](const PmView& v) {
+        Canvas c(ref.frame());
+        f.begin_frame(-1);
+        draw_powermenu(c, f, ink, v, theme(), regions);
+        ref.present(regions);
+        return ref.argb();
+    };
+    std::string gates = dir + "/rest-state", fifo = dir + "/rest-input", go = dir + "/rest-go";
+    std::string ctl = dir + "/systemctl-rest";
+    write_file(ctl, "if [ \"$1\" = is-system-running ]; then echo running; exit 0; fi\n"
+                    "while [ ! -e '" + go + "' ]; do sleep 0.01; done\n"
+                    "printf 'LoadState=not-found\\nActiveState=inactive\\nResult=\\n'\n");
+    mkfifo(fifo.c_str(), 0600);
+    int in = open(fifo.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (in < 0) {
+        check(false, "rest cases: the input fifo opens");
+        return;
+    }
+    auto send = [in](const char* w) {
+        return std::function<void()>([in, w]() {
+            if (write(in, w, std::strlen(w)) < 0)
+                std::printf("FAIL fifo write\n");
+        });
+    };
+    auto ends_empty = [](const Loop& l) {
+        Present pr;
+        for (size_t i = l.log.size(); i-- > 0;)
+            if (as_present(l.log[i], pr))
+                return pr.n == 0;
+        return false;
+    };
+    auto checks = [&](const RestRun& run, const std::vector<const char*>& names, const char* label) {
+        for (size_t k = 0; k < names.size(); k++) {
+            std::string what = std::string(label) + ", " + names[k] + ": the last frame is the frame at rest";
+            check(k < run.same.size() && run.same[k] == 1, what.c_str());
+        }
+        std::string what = std::string(label) + ": every motion reaches rest and nothing is drawn at rest";
+        check(run.rested == names.size() && !run.capped, what.c_str());
+    };
+    PmRunOpts o;
+    o.gates = gates;
+    o.fifo = fifo;
+    o.systemctl = {"sh", ctl};
+    {
+        Rig r;
+        std::vector<std::vector<uint32_t>> want;
+        auto rest = [&]() {
+            r.at(1000);
+            want.push_back(rest_of(r.v()));
+        };
+        rest();
+        r.act(PadAction::Down);
+        rest();
+        r.act(PadAction::Accept);
+        rest();
+        r.act(PadAction::Down);
+        rest();
+        r.act(PadAction::Up);
+        rest();
+        r.act(PadAction::Accept);
+        rest();
+        r.at(10000);
+        bool forever = !r.m.done() && r.v().surface == PmSurface::Toast && rest_of(r.v()) == want.back();
+        r.m.fail("not-found", r.t);
+        rest();
+        write_file(gates, kDefault);
+        unlink(go.c_str());
+        RestRun run = run_to_rest(f, o, want,
+                                  {send("down\n"), send("accept\n"), send("down\n"), send("up\n"), send("accept\n"),
+                                   [&go]() { write_file(go, ""); }});
+        checks(run,
+               {"dialog open", "dialog bar and item alpha", "sheet rise", "sheet bar down", "sheet bar up",
+                "restarting toast in", "swap to reboot failed"},
+               "reboot");
+        check(forever, "reboot: the restarting toast is unchanged 10 s after its in, as the swap case needs");
+        check(run.rc == 0 && run.log.find("boot reboot") >= 0 && ends_empty(run.log),
+              "reboot: the failure toast out still ends on one empty frame");
+        run.log.end();
+        unlink(go.c_str());
+    }
+    {
+        Rig r;
+        std::vector<std::vector<uint32_t>> want;
+        auto rest = [&]() {
+            r.at(1000);
+            want.push_back(rest_of(r.v()));
+        };
+        rest();
+        r.act(PadAction::Down);
+        rest();
+        r.act(PadAction::Accept);
+        rest();
+        r.act(PadAction::Down);
+        rest();
+        r.act(PadAction::Accept);
+        rest();
+        r.act(PadAction::Up);
+        rest();
+        r.now_gates = parse_gates("state=pending\nreason=lock busy\n");
+        r.act(PadAction::Accept);
+        rest();
+        write_file(gates, kDefault);
+        RestRun run = run_to_rest(f, o, want,
+                                  {send("down\n"), send("accept\n"), send("down\n"), send("accept\n"), send("up\n"),
+                                   [&]() {
+                                       write_file(gates, "state=pending\nreason=lock busy\n");
+                                       send("accept\n")();
+                                   }});
+        checks(run,
+               {"dialog open", "dialog bar and item alpha", "sheet rise", "sheet bar down", "confirm open",
+                "confirm bar and item alpha", "failure toast in"},
+               "android");
+        check(run.rc == 1 && run.log.closed_by("failed gate"),
+              "android: the failure toast out still ends on one empty frame before failed gate");
+        run.log.end();
+    }
+    close(in);
+    unlink(fifo.c_str());
+}
+
 }
 
 struct TempDir {
@@ -1694,6 +1916,7 @@ int main(int argc, char** argv)
     alpha_cases(f);
     region_cap_cases(f);
     loop_cases(f, dir.path);
+    rest_cases(f, dir.path);
     std::printf("%d/%d passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;
 }

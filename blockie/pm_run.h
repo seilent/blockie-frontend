@@ -1,4 +1,6 @@
 #pragma once
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <sys/types.h>
 #include <vector>
@@ -18,6 +20,7 @@ struct PmRunOpts {
     int toast_in_ms = 0;
     int toast_out_ms = 0;
     int out = 1;
+    std::function<int64_t()> clock;
 };
 
 struct Spawned {
