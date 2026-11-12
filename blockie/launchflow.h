@@ -7,6 +7,7 @@
 #include "frame_gate.h"
 #include "home.h"
 #include "input_pad.h"
+#include "ports.h"
 #include "repeat.h"
 #include "screen_selector.h"
 
@@ -45,6 +46,8 @@ const char* launch_phase_name(LaunchPhase p);
 unsigned long long frame_hash(const Surface& s);
 LaunchOutcome launch_refused(bool core_absent, const std::string& core);
 LaunchOutcome launch_outcome(int status, LaunchPhase at, bool quit_stamp, const std::string& core);
+LaunchOutcome port_outcome(int status, LaunchPhase at, bool quit_stamp);
+LaunchOutcome launch_helper_busy(HelperOp op);
 int64_t launch_leave_ms(bool light);
 int64_t return_ms();
 int leave_a256(int64_t t, int64_t dur = launch_leave_ms(false));
@@ -86,7 +89,7 @@ public:
     LaunchDraw draw(bool want) const;
     int64_t deadline() const;
 
-    void start(bool leave, bool active);
+    void start(bool leave, bool active, bool port = false);
     LaunchInput press(PadAction a);
     void edges(bool active, bool child, int64_t now);
     LaunchOutcome reap(int status, bool quit_stamp, const std::string& core, int64_t now, int64_t cover_until);
@@ -105,6 +108,7 @@ private:
 
     LaunchPhase phase_ = LaunchPhase::Idle;
     bool cut_ = false;
+    bool port_ = false;
     bool reversing_ = false;
     bool returning_ = false;
     bool back_ = false;

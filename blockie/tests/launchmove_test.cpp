@@ -333,6 +333,33 @@ int main(int argc, char** argv)
     }
 
     {
+        LaunchOutcome quit = port_outcome(exited(0), LaunchPhase::Waiting, false);
+        LaunchOutcome stamped = port_outcome(exited(0), LaunchPhase::Waiting, true);
+        LaunchOutcome oom = port_outcome(exited(1), LaunchPhase::Covered, false);
+        LaunchOutcome oom_early = port_outcome(exited(1), LaunchPhase::Waiting, false);
+        LaunchOutcome gone = port_outcome(exited(64), LaunchPhase::Leaving, false);
+        LaunchOutcome busy = port_outcome(exited(75), LaunchPhase::Waiting, false);
+        LaunchOutcome played = port_outcome(exited(0), LaunchPhase::Covered, false);
+        check(words(quit, kNs, "the port quit") && words(stamped, "", ""), "a port that quits before covered says so");
+        check(oom.played && words(oom, "game closed", "out of memory"), "the oom kill of a covered port");
+        check(!oom_early.played && words(oom_early, kNs, "out of memory"), "the oom kill before covered");
+        check(words(gone, kNs, "the port's files are missing"), "the wrapper's 64 path refusal for a port");
+        check(words(busy, kNs, "another game is closing"), "the other refusals keep their words for a port");
+        check(played.played && words(played, "", ""), "a port quit after covered is played with no toast");
+        check(words(launch_helper_busy(HelperOp::Install), kNs, "a port is installing") &&
+                  words(launch_helper_busy(HelperOp::Update), kNs, "a port is updating") &&
+                  words(launch_helper_busy(HelperOp::Remove), kNs, "a port is being removed"),
+              "the helper busy refusal names what the helper does");
+        LaunchFlow f;
+        f.start(false, true, true);
+        LaunchOutcome r = f.reaped(exited(1), false, "", 0);
+        check(words(r, kNs, "out of memory"), "a launch started as a port reaps with the port words");
+        f.start(false, true);
+        LaunchOutcome g = f.reaped(exited(1), false, "mgba", 0);
+        check(words(g, kNs, "the emulator stopped"), "a game launch after a port keeps the game words");
+    }
+
+    {
         LaunchFlow f;
         bool idle = f.phase() == LaunchPhase::Idle && f.press(PadAction::Up) == LaunchInput::Act && !f.holds() &&
                     f.draws() && f.can_animate(true, false) && !f.can_animate(false, false);

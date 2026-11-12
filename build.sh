@@ -278,6 +278,12 @@ zlib_c=(adler32 compress crc32 deflate inffast inflate inftrees trees zutil)
 gflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -I"$cache/inc" "${img_inc[@]}" -DSPNG_STATIC
     -DFD_BOARD_HEADER="\"$root/board/blockie.h\"" -DFD_TOKENS_HEADER="\"tokens-blockie.h\"")
 
+jpeg_pkg() {
+    pkg-config --exists libturbojpeg || { echo "build.sh: libturbojpeg not found" >&2; return 1; }
+    jpeg_cflags=$(pkg-config --cflags libturbojpeg)
+    jpeg_libs=$(pkg-config --libs libturbojpeg)
+}
+
 build_deps_obj() {
     toolver=$("$cc" --version | head -n 1)
     local c m
@@ -380,7 +386,8 @@ build_app() {
     build_sqlite_obj || return 1
     pkg-config --exists libcurl || { echo "build.sh: libcurl not found" >&2; return 1; }
     pkg-config --exists dbus-1 || { echo "build.sh: dbus-1 not found" >&2; return 1; }
-    local xkb_cflags xkb_libs curl_cflags curl_libs dbus_cflags dbus_libs
+    local xkb_cflags xkb_libs curl_cflags curl_libs dbus_cflags dbus_libs jpeg_cflags jpeg_libs
+    jpeg_pkg || return 1
     dbus_cflags=$(pkg-config --cflags dbus-1)
     dbus_libs=$(pkg-config --libs dbus-1)
     curl_cflags=$(pkg-config --cflags libcurl)
@@ -427,13 +434,15 @@ build_app() {
         "$root/blockie/sysinfo.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
+    pool "$appobj/jpeg.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/jpeg.cpp"
+    pool "$appobj/ports.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ports.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     pool "$appobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
     for s in launchflow toast_strip toast_clock powermenu powermenu_draw layer_present layer_mem pm_input pm_run \
-        present_layer powermenu_main; do
+        present_layer powermenu_main portmsg portmsg_view portmsg_main; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     for s in homeflow home motion slide glide t9 scale bench; do
@@ -453,14 +462,14 @@ build_app() {
         "$appobj/screen_settings.o" "$appobj/fold.o" "$appobj/pagemove.o" "$appobj/bus.o" "$appobj/theme_setting.o" \
         "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/children.o" "$appobj/volume.o" "$appobj/ready.o" "$appobj/backlight.o" "$appobj/wifi_model.o" \
-        "$appobj/wifi.o" "$appobj/sysinfo.o" "$appobj/library.o" "$appobj/image.o" \
+        "$appobj/wifi.o" "$appobj/sysinfo.o" "$appobj/library.o" "$appobj/image.o" "$appobj/jpeg.o" "$appobj/ports.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
         "$appobj/leftmove.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
         "$appobj/powermenu_draw.o" "$appobj/layer_present.o" "$appobj/layer_mem.o" \
         "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/wl_keys.o" "$appobj/frame_gate.o" \
         "$appobj/main.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
-        -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
+        $jpeg_libs -lpthread -lm -o "$out/app/blockie-frontend.tmp" || return 1
     mv "$out/app/blockie-frontend.tmp" "$out/app/blockie-frontend"
     echo "build.sh: $out/app/blockie-frontend"
     "$cxx" "${gobjs[@]}" "$appobj/powermenu.o" "$appobj/powermenu_draw.o" "$appobj/toast_clock.o" \
@@ -471,6 +480,11 @@ build_app() {
         -o "$out/app/blockie-powermenu.tmp" || return 1
     mv "$out/app/blockie-powermenu.tmp" "$out/app/blockie-powermenu"
     echo "build.sh: $out/app/blockie-powermenu"
+    "$cxx" "${gobjs[@]}" "$appobj/portmsg.o" "$appobj/portmsg_view.o" "$appobj/portmsg_main.o" "$appobj/input_pad.o" \
+        "$appobj/repeat.o" "$appobj/glide.o" "$appobj/ink.o" "$appobj/theme.o" "$appobj/layer_present.o" \
+        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/app/blockie-portmsg.tmp" || return 1
+    mv "$out/app/blockie-portmsg.tmp" "$out/app/blockie-portmsg"
+    echo "build.sh: $out/app/blockie-portmsg"
 }
 
 sqlite_defs=(-DSQLITE_OMIT_LOAD_EXTENSION)
@@ -539,11 +553,13 @@ launchflags=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers)
 build_launch_test() {
     toolver=$("$cxx" --version | head -n 1)
     pool "$launchobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
+    pool "$launchobj/ports.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/ports.cpp"
     pool "$testobj/launch_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/launch_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/launch"
-    "$cxx" "$launchobj/launch.o" "$testobj/launch_test.o" $appldflags -o "$out/launch/blockie-launch-test.tmp" || return 1
+    "$cxx" "$launchobj/launch.o" "$launchobj/ports.o" "$testobj/launch_test.o" $appldflags \
+        -o "$out/launch/blockie-launch-test.tmp" || return 1
     mv "$out/launch/blockie-launch-test.tmp" "$out/launch/blockie-launch-test"
     echo "build.sh: $out/launch/blockie-launch-test"
     "$out/launch/blockie-launch-test"
@@ -564,6 +580,8 @@ build_pad_test() {
 
 build_image_test() {
     deps_img
+    local jpeg_cflags jpeg_libs
+    jpeg_pkg || return 1
     toolver=$("$cc" --version | head -n 1)
     local c
     for c in "${zlib_c[@]}"; do
@@ -575,14 +593,15 @@ build_image_test() {
     toolver=$("$cxx" --version | head -n 1)
     pool "$genobj/gfx_canvas.cpp.o" "$cxx" "${gflags[@]}" $appcflags "$root/gfx/canvas.cpp"
     pool "$imgobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
-    pool "$testobj/image_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/image_test.cpp"
+    pool "$imgobj/jpeg.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/jpeg.cpp"
+    pool "$testobj/image_test.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/tests/image_test.cpp"
     pool "$imgobj/scale.o" "$cxx" "${gflags[@]}" $appcflags $(cpp_extra blockie/scale.cpp) "$root/blockie/scale.cpp"
     pool "$testobj/scale_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/scale_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/image"
-    "$cxx" "$imgobj/image.o" "$testobj/image_test.o" "$genobj/gfx_canvas.cpp.o" "$depobj/spng.o" "$depobj"/zlib_*.o \
-        $appldflags -lpthread -lm -o "$out/image/blockie-image-test.tmp" || return 1
+    "$cxx" "$imgobj/image.o" "$imgobj/jpeg.o" "$testobj/image_test.o" "$genobj/gfx_canvas.cpp.o" "$depobj/spng.o" \
+        "$depobj"/zlib_*.o $appldflags $jpeg_libs -lpthread -lm -o "$out/image/blockie-image-test.tmp" || return 1
     mv "$out/image/blockie-image-test.tmp" "$out/image/blockie-image-test"
     "$cxx" "$imgobj/scale.o" "$testobj/scale_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
         -o "$out/image/blockie-scale-test.tmp" || return 1
@@ -978,8 +997,41 @@ build_powermenu_test() {
     "$out/powermenu/blockie-powermenu-test" "$fonts_dir"
 }
 
+build_portmsg_test() {
+    deps
+    build_deps_obj
+    ((fail)) && return 1
+    deps_fonts
+    toolver=$("$cxx" --version | head -n 1)
+    local s extra
+    local -a gobjs=() mobjs=()
+    while IFS= read -r s; do
+        extra=$(cpp_extra "$s")
+        pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
+        gobjs+=("$genobj/${s//\//_}.o")
+    done < <(generic_srcs)
+    for s in portmsg portmsg_view input_pad repeat glide ink theme layer_present; do
+        pool "$testobj/msg_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+        mobjs+=("$testobj/msg_$s.o")
+    done
+    pool "$testobj/portmsg_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/portmsg_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/portmsg"
+    local -a dobjs=()
+    mapfile -t dobjs < <(dep_objs)
+    "$cxx" "${gobjs[@]}" "${mobjs[@]}" "$testobj/portmsg_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/portmsg/blockie-portmsg-test.tmp" || return 1
+    mv "$out/portmsg/blockie-portmsg-test.tmp" "$out/portmsg/blockie-portmsg-test"
+    echo "build.sh: $out/portmsg/blockie-portmsg-test"
+    "$out/portmsg/blockie-portmsg-test" "$fonts_dir"
+}
+
 build_shot() {
     deps_fonts
+    build_sqlite_obj || return 1
+    local jpeg_cflags jpeg_libs
+    jpeg_pkg || return 1
     toolver=$("$cxx" --version | head -n 1)
     local s extra
     local -a gobjs=()
@@ -999,8 +1051,10 @@ build_shot() {
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
+    pool "$shotobj/jpeg.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/jpeg.cpp"
+    pool "$shotobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops powermenu powermenu_draw layer_present \
-        layer_mem launchflow toast_strip toast_clock launch sysinfo; do
+        layer_mem launchflow toast_strip toast_clock launch sysinfo decodeq portmsg portmsg_view input_pad; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
@@ -1017,18 +1071,21 @@ build_shot() {
         "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
         "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/launchflow.o" \
         "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/sysinfo.o" "$shotobj/shot.o" \
-        "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/shot/blockie-shot.tmp" || return 1
+        "$shotobj/jpeg.o" "$shotobj/library.o" "$shotobj/decodeq.o" "$shotobj/portmsg.o" "$shotobj/portmsg_view.o" \
+        "$shotobj/input_pad.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $jpeg_libs -lpthread -lm \
+        -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
     echo "build.sh: fonts $fonts_dir"
 }
 
 build_install() {
-    [[ -x $out/app/blockie-frontend && -x $out/app/blockie-powermenu ]] ||
+    [[ -x $out/app/blockie-frontend && -x $out/app/blockie-powermenu && -x $out/app/blockie-portmsg ]] ||
         { echo "build.sh: run 'build.sh app' before install" >&2; return 1; }
     deps_fonts
     install -Dm755 "$out/app/blockie-frontend" "$destdir$prefix/libexec/blockie/blockie-frontend" || return 1
     install -Dm755 "$out/app/blockie-powermenu" "$destdir$prefix/libexec/blockie/blockie-powermenu" || return 1
+    install -Dm755 "$out/app/blockie-portmsg" "$destdir$prefix/libexec/blockie/blockie-portmsg" || return 1
     install -Dm644 "$root/dist/blockie-frontend.service" "$destdir$prefix/lib/systemd/user/blockie-frontend.service" ||
         return 1
     install -Dm644 "$root/LICENSE" "$destdir$prefix/share/licenses/blockie-frontend/LICENSE" || return 1
@@ -1060,7 +1117,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test && build_portmsg_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }

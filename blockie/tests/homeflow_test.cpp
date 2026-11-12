@@ -383,6 +383,67 @@ int main(int argc, char** argv)
               "page seed: a push from settings and its pop plan the row fold at focus_y, the home keeps the menu fold");
     }
 
+    {
+        HomeFlow pf(fonts, o);
+        pf.model.systems = {{"GB", 3, ""}, {"ports", 4, ""}};
+        pf.kinds = {MenuKind::System, MenuKind::System};
+        std::vector<HomeGame> ports = {{2001, "Blockie Test Alpha", "ports"},
+                                       {2002, "Blockie Test Beta", "ports"},
+                                       {2003, "Blockie Test Gamma", "ports"},
+                                       {2004, "Blockie Test Delta", "ports"}};
+        pf.games = [&ports](int) { return ports; };
+        std::vector<int64_t> asked;
+        pf.covers_wanted = [&asked](const std::vector<HomeGame>& want, int) {
+            for (const HomeGame& g : want)
+                asked.push_back(g.id);
+        };
+        Buffer pout;
+        pf.setup();
+        int64_t pt = settle(pf, pout, 0);
+        pf.input(PadAction::Down, false, pt);
+        pt = settle(pf, pout, pt);
+        pf.input(PadAction::Accept, false, pt);
+        pt = settle(pf, pout, pt);
+        pf.input(PadAction::Right, false, pt);
+        pt = settle(pf, pout, pt);
+        bool on_beta = pf.nav.system_view && pf.nav.sys_focus == 1;
+        std::vector<HomeGame> next = {{2005, "Blockie Test Aardvark", "ports"}, ports[0], ports[1], ports[3]};
+        asked.clear();
+        std::vector<int64_t> gone = pf.regame(1, next);
+        check(on_beta && pf.nav.sys_focus == 2 && pf.home.sysgames[2].id == 2002 &&
+                  pf.model.game_title == "Blockie Test Beta" && pf.nav.sys_total == 4,
+              "a ports rescan keeps focus on the same port when its row moves");
+        check(gone.size() == 1 && gone[0] == 2003, "a ports rescan returns the removed ids so their decode jobs drop");
+        check(std::find(asked.begin(), asked.end(), 2005) != asked.end(), "a ports rescan asks for a new port's cover");
+        check(pf.regame(0, next).empty() && pf.nav.sys_focus == 2,
+              "a rescan of a system not on screen changes nothing");
+        pf.regame(1, {ports[0]});
+        check(pf.nav.sys_focus == 0 && pf.nav.sys_total == 1 && pf.model.game_title == "Blockie Test Alpha",
+              "a ports rescan that drops the focused port keeps the focus in range");
+    }
+
+    {
+        HomeFlow rf(fonts, o);
+        rf.model.systems = {{"ports", 3, ""}};
+        rf.kinds = {MenuKind::System};
+        Buffer rout;
+        rf.setup();
+        std::vector<HomeGame> rl = {{3001, "Blockie Test One", "ports"},
+                                    {3002, "Blockie Test Two", "ports"},
+                                    {3003, "Blockie Test Three", "ports"}};
+        rf.home.deal_recent(rf.model, rl);
+        int64_t rt = settle(rf, rout, 0);
+        rf.input(PadAction::Left, false, rt);
+        rt = settle(rf, rout, rt);
+        rf.input(PadAction::Right, false, rt);
+        rt = settle(rf, rout, rt);
+        bool on_two = rf.nav.tile_focus == 1 && rf.nav.pane == Pane::Details;
+        rf.recent_changed({{3002, "Blockie Test Two Renamed", "ports"}, rl[0], rl[2]});
+        check(on_two && rf.nav.tile_focus == 0 && rf.model.game_title == "Blockie Test Two Renamed" &&
+                  rf.nav.pane == Pane::Details,
+              "a ports rescan keeps the Recent focus on the same game");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

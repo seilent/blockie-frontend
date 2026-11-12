@@ -3,11 +3,14 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+#include <turbojpeg.h>
 #include <unistd.h>
 
 #include "../../core/fx.h"
 #include "../../ui/tokens.h"
 #include "../image.h"
+#include "../jpeg.h"
 #include "../tile_grid.h"
 
 namespace {
@@ -95,6 +98,50 @@ bool tile_matches_bilinear(int sw, int sh, int a256, int k)
 
 }
 
+std::vector<uint8_t> make_jpeg(int w, int h, int pf, bool lossless = false)
+{
+    std::vector<uint8_t> out;
+    tjhandle tj = tj3Init(TJINIT_COMPRESS);
+    if (!tj)
+        return out;
+    int ps = pf == TJPF_CMYK ? 4 : 3;
+    std::vector<uint8_t> px((size_t)w * h * ps);
+    for (size_t i = 0; i < px.size(); i++)
+        px[i] = (uint8_t)(i * 7 % 251);
+    unsigned char* buf = nullptr;
+    size_t size = 0;
+    tj3Set(tj, TJPARAM_QUALITY, 80);
+    tj3Set(tj, TJPARAM_SUBSAMP, TJSAMP_444);
+    if (lossless)
+        tj3Set(tj, TJPARAM_LOSSLESS, 1);
+    if (tj3Compress8(tj, px.data(), w, 0, h, pf, &buf, &size) == 0)
+        out.assign(buf, buf + size);
+    tj3Free(buf);
+    tj3Destroy(tj);
+    return out;
+}
+
+std::vector<uint8_t> make_jpeg12(int w, int h)
+{
+    std::vector<uint8_t> out;
+    tjhandle tj = tj3Init(TJINIT_COMPRESS);
+    if (!tj)
+        return out;
+    std::vector<short> px((size_t)w * h * 3);
+    for (size_t i = 0; i < px.size(); i++)
+        px[i] = (short)(i * 7 % 4093);
+    unsigned char* buf = nullptr;
+    size_t size = 0;
+    tj3Set(tj, TJPARAM_QUALITY, 80);
+    tj3Set(tj, TJPARAM_SUBSAMP, TJSAMP_444);
+    tj3Set(tj, TJPARAM_PRECISION, 12);
+    if (tj3Compress12(tj, px.data(), w, 0, h, TJPF_RGB, &buf, &size) == 0)
+        out.assign(buf, buf + size);
+    tj3Free(buf);
+    tj3Destroy(tj);
+    return out;
+}
+
 int main()
 {
     std::string png = write_tmp(kFixturePng, sizeof kFixturePng);
@@ -131,6 +178,82 @@ int main()
     check(!fd::load_png(truncated, trunc), "truncated png returns false");
     if (!truncated.empty())
         unlink(truncated.c_str());
+
+    {
+        fd::JpegDecoder jpeg;
+        std::vector<uint8_t> big = make_jpeg(2000, 1500, TJPF_RGB);
+        std::string path = write_tmp(big.data(), big.size());
+        fd::DecodedImage d;
+        check(!big.empty() && fd::load_cover(jpeg, path, fd::kTileSide, d) && d.w == 250 && d.h == 188,
+              "a large jpeg cover decodes at the smallest scale that still covers the tile");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> small = make_jpeg(100, 80, TJPF_RGB);
+        path = write_tmp(small.data(), small.size());
+        check(fd::load_cover(jpeg, path, fd::kTileSide, d) && d.w == 100 && d.h == 80,
+              "a jpeg smaller than the tile decodes unscaled");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> wide = make_jpeg(fd::kJpegMaxSide + 1, 16, TJPF_RGB);
+        path = write_tmp(wide.data(), wide.size());
+        check(!wide.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d) && d.rgb.empty(),
+              "a jpeg header with a side over 4096 is refused");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> cut = make_jpeg(300, 200, TJPF_RGB);
+        path = write_tmp(cut.data(), cut.size() / 2);
+        check(!cut.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d), "a truncated jpeg gives no cover");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> lossless = make_jpeg(2000, 1500, TJPF_RGB, true);
+        bool header_lossless = false;
+        tjhandle th = tj3Init(TJINIT_DECOMPRESS);
+        if (th && !lossless.empty() && tj3DecompressHeader(th, lossless.data(), lossless.size()) == 0)
+            header_lossless = tj3Get(th, TJPARAM_LOSSLESS) == 1 && tj3Get(th, TJPARAM_PRECISION) == 8 &&
+                              tj3Get(th, TJPARAM_JPEGWIDTH) == 2000 && tj3Get(th, TJPARAM_JPEGHEIGHT) == 1500;
+        std::vector<uint8_t> full((size_t)2000 * 1500 * 3);
+        bool decodable = header_lossless && tj3SetScalingFactor(th, TJUNSCALED) == 0 &&
+                         tj3Decompress8(th, lossless.data(), lossless.size(), full.data(), 2000 * 3, TJPF_RGB) == 0;
+        if (th)
+            tj3Destroy(th);
+        tjscalingfactor eighth = {1, 8};
+        check(header_lossless && decodable && TJSCALED(1500, eighth) >= fd::kTileSide,
+              "the lossless case is a valid 8 bit lossless 2000x1500 jpeg the tile target scales to 1/8");
+        path = write_tmp(lossless.data(), lossless.size());
+        check(!lossless.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d) && d.rgb.empty(),
+              "a lossless jpeg gives no cover");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> tiny = make_jpeg(100, 80, TJPF_RGB, true);
+        path = write_tmp(tiny.data(), tiny.size());
+        check(!tiny.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d) && d.rgb.empty(),
+              "a small lossless jpeg gives no cover");
+        unlink(path.c_str());
+
+        std::vector<uint8_t> deep = make_jpeg12(300, 200);
+        path = write_tmp(deep.data(), deep.size());
+        check(!deep.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d), "a 12 bit jpeg gives no cover");
+        unlink(path.c_str());
+
+        std::string fifo = "/tmp/blockie-test-cover-fifo-" + std::to_string(getpid());
+        check(mkfifo(fifo.c_str(), 0600) == 0 && !fd::load_cover(jpeg, fifo, fd::kTileSide, d),
+              "a fifo cover path gives no cover and does not block");
+        unlink(fifo.c_str());
+
+        std::vector<uint8_t> cmyk = make_jpeg(64, 64, TJPF_CMYK);
+        path = write_tmp(cmyk.data(), cmyk.size());
+        check(!cmyk.empty() && !fd::load_cover(jpeg, path, fd::kTileSide, d), "a cmyk jpeg gives no cover");
+        unlink(path.c_str());
+
+        path = write_tmp(kFixturePng, sizeof kFixturePng);
+        check(fd::load_cover(jpeg, path, fd::kTileSide, d) && d.w == 4 && d.h == 3,
+              "a png cover still decodes through the magic byte pick");
+        unlink(path.c_str());
+
+        path = write_tmp("GIF89a blockie-test", 19);
+        check(!fd::load_cover(jpeg, path, fd::kTileSide, d), "a cover that is neither png nor jpeg gives none");
+        unlink(path.c_str());
+    }
 
     int pane = fd::alpha256(fd::tok::motion_quickplayAlpha);
     check(tile_matches_bilinear(512, 448, 256, 3), "a 512x448 cover tile equals blit_bilinear at full alpha");

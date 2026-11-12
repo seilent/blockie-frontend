@@ -515,6 +515,20 @@ int main()
               "recent (c) at 8: a fresh left at slot column 0 is refused and stays in recent");
     }
 
+    {
+        FakeHost h;
+        h.n_systems = 11;
+        Nav n;
+        n.focus = 10;
+        check(!nav_apply(n, h, PadAction::Context, false) && !n.system_view && h.entered == -1 && h.pushed.empty() &&
+                  h.pane_moves == 0,
+              "the left face button on the ports entry does nothing");
+        check(nav_apply(n, h, PadAction::Accept, false) && n.system_view && h.entered == 10,
+              "accept on the ports entry opens its grid");
+        check(!nav_apply(n, h, PadAction::Context, false) && n.system_view && h.launched_game == -1 && h.exits == 0,
+              "the left face button in the ports grid does nothing");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

@@ -59,6 +59,8 @@ public:
     bool frame(int64_t now, const Surface& dst);
     bool art(int64_t id, int side, int64_t epoch, const Art& img);
     std::vector<HomeGame> game_ran(const std::vector<HomeGame>& list);
+    std::vector<int64_t> regame(int sys, const std::vector<HomeGame>& list);
+    std::vector<HomeGame> recent_changed(const std::vector<HomeGame>& list);
     void redraw();
     void theme_changed();
     void want_mode(TileMode m) { mode_wanted_ = m; }

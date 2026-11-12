@@ -15,6 +15,8 @@
 
 #include <sqlite3.h>
 
+#include "ports.h"
+
 namespace fd {
 
 namespace {
@@ -38,6 +40,7 @@ constexpr SysSeed kSystems[] = {
     {"n64", "N64", "Nintendo - Nintendo 64", "mupen64plus_next", ".z64 .n64 .v64 .zip"},
     {"psp", "PSP", "Sony - PlayStation Portable", "ppsspp", ".iso .cso .chd .pbp"},
     {"dc", "DC", "Sega - Dreamcast", "flycast", ".chd .gdi .m3u"},
+    {"ports", "ports", "", "", ".sh"},
 };
 
 std::string lower(const std::string& s)
@@ -101,6 +104,60 @@ std::set<std::string> m3u_discs(const std::string& m3u_path)
         out.insert(basename_of(line));
     }
     return out;
+}
+
+struct PortRow {
+    std::string base, title, cover;
+};
+
+std::vector<std::string> split_tabs(const std::string& s)
+{
+    std::vector<std::string> out;
+    size_t i = 0;
+    for (;;) {
+        size_t t = s.find('\t', i);
+        out.push_back(s.substr(i, t == std::string::npos ? std::string::npos : t - i));
+        if (t == std::string::npos)
+            return out;
+        i = t + 1;
+    }
+}
+
+bool safe_base(const std::string& b)
+{
+    if (b.empty() || b[0] == '.')
+        return false;
+    for (char c : b)
+        if (c == '/' || (unsigned char)c < 0x20 || c == 0x7f)
+            return false;
+    return true;
+}
+
+bool parse_port_row(const std::string& line, PortRow& out)
+{
+    std::vector<std::string> f = split_tabs(line);
+    if (f.size() != 4 || !safe_base(f[0]))
+        return false;
+    out.base = f[0];
+    out.title = f[1].empty() ? f[0] : f[1];
+    out.cover = f[3] == "-" ? std::string() : f[3];
+    return true;
+}
+
+bool inside_dir(const std::string& dir, const std::string& path)
+{
+    if (path.size() <= dir.size() + 1 || path.compare(0, dir.size() + 1, dir + "/") != 0)
+        return false;
+    size_t i = dir.size() + 1;
+    for (;;) {
+        size_t j = path.find('/', i);
+        size_t end = j == std::string::npos ? path.size() : j;
+        if (end == i || path.compare(i, end - i, "..") == 0 || path.compare(i, end - i, ".") == 0)
+            return false;
+        if (j == std::string::npos)
+            return true;
+        i = j + 1;
+    }
 }
 
 void collect_eboot(const std::string& dir, const std::string& parent_name, int depth,
@@ -273,8 +330,58 @@ void Library::seed_meta(int64_t game_id, const std::string& name, const std::str
     }
 }
 
+void Library::put_meta(int64_t game_id, const char* field, const std::string& value)
+{
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db_,
+                       "INSERT INTO meta(game_id, field, value) VALUES(?,?,?)"
+                       " ON CONFLICT(game_id, field) DO UPDATE SET value=excluded.value;",
+                       -1, &st, nullptr);
+    sqlite3_bind_int64(st, 1, game_id);
+    sqlite3_bind_text(st, 2, field, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 3, value.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+
+int Library::scan_ports(const SystemCfg& sys)
+{
+    std::string dir = roms_dir_ + "/" + sys.id;
+    std::ifstream in(dir + kPortsIndex);
+    std::set<std::string> seen;
+    std::string line;
+    while (std::getline(in, line)) {
+        PortRow r;
+        if (!parse_port_row(line, r) || seen.count(r.base))
+            continue;
+        std::string script = dir + "/" + r.base + ".sh";
+        struct stat sb;
+        if (lstat(script.c_str(), &sb) != 0 || !S_ISREG(sb.st_mode))
+            continue;
+        int64_t id = upsert_game(sys.id, r.base, script, false, std::string());
+        if (id < 0)
+            continue;
+        seen.insert(r.base);
+        seed_meta(id, r.base, sys.id);
+        put_meta(id, "title", r.title);
+        if (!r.cover.empty() && inside_dir(dir, r.cover)) {
+            set_media(id, "covers", r.cover, "index");
+            continue;
+        }
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db_, "DELETE FROM media WHERE game_id=? AND type='covers' AND source='index';", -1, &st,
+                           nullptr);
+        sqlite3_bind_int64(st, 1, id);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    return (int)seen.size();
+}
+
 int Library::scan_system(const SystemCfg& sys)
 {
+    if (sys.id == kPortsSystem)
+        return scan_ports(sys);
     std::string dir = roms_dir_ + "/" + sys.id;
     DIR* d = opendir(dir.c_str());
     if (!d)
@@ -368,6 +475,26 @@ int Library::scan()
     return n;
 }
 
+int Library::rescan(const std::string& system_id)
+{
+    if (!db_)
+        return 0;
+    for (const SystemCfg& sys : cfg_) {
+        if (sys.id != system_id)
+            continue;
+        sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, nullptr);
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db_, "UPDATE game SET present=0 WHERE system_id=?;", -1, &st, nullptr);
+        sqlite3_bind_text(st, 1, sys.id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+        int n = scan_system(sys);
+        sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, nullptr);
+        return n;
+    }
+    return 0;
+}
+
 std::vector<std::pair<SystemCfg, int>> Library::systems_with_games()
 {
     std::vector<std::pair<SystemCfg, int>> out;
@@ -391,8 +518,10 @@ std::vector<Game> Library::games(const std::string& system_id)
     std::vector<Game> out;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(db_,
-                       "SELECT id, system_id, name, rompath_abs, is_multidisc, m3u_path, present"
-                       " FROM game WHERE system_id=? ORDER BY name;",
+                       "SELECT g.id, g.system_id, g.name, g.rompath_abs, g.is_multidisc, g.m3u_path, g.present,"
+                       " t.value"
+                       " FROM game g LEFT JOIN meta t ON t.game_id=g.id AND t.field='title'"
+                       " WHERE g.system_id=? ORDER BY COALESCE(t.value, g.name), g.name;",
                        -1, &st, nullptr);
     sqlite3_bind_text(st, 1, system_id.c_str(), -1, SQLITE_TRANSIENT);
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -405,6 +534,8 @@ std::vector<Game> Library::games(const std::string& system_id)
         const unsigned char* m3u = sqlite3_column_text(st, 5);
         g.m3u_path = m3u ? (const char*)m3u : "";
         g.present = sqlite3_column_int(st, 6) != 0;
+        const unsigned char* title = sqlite3_column_text(st, 7);
+        g.title = title ? (const char*)title : "";
         out.push_back(std::move(g));
     }
     sqlite3_finalize(st);
@@ -418,9 +549,11 @@ std::vector<Game> Library::recent_games(int limit)
         return out;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(db_,
-                       "SELECT id, system_id, name, rompath_abs, is_multidisc, m3u_path, present"
-                       " FROM game WHERE present=1 AND last_played IS NOT NULL"
-                       " ORDER BY last_played DESC, id DESC LIMIT ?;",
+                       "SELECT g.id, g.system_id, g.name, g.rompath_abs, g.is_multidisc, g.m3u_path, g.present,"
+                       " t.value"
+                       " FROM game g LEFT JOIN meta t ON t.game_id=g.id AND t.field='title'"
+                       " WHERE g.present=1 AND g.last_played IS NOT NULL"
+                       " ORDER BY g.last_played DESC, g.id DESC LIMIT ?;",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, limit);
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -433,6 +566,8 @@ std::vector<Game> Library::recent_games(int limit)
         const unsigned char* m3u = sqlite3_column_text(st, 5);
         g.m3u_path = m3u ? (const char*)m3u : "";
         g.present = sqlite3_column_int(st, 6) != 0;
+        const unsigned char* title = sqlite3_column_text(st, 7);
+        g.title = title ? (const char*)title : "";
         out.push_back(std::move(g));
     }
     sqlite3_finalize(st);

@@ -128,6 +128,49 @@ int main()
         check(!q.pop(j) && q.size() == 0, "a queue of stale jobs pops nothing and empties");
     }
 
+    {
+        DecodeQueue q;
+        DecodeJob a = job(100, kRecentGen);
+        q.push(a);
+        check(q.current(100, a.path, 0), "a pushed cover is the current result for its id");
+        DecodeJob j;
+        q.pop(j);
+        DecodeJob b = a;
+        b.path = "/synthetic/blockie-test-cover-100-new.jpg";
+        check(q.push(b) && q.size() == 1, "a new cover path for an id in flight is queued again");
+        check(!q.current(100, a.path, 0) && q.current(100, b.path, 0),
+              "a result for the old cover path is not current once the path changed");
+        DecodeJob c = b;
+        c.index_gen = 2;
+        q.push(c);
+        check(!q.current(100, b.path, 0) && q.current(100, b.path, 2),
+              "a result of an older index generation is not current");
+    }
+    {
+        DecodeQueue q;
+        DecodeJob a = job(120, kRecentGen);
+        DecodeJob j;
+        q.push(a);
+        q.pop(j);
+        a.path = "/synthetic/blockie-test-cover-120-new.jpg";
+        q.push(a);
+        q.pop(j);
+        check(q.busy() == 1, "two jobs in flight for one id count as one busy id");
+        q.done(120);
+        check(q.pending(120), "an id stays pending while its second job still decodes");
+        q.done(120);
+        check(!q.pending(120) && q.busy() == 0, "the id is free once both jobs are done");
+    }
+    {
+        DecodeQueue q;
+        q.push(job(110, kRecentGen));
+        q.push(job(111, kRecentGen));
+        q.forget({110});
+        std::vector<int64_t> got = drain(q);
+        check(got.size() == 1 && got[0] == 111, "forget drops the queued jobs of removed ids");
+        check(!q.current(110, job(110, kRecentGen).path, 0), "a removed id has no current result");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

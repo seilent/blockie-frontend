@@ -45,10 +45,12 @@
 #include "image.h"
 #include "ink.h"
 #include "input_pad.h"
+#include "jpeg.h"
 #include "launch.h"
 #include "launchflow.h"
 #include "library.h"
 #include "nav.h"
+#include "ports.h"
 #include "ready.h"
 #include "repeat.h"
 #include "screen_bt.h"
@@ -139,6 +141,7 @@ struct ArtDrop {
     bool decoded = false;
     int side = kTileSide;
     bool last = true;
+    int64_t index_gen = 0;
 };
 
 }
@@ -295,6 +298,8 @@ static int run()
     std::unordered_map<int64_t, Game> by_id;
     std::unordered_map<int64_t, Art> held;
     Launcher::Child child;
+    PortsHelper ports;
+    int64_t ports_gen = 0;
     int64_t child_game_id = -1;
     std::string child_core;
     LaunchFlow launch;
@@ -328,6 +333,8 @@ static int run()
     bool bench = benv && std::strcmp(benv, "grow") == 0;
 
     auto enqueue_scrape = [&](const Game& g, int64_t epoch, const std::string& folder) {
+        if (g.system_id == kPortsSystem)
+            return;
         bool added = false;
         {
             std::lock_guard<std::mutex> lk(qmutex);
@@ -343,11 +350,11 @@ static int run()
         }
     };
     std::unordered_set<int64_t> failed_covers;
-    auto queue_decode = [&](int64_t id, const std::string& path, int64_t gen) {
+    auto queue_decode = [&](int64_t id, const std::string& path, int64_t gen, int64_t index_gen) {
         bool added;
         {
             std::lock_guard<std::mutex> lk(dmutex);
-            added = dq.push({id, path, gen, now_ms(), {kTileSide}});
+            added = dq.push({id, path, gen, now_ms(), {kTileSide}, index_gen});
         }
         if (added)
             dcv.notify_one();
@@ -359,7 +366,7 @@ static int run()
             return false;
         for (const auto& m : lib.media(g.id))
             if (m.type == "covers") {
-                queue_decode(g.id, m.path, gen);
+                queue_decode(g.id, m.path, gen, g.system_id == kPortsSystem ? ports_gen : 0);
                 return true;
             }
         return false;
@@ -377,14 +384,14 @@ static int run()
     auto home_game = [&](const Game& g) {
         by_id[g.id] = g;
         const SystemCfg* sc = system_cfg(g.system_id);
-        return HomeGame{g.id, g.name, sc ? sc->name : std::string()};
+        return HomeGame{g.id, g.title.empty() ? g.name : g.title, sc ? sc->name : std::string()};
     };
     flow.setup();
     home.load = [&](const HomeGame& g) -> Art {
         auto it = held.find(g.id);
         return it != held.end() ? it->second : Art();
     };
-    auto deal_recent = [&](bool first) {
+    auto deal_recent = [&](bool first, bool keep = false) {
         std::vector<Art>& grid = home.system_view ? home.recent_hold : model.tiles;
         held.clear();
         for (size_t k = 0; k < home.recent.size() && k < grid.size(); k++)
@@ -393,7 +400,9 @@ static int run()
         std::vector<HomeGame> list;
         for (const Game& g : lib.recent_games(home.recent_cap))
             list.push_back(home_game(g));
-        std::vector<HomeGame> want = first ? home.deal_recent(model, list) : flow.game_ran(list);
+        std::vector<HomeGame> want = first  ? home.deal_recent(model, list)
+                                     : keep ? flow.recent_changed(list)
+                                            : flow.game_ran(list);
         held.clear();
         std::unordered_set<int64_t> ids;
         for (const HomeGame& g : home.recent)
@@ -491,11 +500,13 @@ static int run()
         need_redraw = true;
     };
 
-    auto refuse = [&](bool core_absent, const std::string& core) {
-        LaunchOutcome o = launch_refused(core_absent, core);
+    auto refuse_with = [&](const LaunchOutcome& o) {
         toast.show(now_ms(), o.line1, o.line2, nav.top() == Screen::Home);
         need_redraw = true;
         return LaunchStart::Refused;
+    };
+    auto refuse = [&](bool core_absent, const std::string& core) {
+        return refuse_with(launch_refused(core_absent, core));
     };
     auto try_launch = [&](const Game& g) {
         if (child.pid > 0)
@@ -505,7 +516,10 @@ static int run()
         std::string sysname = sc ? sc->name : std::string();
         for (char& ch : sysname)
             ch = (char)std::tolower((unsigned char)ch);
-        if (!launcher.core_installed(core)) {
+        LaunchCheck gate_check = launcher.check(g.system_id, core, ports.op);
+        if (gate_check == LaunchCheck::HelperBusy)
+            return refuse_with(launch_helper_busy(ports.op));
+        if (gate_check == LaunchCheck::CoreAbsent) {
             std::fprintf(stderr, "blockie-frontend: core %s absent for %s\n", core.c_str(), g.system_id.c_str());
             return refuse(true, core);
         }
@@ -525,7 +539,7 @@ static int run()
         child = ch;
         child_game_id = g.id;
         child_core = core;
-        launch.start(leave, p.activated());
+        launch.start(leave, p.activated(), g.system_id == kPortsSystem);
         toast.hide();
         repeat.release_all();
         bt.set_game_running(true, now_ms());
@@ -597,6 +611,10 @@ static int run()
                 dq.done(drp.game_id);
             want = dq.accept(drp.game_id);
         }
+        if (want && drp.decoded) {
+            std::lock_guard<std::mutex> lk(dmutex);
+            want = dq.current(drp.game_id, drp.path, drp.index_gen);
+        }
         if (!drp.decoded)
             failed_covers.erase(drp.game_id);
         if (!want)
@@ -621,14 +639,15 @@ static int run()
                 enqueue_scrape(it->second, in_recent ? 0 : home.epoch, folder_of(it->second.system_id));
             return;
         }
-        queue_decode(drp.game_id, drp.path, in_recent ? kRecentGen : win_gen);
+        queue_decode(drp.game_id, drp.path, in_recent ? kRecentGen : win_gen, 0);
     };
     flow.games = [&](int sys) {
         std::vector<HomeGame> list;
         if (sys < 0 || sys >= (int)sys_ids.size())
             return list;
         for (const Game& g : lib.games(sys_ids[sys]))
-            list.push_back(home_game(g));
+            if (g.present || g.system_id != kPortsSystem)
+                list.push_back(home_game(g));
         return list;
     };
     flow.covers_wanted = [&](const std::vector<HomeGame>& want, int scroll) {
@@ -662,6 +681,36 @@ static int run()
         std::lock_guard<std::mutex> lk(dmutex);
         dq.set_window(kRecentGen, {});
     };
+    auto rescan_ports = [&]() {
+        lib.rescan(kPortsSystem);
+        ports_gen++;
+        int sys = -1;
+        for (int i = 0; i < (int)sys_ids.size(); i++)
+            if (sys_ids[i] == kPortsSystem)
+                sys = i;
+        for (const Game& g : lib.games(kPortsSystem))
+            failed_covers.erase(g.id);
+        if (sys < 0)
+            return;
+        int count = 0;
+        for (const auto& sw : lib.systems_with_games())
+            if (sw.first.id == kPortsSystem)
+                count = sw.second;
+        model.systems[(size_t)sys].games = count;
+        std::vector<int64_t> gone = flow.regame(sys, flow.games(sys));
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            dq.forget(std::unordered_set<int64_t>(gone.begin(), gone.end()));
+        }
+        if (nav.system_view && nav.focus == sys)
+            for (int64_t id : home.keep_set(nav.sys_scroll))
+                for (const auto& m : lib.media(id))
+                    if (m.type == "covers")
+                        queue_decode(id, m.path, win_gen, ports_gen);
+        deal_recent(false, true);
+        need_redraw = true;
+    };
+    ports.on_done = [&](const std::string&) { rescan_ports(); };
     flow.launch_game = [&](const HomeGame& g) {
         auto it = by_id.find(g.id);
         return it == by_id.end() ? LaunchStart::Refused : try_launch(it->second);
@@ -1047,6 +1096,7 @@ static int run()
     if (art_evfd >= 0) {
         decode_thread = std::thread([art_evfd, &dq, &dmutex, &dcv, &decode_stop, &decode_pause, &art_mutex,
                                      &art_drops, &battery]() {
+            JpegDecoder jpeg;
             std::unique_lock<std::mutex> lk(dmutex);
             for (;;) {
                 dcv.wait(lk, [&]() { return decode_stop || battery.wanted() || (!decode_pause && dq.size() > 0); });
@@ -1067,7 +1117,10 @@ static int run()
                 lk.unlock();
                 int64_t t0 = now_us();
                 DecodedImage dec;
-                bool ok = load_png(j.path, dec) && dec.ok();
+                int cover_side = kTileSide;
+                for (int sd : j.sides)
+                    cover_side = std::max(cover_side, sd);
+                bool ok = load_cover(jpeg, j.path, cover_side, dec) && dec.ok();
                 int64_t t1 = now_us();
                 size_t n = ok ? std::max<size_t>(j.sides.size(), 1) : 1;
                 for (size_t s = 0; s < n; s++) {
@@ -1083,7 +1136,7 @@ static int run()
                                      (long long)(t0 / 1000 - j.queued_ms), (t1 - t0) / 1000.0, (t2 - t1) / 1000.0);
                     {
                         std::lock_guard<std::mutex> ak(art_mutex);
-                        art_drops.push_back({j.game_id, std::string(), img, true, side, s + 1 == n});
+                        art_drops.push_back({j.game_id, j.path, img, true, side, s + 1 == n, j.index_gen});
                     }
                     uint64_t one = 1;
                     ssize_t w = write(art_evfd, &one, sizeof one);

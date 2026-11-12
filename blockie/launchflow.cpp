@@ -15,6 +15,20 @@ namespace {
 
 constexpr const char* kNotStarted = "game not started";
 
+struct PortWords {
+    const char* quit;
+    const char* oom;
+    const char* missing;
+    const char* installing;
+    const char* updating;
+    const char* removing;
+};
+
+constexpr PortWords kPortWords = {
+    "the port quit",        "out of memory",      "the port's files are missing",
+    "a port is installing", "a port is updating", "a port is being removed",
+};
+
 int ms(fx v) { return fx_round(v); }
 
 fx progress(int64_t e, int64_t dur)
@@ -103,6 +117,39 @@ LaunchOutcome launch_outcome(int status, LaunchPhase at, bool quit_stamp, const 
     return o;
 }
 
+LaunchOutcome port_outcome(int status, LaunchPhase at, bool quit_stamp)
+{
+    LaunchOutcome o = launch_outcome(status, at, quit_stamp, std::string());
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    switch (Launcher::classify(status)) {
+    case LaunchExit::Crash:
+        if (code == 1)
+            o.line2 = kPortWords.oom;
+        break;
+    case LaunchExit::ConfigError:
+        if (code == 64)
+            o.line2 = kPortWords.missing;
+        break;
+    case LaunchExit::Quit:
+        if (!o.line1.empty())
+            o.line2 = kPortWords.quit;
+        break;
+    default:
+        break;
+    }
+    return o;
+}
+
+LaunchOutcome launch_helper_busy(HelperOp op)
+{
+    LaunchOutcome o;
+    o.line1 = kNotStarted;
+    o.line2 = op == HelperOp::Update   ? kPortWords.updating
+              : op == HelperOp::Remove ? kPortWords.removing
+                                       : kPortWords.installing;
+    return o;
+}
+
 int64_t launch_leave_ms(bool light) { return ms(light ? tok::motion_t7Fade : tok::motion_t7Leave); }
 
 int64_t return_ms() { return dark_ms() + ms(tok::motion_t8Page); }
@@ -176,10 +223,11 @@ GateIn launch_gate(const LaunchFlow& l, GateIn in, bool child)
     return in;
 }
 
-void LaunchFlow::start(bool leave, bool active)
+void LaunchFlow::start(bool leave, bool active, bool port)
 {
     phase_ = leave ? LaunchPhase::Leaving : LaunchPhase::Waiting;
     cut_ = !leave;
+    port_ = port;
     reversing_ = false;
     returning_ = false;
     back_ = false;
@@ -324,7 +372,8 @@ LaunchOutcome LaunchFlow::reaped(int status, bool quit_stamp, const std::string&
 {
     if (phase_ == LaunchPhase::Idle || phase_ == LaunchPhase::Returning || reversing_ || returning_)
         return {};
-    LaunchOutcome o = launch_outcome(status, phase_, quit_stamp, core);
+    LaunchOutcome o =
+        port_ ? port_outcome(status, phase_, quit_stamp) : launch_outcome(status, phase_, quit_stamp, core);
     toast_ = !o.line1.empty();
     line1_ = o.line1;
     line2_ = o.line2;

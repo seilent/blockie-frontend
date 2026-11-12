@@ -61,6 +61,22 @@ bool has_line(const std::string& cfg, const std::string& line)
 
 bool has_key(const std::string& cfg, const std::string& key) { return cfg.find(key) != std::string::npos; }
 
+std::vector<std::string> lines_of(const std::string& path)
+{
+    std::vector<std::string> lines;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    char buf[512];
+    while (f && std::fgets(buf, sizeof buf, f)) {
+        std::string l = buf;
+        if (!l.empty() && l.back() == '\n')
+            l.pop_back();
+        lines.push_back(l);
+    }
+    if (f)
+        std::fclose(f);
+    return lines;
+}
+
 using Ov = std::vector<std::pair<std::string, std::string>>;
 
 }
@@ -311,6 +327,52 @@ int main()
         std::vector<std::string> none = args_of("");
         check(none.size() == 4 && std::find(none.begin(), none.end(), "--theme") == none.end(),
               "spawn with no theme passes no --theme");
+    }
+
+    {
+        fd::Launcher lc(data_root, libretro, "/usr/bin/blockie-game");
+        check(lc.check("ports", "", fd::HelperOp::None) == fd::LaunchCheck::Go,
+              "a port launches with no core installed");
+        check(lc.check("gba", "mgba", fd::HelperOp::None) == fd::LaunchCheck::Go,
+              "a game whose core is installed launches");
+        check(lc.check("gba", "snes9x", fd::HelperOp::None) == fd::LaunchCheck::CoreAbsent,
+              "a game whose core is absent is refused");
+        check(lc.check("gba", "", fd::HelperOp::None) == fd::LaunchCheck::CoreAbsent,
+              "the core gate is skipped only for ports");
+        check(lc.check("ports", "", fd::HelperOp::Install) == fd::LaunchCheck::HelperBusy,
+              "a port launch is refused while the helper installs");
+        check(lc.check("gba", "mgba", fd::HelperOp::Remove) == fd::LaunchCheck::HelperBusy,
+              "a game launch is refused while the helper removes a port");
+    }
+
+    {
+        std::string argf = root + "/port-args";
+        std::string pstub = root + "/port-args.sh";
+        std::string script = data_root + "/roms/ports/blockie-test-port.sh";
+        write_file(pstub, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argf + "\"\nexit 0\n", 0755);
+        fd::Launcher lp(data_root, libretro, pstub);
+        fd::LaunchSpec spec;
+        spec.system = "ports";
+        spec.rompath_abs = script;
+        spec.theme = "dark";
+        fd::Launcher::Child ch = lp.spawn(spec);
+        int status = 0;
+        while (ch.pid > 0 && waitpid(ch.pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        std::vector<std::string> want = {"ports", script, "--theme", "dark"};
+        check(ch.pid > 0 && lines_of(argf) == want, "a port spawns blockie-game ports <script> with no --core");
+    }
+
+    {
+        fd::PortsHelper h;
+        std::vector<std::string> done;
+        h.on_done = [&](const std::string& n) { done.push_back(n); };
+        h.line("progress\tblockie-test-port\t1\t-");
+        h.line("fail\tblockie-test-port\tnetwork");
+        h.line("done");
+        check(done.empty(), "progress, fail and a bare done start no rescan");
+        h.line("done\tblockie-test-port");
+        check(done.size() == 1 && done[0] == "blockie-test-port", "a helper done line starts the ports rescan");
     }
 
     rm_rf(root);

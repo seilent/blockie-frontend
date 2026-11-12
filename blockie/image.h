@@ -16,6 +16,7 @@ struct DecodedImage {
 };
 
 bool load_png(const std::string& path, DecodedImage& out);
+bool load_png_buffer(const std::vector<uint8_t>& buf, DecodedImage& out);
 
 Image cover_tile(const DecodedImage& d, int side);
 

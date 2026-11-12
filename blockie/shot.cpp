@@ -7,6 +7,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -24,18 +25,23 @@
 #include "../gfx/glyph.h"
 #include "../gfx/pixel.h"
 #include "../gfx/png.h"
+#include "../gfx/wayland.h"
 #include "bt_model.h"
 #include "fold.h"
 #include "home.h"
 #include "homeflow.h"
+#include "decodeq.h"
 #include "image.h"
 #include "ink.h"
+#include "jpeg.h"
 #include "launch.h"
 #include "launchflow.h"
 #include "layer_mem.h"
+#include "library.h"
 #include "motion.h"
 #include "nav.h"
 #include "pops.h"
+#include "portmsg.h"
 #include "powermenu.h"
 #include "repeat.h"
 #include "screen_bt.h"
@@ -490,6 +496,9 @@ struct DriveOpts {
     bool repeat_covers = false;
     std::string exit_class = "quit";
     bool quit_stamp = false;
+    bool port = false;
+    HelperOp helper = HelperOp::None;
+    std::string ports_dir;
     std::string libretro;
     PageOpts page;
 };
@@ -503,6 +512,7 @@ constexpr int kSystemIds = 1000;
 constexpr int kDriveGamesMax = 99;
 constexpr int kCoverCap = 40;
 constexpr int64_t kDriveCapMs = 20000;
+constexpr int64_t kMsgShotCapMs = 120000;
 constexpr int64_t kNever = std::numeric_limits<int64_t>::max();
 constexpr uint32_t kPlainPlate = 0x808080;
 
@@ -519,8 +529,8 @@ bool exit_status(const std::string& name, int& status)
     static const struct {
         const char* name;
         int code;
-    } kExits[] = {{"quit", 0},   {"crash", 70}, {"busy", 75}, {"config", 64},
-                  {"exec", 127}, {"core", 69},  {"audio", 71}};
+    } kExits[] = {{"quit", 0},   {"crash", 70}, {"oom", 1},    {"busy", 75},
+                  {"config", 64}, {"exec", 127}, {"core", 69}, {"audio", 71}};
     for (const auto& e : kExits)
         if (name == e.name) {
             status = W_EXITCODE(e.code, 0);
@@ -587,8 +597,16 @@ public:
             return sys >= 0 && sys < (int)games.size() ? games[sys] : std::vector<HomeGame>();
         };
         flow.launch_game = [this](const HomeGame& g) {
-            std::string core = core_of(g.system);
-            bool absent = !o_.libretro.empty() && !Launcher(".", o_.libretro).core_installed(core);
+            bool port = o_.port || g.system == kPortsSystem;
+            std::string core = port ? std::string() : core_of(g.system);
+            LaunchCheck gate = Launcher(".", o_.libretro).check(port ? kPortsSystem : g.system, core, o_.helper);
+            if (gate == LaunchCheck::HelperBusy) {
+                LaunchOutcome r = launch_helper_busy(o_.helper);
+                toast_.show(now_, r.line1, r.line2, flow.nav.top() == Screen::Home);
+                refused_ = r.line1;
+                return LaunchStart::Refused;
+            }
+            bool absent = !o_.libretro.empty() && gate == LaunchCheck::CoreAbsent;
             if (absent || o_.exit_class == "spawn") {
                 LaunchOutcome r = launch_refused(absent, core);
                 toast_.show(now_, r.line1, r.line2, flow.nav.top() == Screen::Home);
@@ -601,7 +619,7 @@ public:
             playing_ = true;
             core_ = core;
             repeat_.release_all();
-            launch_.start(true, active_);
+            launch_.start(true, active_, port);
             toast_.hide();
             fprintf(stderr, "blockie-shot: %lld ms launch on %s\n", (long long)now_, core.c_str());
             return LaunchStart::Leave;
@@ -1163,6 +1181,56 @@ private:
     Buffer rest_det_;
 };
 
+bool ports_fixture(const std::string& dir, int side, std::vector<HomeGame>& out, SelectorItem& row,
+                   std::unordered_map<int64_t, Art>& art)
+{
+    const std::string tail = "/roms/ports";
+    std::string d = dir;
+    while (d.size() > 1 && d.back() == '/')
+        d.pop_back();
+    if (d.size() <= tail.size() || d.compare(d.size() - tail.size(), tail.size(), tail) != 0) {
+        fprintf(stderr, "blockie-shot: --portsdir takes a DATA/roms/ports dir\n");
+        return false;
+    }
+    Library lib;
+    if (!lib.open(d.substr(0, d.size() - tail.size()))) {
+        fprintf(stderr, "blockie-shot: cannot open the library under %s\n", d.c_str());
+        return false;
+    }
+    lib.rescan(kPortsSystem);
+    for (const SystemCfg& sc : lib.config())
+        if (sc.id == kPortsSystem)
+            row.name = sc.name;
+    for (const auto& sw : lib.systems_with_games())
+        if (sw.first.id == kPortsSystem)
+            row.games = sw.second;
+    DecodeQueue dq;
+    JpegDecoder jpeg;
+    std::unordered_set<int64_t> keep;
+    for (const Game& g : lib.games(kPortsSystem)) {
+        if (!g.present)
+            continue;
+        out.push_back({g.id, g.title.empty() ? g.name : g.title, row.name});
+        keep.insert(g.id);
+        for (const MediaRef& m : lib.media(g.id))
+            if (m.type == "covers")
+                dq.push({g.id, m.path, 1, 0, {side}, 1});
+    }
+    dq.set_window(1, keep);
+    DecodeJob j;
+    while (dq.pop(j)) {
+        DecodedImage dec;
+        bool ok = load_cover(jpeg, j.path, side, dec) && dec.ok();
+        dq.done(j.game_id);
+        if (ok && dq.accept(j.game_id) && dq.current(j.game_id, j.path, j.index_gen))
+            art[j.game_id] = std::make_shared<const Image>(cover_tile(dec, side));
+        fprintf(stderr, "blockie-shot: port %lld cover %s %s\n", (long long)j.game_id, j.path.c_str(),
+                ok ? "decoded" : "none");
+    }
+    fprintf(stderr, "blockie-shot: %zu ports\n", out.size());
+    return true;
+}
+
 int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const std::string& frames_dir,
               int systems, bool items, int sys_focus, const std::string& tiles_dir, const std::string& recent_dir,
               const Zones& zones)
@@ -1182,7 +1250,13 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         return 2;
     }
     systems = std::max(1, std::min(systems, 10));
-    int focus = std::clamp(sys_focus, 0, systems + (items ? 1 : 0) - 1);
+    std::vector<HomeGame> ports;
+    SelectorItem ports_row;
+    if (!o.ports_dir.empty() &&
+        !ports_fixture(o.ports_dir, o.big ? kBigTileSide : kTileSide, ports, ports_row, d->art))
+        return 1;
+    int with_ports = systems + (ports.empty() ? 0 : 1);
+    int focus = std::clamp(sys_focus, 0, with_ports + (items ? 1 : 0) - 1);
     if (!o.repeat_covers) {
         bool enters = o.script.find("accept") != std::string::npos;
         int games_n = focus < systems ? std::min(kDriveGamesMax, o.sys_games > 0 ? o.sys_games : kCounts[focus]) : 0;
@@ -1215,6 +1289,11 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         }
         d->games.push_back(list);
         d->flow.model.systems.push_back({kNames[s], count, ""});
+        d->flow.kinds.push_back(MenuKind::System);
+    }
+    if (!ports.empty()) {
+        d->games.push_back(ports);
+        d->flow.model.systems.push_back(ports_row);
         d->flow.kinds.push_back(MenuKind::System);
     }
     if (items)
@@ -1715,6 +1794,297 @@ int index_of(const std::vector<const char*>& v, const char* word)
     return -1;
 }
 
+struct MsgEvent {
+    int64_t at = 0;
+    std::vector<std::string> argv;
+    std::vector<std::string> lines;
+    PadAction key = PadAction::Up;
+    int edge = 0;
+};
+
+bool msg_words(const std::string& line, std::vector<std::string>& out)
+{
+    out.clear();
+    std::string cur;
+    bool quoted = false, any = false;
+    for (size_t i = 0; i < line.size(); i++) {
+        char ch = line[i];
+        if (ch == '"') {
+            quoted = !quoted;
+            any = true;
+        } else if (ch == '\\' && quoted && i + 1 < line.size()) {
+            char n = line[++i];
+            cur += n == 'n' ? '\n' : n == 't' ? '\t' : n;
+        } else if (ch == ' ' && !quoted) {
+            if (any)
+                out.push_back(cur);
+            cur.clear();
+            any = false;
+        } else {
+            cur += ch;
+            any = true;
+        }
+    }
+    if (any)
+        out.push_back(cur);
+    return !quoted;
+}
+
+const char* msg_mode_name(MsgMode m)
+{
+    switch (m) {
+    case MsgMode::Text: return "text";
+    case MsgMode::Progress: return "progress";
+    case MsgMode::Choose: return "choose";
+    case MsgMode::None: break;
+    }
+    return "none";
+}
+
+bool read_calls(const std::string& path, std::vector<MsgEvent>& events)
+{
+    std::vector<std::string> lines;
+    if (!read_lines(path, lines)) {
+        fprintf(stderr, "blockie-shot: cannot read %s\n", path.c_str());
+        return false;
+    }
+    for (const std::string& l : lines) {
+        std::vector<std::string> w;
+        if (!msg_words(l, w)) {
+            fprintf(stderr, "blockie-shot: an open quote in %s\n", l.c_str());
+            return false;
+        }
+        if (w.empty())
+            continue;
+        char* end = nullptr;
+        long long at = std::strtoll(w[0].c_str(), &end, 10);
+        if (end == w[0].c_str() || *end || at < 0 || w.size() < 2) {
+            fprintf(stderr, "blockie-shot: bad call line %s\n", l.c_str());
+            return false;
+        }
+        MsgEvent e;
+        e.at = at;
+        size_t i = 1;
+        for (; i < w.size() && w[i] != "--"; i++)
+            e.argv.push_back(w[i]);
+        if (i < w.size())
+            e.lines.assign(w.begin() + (long)i + 1, w.end());
+        const std::string& a0 = e.argv.empty() ? std::string() : e.argv[0];
+        if (a0.compare(0, 4, "key:") == 0) {
+            std::string k = a0.substr(4);
+            size_t colon = k.find(':');
+            std::string edge = colon == std::string::npos ? std::string() : k.substr(colon + 1);
+            k = k.substr(0, colon);
+            e.edge = edge == "d" ? 1 : edge == "u" ? -1 : 0;
+            if (!action_of(k, e.key) || (!edge.empty() && e.edge == 0) || e.argv.size() != 1) {
+                fprintf(stderr, "blockie-shot: unknown key %s\n", a0.c_str());
+                return false;
+            }
+        }
+        events.push_back(e);
+    }
+    std::stable_sort(events.begin(), events.end(), [](const MsgEvent& a, const MsgEvent& b) { return a.at < b.at; });
+    return true;
+}
+
+int run_portmsg_shot(Fonts& fonts, const std::string& calls, const std::string& plate_arg, const DriveOpts& o,
+                     const std::string& frames_dir, const std::string& out)
+{
+    std::vector<MsgEvent> events;
+    if (!read_calls(calls, events))
+        return 2;
+    Buffer plate;
+    if (plate_arg == "black") {
+        Canvas pc(plate.surface());
+        pc.fill(kScreen, launch_ground());
+    } else {
+        DecodedImage d;
+        if (!load_png(plate_arg, d) || !d.ok() || d.w != kPortraitW || d.h != kPortraitH) {
+            fprintf(stderr, "blockie-shot: --plate takes black or a %dx%d png\n", kPortraitW, kPortraitH);
+            return 2;
+        }
+        for (int y = 0; y < d.h; y++)
+            for (int x = 0; x < d.w; x++)
+                plate.surface().at(x, y) = LiveF::pack(d.rgb[(size_t)y * d.w + x]);
+    }
+    int64_t clock = 0, progress = 0;
+    std::set<int64_t> pending;
+    auto say = [&](int64_t id, int code, const std::string& value) {
+        fprintf(stderr, "blockie-shot: %lld ms call %lld answer %d%s%s\n", (long long)clock, (long long)id, code,
+                value.empty() ? "" : " ", value.c_str());
+        pending.erase(id);
+    };
+    auto fresh = [&]() {
+        auto c = std::make_unique<MsgCore>();
+        c->answer = say;
+        return c;
+    };
+    std::unique_ptr<MsgCore> core = fresh();
+    Repeat rep;
+    bool server = false;
+    uint64_t opened = 0;
+    auto press = [&](PadAction a, int64_t t) {
+        core->key(a, t);
+        if (is_direction(a) && core->live())
+            rep.press(a, kFromPad, t);
+    };
+    auto run_event = [&](size_t idx) {
+        const MsgEvent& e = events[idx];
+        int64_t id = (int64_t)idx + 1;
+        const std::string a0 = e.argv.empty() ? std::string() : e.argv[0];
+        if (a0 == "end") {
+            std::vector<int64_t> left(pending.begin(), pending.end());
+            for (int64_t p : left)
+                say(p, kMsgCancel, std::string());
+            core = fresh();
+            rep.release_all();
+            server = false;
+            progress = 0;
+            return;
+        }
+        if (a0.compare(0, 4, "key:") == 0) {
+            if (e.edge >= 0)
+                press(e.key, e.at);
+            if (e.edge <= 0)
+                rep.release(e.key, kFromPad, e.at);
+            return;
+        }
+        if (a0 == "line") {
+            for (const std::string& l : e.lines)
+                core->line(progress, l, e.at);
+            return;
+        }
+        if (a0 == "eof") {
+            core->done(progress);
+            return;
+        }
+        MsgCall c;
+        std::vector<std::string> opts = e.lines;
+        if (!parse_call(e.argv, c) || !msg_options(c, opts)) {
+            say(id, kMsgUsage, std::string());
+            return;
+        }
+        if (!server && msg_quiet(c.kind)) {
+            say(id, kMsgDone, std::string());
+            return;
+        }
+        server = true;
+        pending.insert(id);
+        core->call(id, c, opts, e.at);
+        if (core->chooses() != opened) {
+            opened = core->chooses();
+            rep.release_all();
+        }
+        if (c.kind == CallKind::Progress) {
+            progress = id;
+            for (const std::string& l : e.lines)
+                core->line(id, l, e.at);
+        }
+    };
+    size_t next = 0;
+    auto advance = [&](int64_t tf) {
+        for (;;) {
+            int64_t ev = next < events.size() ? events[next].at : kNever;
+            int64_t td = core->deadline() >= 0 ? core->deadline() : kNever;
+            int64_t rd = rep.deadline() >= 0 ? rep.deadline() : kNever;
+            int64_t t = std::min({ev, td, rd});
+            if (t > tf)
+                break;
+            clock = t;
+            if (t == td) {
+                core->tick(t);
+            } else if (t == rd) {
+                PadAction a = PadAction::Up;
+                if (rep.due(t, a))
+                    core->key(a, t);
+                else
+                    rep.release_all();
+            } else {
+                run_event(next++);
+            }
+        }
+        clock = tf;
+        core->tick(tf);
+        if (server && core->ended(tf) && pending.empty())
+            server = false;
+    };
+    InkLayer ink;
+    GlyphCache glyphs;
+    Buffer layer, comp;
+    std::vector<uint32_t> argb((size_t)kPortraitW * kPortraitH);
+    std::vector<AlphaRegion> regions;
+    FILE* side = frames_dir.empty() ? nullptr : fopen((frames_dir + "/frames.txt").c_str(), "w");
+    if (!frames_dir.empty() && !side) {
+        fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    int64_t last = events.empty() ? 0 : events.back().at;
+    int written = 0, tail = o.tail;
+    bool composed = false;
+    for (int n = 0;; n++) {
+        int64_t tf = o.at >= 0 && frames_dir.empty() ? o.at : frame_ms(n);
+        advance(tf);
+        regions.clear();
+        Canvas c(layer.surface());
+        c.fill(kScreen, 0);
+        if (server)
+            core->view.draw(c, fonts, glyphs, ink, theme(), tf, regions);
+        bool refused = regions.size() > (size_t)kWlAlphaMax;
+        if (!refused || !composed) {
+            if (refused)
+                regions.clear();
+            write_argb(layer.surface(), regions, argb.data(), kPortraitW);
+            composite_argb(argb.data(), kPortraitW, plate.surface(), comp.surface());
+            composed = true;
+        }
+        if (side && tf >= o.from) {
+            if (!write_png(frame_path(frames_dir, written), comp.surface())) {
+                fprintf(stderr, "blockie-shot: cannot write %s\n", frame_path(frames_dir, written).c_str());
+                fclose(side);
+                return 1;
+            }
+            std::string line = std::to_string(written) + " " + std::to_string(tf) + " " +
+                               (server ? msg_mode_name(core->view.content().mode) : "gone");
+            for (const AlphaRegion& r : regions)
+                line += " " + std::to_string(r.r.x0) + "," + std::to_string(r.r.y0) + "," + std::to_string(r.r.x1) +
+                        "," + std::to_string(r.r.y1) + ":" + std::to_string(region_a8(r.a256));
+            line += " focus=" + std::to_string(server ? core->view.focus() : -1);
+            if (refused)
+                line += " refused";
+            if (fprintf(side, "%s\n", line.c_str()) < 0) {
+                fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
+                fclose(side);
+                return 1;
+            }
+            written++;
+        }
+        if (o.at >= 0 && tf >= o.at)
+            break;
+        if (tf > kMsgShotCapMs) {
+            fprintf(stderr, "blockie-shot: the portmsg frames passed the %lld ms cap\n", (long long)kMsgShotCapMs);
+            if (side)
+                fclose(side);
+            return 1;
+        }
+        bool idle = !server || (!core->view.animating(tf) && core->deadline() < 0 && !rep.active());
+        if (next >= events.size() && tf >= last && idle) {
+            if (tail-- > 0)
+                continue;
+            break;
+        }
+    }
+    if (side && fclose(side) != 0) {
+        fprintf(stderr, "blockie-shot: cannot close %s/frames.txt\n", frames_dir.c_str());
+        return 1;
+    }
+    if (!out.empty() && !write_png(out, comp.surface())) {
+        fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
+        return 1;
+    }
+    fprintf(stderr, "blockie-shot: portmsg %s, %d frames\n", calls.c_str(), written);
+    return 0;
+}
+
 int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Surface& plate,
                 const std::string& frames_dir, const std::string& out)
 {
@@ -1934,6 +2304,7 @@ int main(int argc, char** argv)
     int menu_top = 0;
     bool items = false;
     bool light = false;
+    std::string msg_calls;
     PageOpts page_opts;
     Pane focus = Pane::Selector;
     bool scatter = false;
@@ -2092,12 +2463,32 @@ int main(int argc, char** argv)
             drive.exit_class = argv[++i];
             int status = 0;
             if (drive.exit_class != "spawn" && !exit_status(drive.exit_class, status)) {
-                fprintf(stderr, "blockie-shot: --exit takes quit, crash, busy, config, exec, core, audio or spawn\n");
+                fprintf(stderr, "blockie-shot: --exit takes quit, crash, oom, busy, config, exec, core, audio"
+                                " or spawn\n");
                 return 2;
             }
         }
         else if (a == "--quitstamp")
             drive.quit_stamp = true;
+        else if (a == "--port")
+            drive.port = true;
+        else if (a == "--portsdir" && i + 1 < argc)
+            drive.ports_dir = argv[++i];
+        else if (a == "--portmsg" && i + 1 < argc)
+            msg_calls = argv[++i];
+        else if (a == "--theme" && i + 1 < argc)
+            light = std::string(argv[++i]) == "light";
+        else if (a == "--helper" && i + 1 < argc) {
+            std::string h = argv[++i];
+            drive.helper = h == "install" ? HelperOp::Install
+                           : h == "update" ? HelperOp::Update
+                           : h == "remove" ? HelperOp::Remove
+                                           : HelperOp::None;
+            if (drive.helper == HelperOp::None) {
+                fprintf(stderr, "blockie-shot: --helper takes install, update or remove\n");
+                return 2;
+            }
+        }
         else if (a == "--libretro" && i + 1 < argc)
             drive.libretro = argv[++i];
         else if (a == "--arrive" && i + 1 < argc)
@@ -2143,7 +2534,9 @@ int main(int argc, char** argv)
     bool driven = drive.on && (!out.empty() || !frames_dir.empty());
     bool page_frames = !drive.on && !sequence && page == "settings" && !frames_dir.empty();
     bool pm_shot = !drive.on && !pm.surface.empty() && (!out.empty() || !frames_dir.empty());
-    if (!driven && !page_frames && !pm_shot && ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
+    bool msg_shot = !msg_calls.empty() && (!out.empty() || !frames_dir.empty());
+    if (!driven && !page_frames && !pm_shot && !msg_shot &&
+        ((out.empty() && !sequence) || (sequence && frames_dir.empty()))) {
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
@@ -2163,7 +2556,14 @@ int main(int argc, char** argv)
                 " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
                 " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band|full] [--startup] [--arrive MS]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT]"
-                " [--exit quit|crash|busy|config|exec|core|audio|spawn] [--quitstamp] [--libretro DIR] [same options]\n"
+                " [--exit quit|crash|oom|busy|config|exec|core|audio|spawn] [--quitstamp] [--port]"
+                " [--helper install|update|remove] [--portsdir DATA/roms/ports] [--libretro DIR] [same options]\n"
+                "       blockie-shot --portmsg CALLS [OUT.png] [--frames DIR] [--plate black|FILE.png] [--at MS]"
+                " [--tail N] [--theme light|dark]\n"
+                "         CALLS lines: AT ARGV... [-- LINE...]; ARGV is blockie-portmsg's argv, the words after --"
+                " its stdin lines;\n"
+                "         AT line -- LINE... feeds the open --progress, AT eof ends its stdin, AT key:K[:d|:u]"
+                " with K up down left right accept back context prev next start, AT end stops the scope\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"
                 " [--pickgates FILE] [--plate home|plain] [--idle MS] [--script KEY|fail|term:d|u:MS,...] [--arrive MS]"
@@ -2189,6 +2589,10 @@ int main(int argc, char** argv)
     if (!bt_sub.empty())
         page_opts.btsub = bt_sub;
     drive.page = page_opts;
+    if (msg_shot && drive.on) {
+        fprintf(stderr, "blockie-shot: --portmsg and --drive do not mix\n");
+        return 2;
+    }
     if (drive.on)
         return run_drive(fonts, drive, out, frames_dir, systems, items, sys_focus, tiles_dir, recent_dir, zones);
 
@@ -2214,6 +2618,8 @@ int main(int argc, char** argv)
     model.game_system = game_system;
     model.game_title = game_title;
 
+    if (msg_shot)
+        return run_portmsg_shot(fonts, msg_calls, pm.plate == "home" ? "black" : pm.plate, drive, frames_dir, out);
     if (pm_shot) {
         if (pm.plate != "home" && pm.plate != "plain") {
             fprintf(stderr, "blockie-shot: --plate takes home or plain\n");

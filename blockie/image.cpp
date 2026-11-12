@@ -69,23 +69,24 @@ Image cover_tile(const DecodedImage& d, int side)
     return img;
 }
 
-bool load_png(const std::string& path, DecodedImage& out)
+namespace {
+
+spng_ctx* png_ctx()
 {
-    out = DecodedImage{};
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f)
-        return false;
     spng_ctx* ctx = spng_ctx_new(0);
-    if (!ctx) {
-        std::fclose(f);
-        return false;
+    if (ctx) {
+        spng_set_image_limits(ctx, kMaxSide, kMaxSide);
+        spng_set_chunk_limits(ctx, kMaxChunk, kMaxCache);
     }
-    spng_set_image_limits(ctx, kMaxSide, kMaxSide);
-    spng_set_chunk_limits(ctx, kMaxChunk, kMaxCache);
+    return ctx;
+}
+
+bool decode_png(spng_ctx* ctx, bool source, DecodedImage& out)
+{
     bool ok = false;
     struct spng_ihdr ihdr;
     size_t need = 0;
-    if (spng_set_png_file(ctx, f) == 0 && spng_get_ihdr(ctx, &ihdr) == 0 &&
+    if (source && spng_get_ihdr(ctx, &ihdr) == 0 &&
         spng_decoded_image_size(ctx, SPNG_FMT_RGB8, &need) == 0 &&
         need == (size_t)ihdr.width * ihdr.height * 3) {
         std::vector<uint8_t> buf(need);
@@ -99,8 +100,36 @@ bool load_png(const std::string& path, DecodedImage& out)
             ok = out.ok();
         }
     }
+    return ok;
+}
+
+}
+
+bool load_png(const std::string& path, DecodedImage& out)
+{
+    out = DecodedImage{};
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    spng_ctx* ctx = png_ctx();
+    if (!ctx) {
+        std::fclose(f);
+        return false;
+    }
+    bool ok = decode_png(ctx, spng_set_png_file(ctx, f) == 0, out);
     spng_ctx_free(ctx);
     std::fclose(f);
+    return ok;
+}
+
+bool load_png_buffer(const std::vector<uint8_t>& buf, DecodedImage& out)
+{
+    out = DecodedImage{};
+    spng_ctx* ctx = png_ctx();
+    if (!ctx)
+        return false;
+    bool ok = decode_png(ctx, spng_set_png_buffer(ctx, buf.data(), buf.size()) == 0, out);
+    spng_ctx_free(ctx);
     return ok;
 }
 

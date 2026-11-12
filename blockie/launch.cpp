@@ -98,6 +98,15 @@ bool Launcher::core_installed(const std::string& core) const
     return stat(path.c_str(), &sb) == 0 && S_ISREG(sb.st_mode);
 }
 
+LaunchCheck Launcher::check(const std::string& system_id, const std::string& core, HelperOp helper) const
+{
+    if (helper != HelperOp::None)
+        return LaunchCheck::HelperBusy;
+    if (system_id != kPortsSystem && !core_installed(core))
+        return LaunchCheck::CoreAbsent;
+    return LaunchCheck::Go;
+}
+
 std::string Launcher::emit_config(const std::vector<std::pair<std::string, std::string>>& overrides)
 {
     std::string out;

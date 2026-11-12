@@ -6,9 +6,12 @@
 
 #include <sys/types.h>
 
+#include "ports.h"
+
 namespace fd {
 
 enum class LaunchExit { Quit, Crash, Busy, ConfigError, CoreAbsent, AudioGate };
+enum class LaunchCheck { Go, CoreAbsent, HelperBusy };
 
 struct LaunchSpec {
     std::string system;
@@ -29,6 +32,7 @@ public:
     };
 
     bool core_installed(const std::string& core) const;
+    LaunchCheck check(const std::string& system_id, const std::string& core, HelperOp helper) const;
     static std::string emit_config(const std::vector<std::pair<std::string, std::string>>& overrides);
     static LaunchExit classify(int status);
     Child spawn(const LaunchSpec& spec);

@@ -19,6 +19,7 @@ struct Game {
     std::string system_id, name, rompath_abs, m3u_path;
     bool is_multidisc;
     bool present;
+    std::string title;
 };
 
 struct MediaRef {
@@ -38,6 +39,7 @@ public:
 
     bool open(const std::string& data_root);
     int scan();
+    int rescan(const std::string& system_id);
     std::vector<std::pair<SystemCfg, int>> systems_with_games();
     std::vector<Game> games(const std::string& system_id);
     std::vector<Game> recent_games(int limit);
@@ -61,6 +63,8 @@ private:
     bool init_schema();
     void seed_systems();
     int scan_system(const SystemCfg& sys);
+    int scan_ports(const SystemCfg& sys);
+    void put_meta(int64_t game_id, const char* field, const std::string& value);
     int64_t upsert_game(const std::string& system_id, const std::string& name, const std::string& rompath_abs,
                         bool is_multidisc, const std::string& m3u_path);
     void seed_meta(int64_t game_id, const std::string& name, const std::string& system_id);

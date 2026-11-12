@@ -243,11 +243,11 @@ int main()
         }
     }
 
-    check(lib.config().size() == 10, "config exposes all 10 configured systems");
+    check(lib.config().size() == 11, "config exposes all 11 configured systems");
 
     {
-        static const char* const kWrapperSystems[] = {"gb",  "gbc", "nes", "snes", "genesis",
-                                                       "gba", "ps1", "n64", "psp",  "dc"};
+        static const char* const kWrapperSystems[] = {"gb",  "gbc", "nes", "snes", "genesis", "gba",
+                                                       "ps1", "n64", "psp", "dc",   "ports"};
         for (const auto& s : lib.config()) {
             std::string low = s.name;
             for (char& ch : low)
@@ -260,6 +260,70 @@ int main()
                 }
             check(known, ("launch name for " + s.id + " is a blockie-game system").c_str());
         }
+    }
+
+    {
+        std::string ports = roms + "/ports";
+        mkdirs(ports + "/.blockie");
+        mkdirs(ports + "/blockie-test-alpha");
+        std::string cover = ports + "/blockie-test-alpha/cover.png";
+        write_file(cover, "x");
+        write_file(ports + "/blockie-test-alpha.sh", "#!/bin/bash\n");
+        write_file(ports + "/blockie-test-beta.sh", "#!/bin/bash\n");
+        write_file(ports + "/blockie-test-gamma.sh", "#!/bin/bash\n");
+        write_file(ports + "/blockie-test-target.sh", "#!/bin/bash\n");
+        check(symlink((ports + "/blockie-test-target.sh").c_str(), (ports + "/blockie-test-link.sh").c_str()) == 0,
+              "make a symlinked port script");
+        std::string index = ports + "/.blockie/index.tsv";
+        write_file(index, "blockie-test-alpha\tBlockie Test Alpha\tblockie-test-alpha\t" + cover + "\n"
+                          "blockie-test-beta\tBlockie Test Beta\t-\t-\n"
+                          "blockie-test-gamma\tBlockie Test Gamma\t-\t" + ports + "/../gba/cover.png\n"
+                          "blockie-test-missing\tBlockie Test Missing\t-\t-\n"
+                          "blockie-test-alpha/../blockie-test-beta\tBlockie Test Escape\t-\t-\n"
+                          "blockie-test-link\tBlockie Test Link\t-\t-\n"
+                          "blockie-test-short\tBlockie Test Short\n");
+        check(lib.rescan("ports") == 3, "the ports scan takes the index lines whose script is a regular file");
+        auto pg = lib.games("ports");
+        const fd::Game* alpha = find_game(pg, "blockie-test-alpha");
+        const fd::Game* gamma = find_game(pg, "blockie-test-gamma");
+        check(alpha && alpha->title == "Blockie Test Alpha" && alpha->rompath_abs == ports + "/blockie-test-alpha.sh",
+              "a port is keyed by its script base name with the title as meta");
+        check(find_game(pg, "blockie-test-missing") == nullptr, "an index line whose script is missing is skipped");
+        check(find_game(pg, "blockie-test-alpha/../blockie-test-beta") == nullptr,
+              "a base name with a path is refused");
+        check(find_game(pg, "blockie-test-link") == nullptr, "a symlinked script is refused");
+        check(find_game(pg, "blockie-test-short") == nullptr, "a line without four fields is refused");
+        bool alpha_cover = false, gamma_cover = false;
+        for (const auto& m : alpha ? lib.media(alpha->id) : std::vector<fd::MediaRef>())
+            alpha_cover = alpha_cover || (m.type == "covers" && m.path == cover);
+        for (const auto& m : gamma ? lib.media(gamma->id) : std::vector<fd::MediaRef>())
+            gamma_cover = gamma_cover || m.type == "covers";
+        check(alpha_cover, "a port cover comes from the index");
+        check(gamma && !gamma_cover, "a cover path outside the ports folder is refused");
+        auto ports_sys = lib.systems_with_games();
+        check(sys_count(ports_sys, "ports") == 3, "the ports entry counts the indexed ports");
+
+        int64_t alpha_id = alpha ? alpha->id : -1;
+        lib.mark_played(alpha_id, 300);
+        write_file(index, "blockie-test-alpha\tBlockie Test Alpha Renamed\tblockie-test-alpha\t-\n"
+                          "blockie-test-gamma\tBlockie Test Gamma\t-\t-\n");
+        check(lib.rescan("ports") == 2, "a rescan after the helper's done reads the new index");
+        auto pg2 = lib.games("ports");
+        const fd::Game* a2 = find_game(pg2, "blockie-test-alpha");
+        check(a2 && a2->id == alpha_id && a2->title == "Blockie Test Alpha Renamed",
+              "a title change keeps the row and its id");
+        auto rec = lib.recent_games(500);
+        check(!rec.empty() && rec[0].id == alpha_id && rec[0].title == "Blockie Test Alpha Renamed",
+              "a title change keeps the played mark and Recent shows the new title");
+        bool alpha_cover2 = false;
+        for (const auto& m : lib.media(alpha_id))
+            alpha_cover2 = alpha_cover2 || m.type == "covers";
+        check(!alpha_cover2, "a cover dropped from the index is dropped from the port");
+        const fd::Game* b2 = find_game(pg2, "blockie-test-beta");
+        check(b2 && !b2->present, "a port gone from the index is kept as present=0");
+        auto ports_sys2 = lib.systems_with_games();
+        check(sys_count(ports_sys2, "ports") == 2 && sys_count(ports_sys2, "gba") == 3,
+              "a ports rescan leaves the other systems as they were");
     }
 
     rm_rf(root);

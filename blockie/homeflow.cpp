@@ -1,6 +1,7 @@
 #include "homeflow.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "../core/curves.h"
 #include "../ui/roles.h"
@@ -136,6 +137,66 @@ std::vector<HomeGame> HomeFlow::game_ran(const std::vector<HomeGame>& list)
     if (!nav.system_view && nav.pane == Pane::Details) {
         show_recent(nav.tile_focus);
         t9_.set(shown_text(home.recent, nav.tile_focus));
+        warm_turned(fonts_, model);
+    }
+    ctl.dirty();
+    redraw_ = true;
+    return want;
+}
+
+std::vector<int64_t> HomeFlow::regame(int sys, const std::vector<HomeGame>& list)
+{
+    std::vector<int64_t> gone;
+    if (!nav.system_view || nav.focus != sys || !nav.stack.empty())
+        return gone;
+    std::unordered_set<int64_t> ids;
+    for (const HomeGame& g : list)
+        ids.insert(g.id);
+    for (const HomeGame& g : home.sysgames)
+        if (!ids.count(g.id)) {
+            gone.push_back(g.id);
+            home.cache.erase(g.id);
+        }
+    if (list.empty()) {
+        input(PadAction::Back, false, now_);
+        return gone;
+    }
+    int old = nav.sys_focus;
+    int64_t focus_id = old >= 0 && old < (int)home.sysgames.size() ? home.sysgames[old].id : -1;
+    int focus = std::clamp(old, 0, (int)list.size() - 1);
+    for (int i = 0; i < (int)list.size(); i++)
+        if (list[i].id == focus_id)
+            focus = i;
+    home.sysgames = list;
+    nav.sys_total = (int)list.size();
+    nav.sys_focus = focus;
+    int row = focus / std::max(1, nav.cols);
+    nav.sys_scroll = std::clamp(nav.sys_scroll, std::max(0, row - Nav::kRows + 1), row);
+    std::vector<HomeGame> want = home.window(model, nav.sys_scroll, nav.sys_focus, true);
+    if (covers_wanted)
+        covers_wanted(want, nav.sys_scroll);
+    t9_.set(shown_text(home.sysgames, nav.sys_focus));
+    redraw();
+    return gone;
+}
+
+std::vector<HomeGame> HomeFlow::recent_changed(const std::vector<HomeGame>& list)
+{
+    int old = nav.tile_focus;
+    int64_t id = old >= 0 && old < (int)home.recent.size() ? home.recent[old].id : -1;
+    std::vector<HomeGame> want = home.deal_recent(model, list);
+    int n = (int)home.recent.size();
+    int k = std::clamp(old, 0, std::max(0, n - 1));
+    for (int i = 0; i < n; i++)
+        if (home.recent[i].id == id)
+            k = i;
+    nav.tile_focus = k;
+    bool in_recent = !nav.system_view && nav.pane == Pane::Details && nav.stack.empty();
+    if (in_recent && n == 0)
+        input(PadAction::Back, false, now_);
+    else if (in_recent) {
+        show_recent(k);
+        t9_.set(shown_text(home.recent, k));
         warm_turned(fonts_, model);
     }
     ctl.dirty();
