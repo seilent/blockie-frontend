@@ -85,10 +85,22 @@ void WaylandPresenter::set_role(WlRole role)
     role_ = role;
 }
 
+void WaylandPresenter::set_translucent(bool on)
+{
+    if (dpy_) {
+        if (!trans_told_)
+            fprintf(stderr, "funeos: wayland: set_translucent after open\n");
+        trans_told_ = true;
+        return;
+    }
+    translucent_ = on;
+}
+
 bool WaylandPresenter::set_alpha(const WlAlpha* v, int n)
 {
-    if (role_ != WlRole::Layer || n < 0 || n > kWlAlphaMax) {
-        if (!alpha_told_ && role_ != WlRole::Layer)
+    bool regions = role_ == WlRole::Layer || translucent_;
+    if (!regions || n < 0 || n > kWlAlphaMax) {
+        if (!alpha_told_ && !regions)
             fprintf(stderr, "funeos: wayland: set_alpha outside the layer role\n");
         else if (!alpha_told_)
             fprintf(stderr, "funeos: wayland: set_alpha with %d regions refused\n", n);
@@ -510,15 +522,18 @@ bool WaylandPresenter::open(const std::string& spec, bool screen)
     xdg_toplevel_set_fullscreen(top_.top, nullptr);
     wl_surface_commit(top_.wl);
     wl_display_roundtrip(dpy_);
+    top_.px = translucent_ ? Px::Regions : Px::Opaque;
     if (!top_.serial_due || !make_pool(top_)) {
         fprintf(stderr, "funeos: wayland: %s\n", top_.serial_due ? "no shm pool" : "no configure");
         stop();
         return false;
     }
-    wl_region* rgn = wl_compositor_create_region(comp_);
-    wl_region_add(rgn, 0, 0, out_w_, out_h_);
-    wl_surface_set_opaque_region(top_.wl, rgn);
-    wl_region_destroy(rgn);
+    if (!translucent_) {
+        wl_region* rgn = wl_compositor_create_region(comp_);
+        wl_region_add(rgn, 0, 0, out_w_, out_h_);
+        wl_surface_set_opaque_region(top_.wl, rgn);
+        wl_region_destroy(rgn);
+    }
     settle();
     full_ = true;
     flip();

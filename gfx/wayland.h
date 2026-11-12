@@ -79,6 +79,7 @@ public:
     void set_connect_fd(int fd) { connect_fd_ = fd; }
     void set_keyboard(bool on) { kbd_on_ = on; }
     void set_layer_focus(bool on) { layer_focus_ = on; }
+    void set_translucent(bool on);
     void set_key_handler(std::function<void(uint32_t code, bool pressed)> f) { key_cb_ = std::move(f); }
     void set_keymap_handler(std::function<void(int fd, uint32_t size)> f) { keymap_cb_ = std::move(f); }
     void set_focus_handler(std::function<void(bool in)> f) { focus_cb_ = std::move(f); }
@@ -261,7 +262,8 @@ private:
     uint32_t ping_ = 0, commits_ = 0, activations_ = 0;
     bool ping_due_ = false;
     bool full_ = false, posted_ = false, waiting_ = false, blocked_ = false, lost_ = false, closed_ = false;
-    bool kbd_on_ = false, layer_focus_ = false, role_told_ = false, alpha_told_ = false;
+    bool kbd_on_ = false, layer_focus_ = false, translucent_ = false, role_told_ = false, trans_told_ = false,
+         alpha_told_ = false;
     bool act_ = false, activated_ = false, ever_ = false, background_ = false;
 };
 

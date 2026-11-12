@@ -101,6 +101,7 @@ constexpr bool kMemSet = std::is_same_v<decltype(ref<P>().open(PresentMode::Copy
 
 template <class P>
 constexpr bool kLayerSet = std::is_same_v<decltype(ref<P>().set_role(WlRole::Layer)), void> &&
+                           std::is_same_v<decltype(ref<P>().set_translucent(false)), void> &&
                            std::is_same_v<decltype(ref<P>().set_alpha(ref<const WlAlpha*>(), 0)), bool> &&
                            std::is_same_v<decltype(ref<const P>().has_presentation()), bool> &&
                            std::is_same_v<decltype(ref<P>().take_feedback(ref<std::vector<WlFeedback>>())), bool> &&

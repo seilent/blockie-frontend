@@ -300,6 +300,16 @@ int read_or_tmp(const std::string& path, std::vector<uint8_t>& out, size_t cap)
     return 0;
 }
 
+unsigned leftovers(const std::string& path)
+{
+    unsigned left = 0;
+    if (access((path + ".tmp").c_str(), F_OK) == 0)
+        left |= 1;
+    if (access((path + ".new").c_str(), F_OK) == 0)
+        left |= 2;
+    return left;
+}
+
 bool mkdirs(const std::string& path)
 {
     if (path.empty())

@@ -29,6 +29,7 @@ bool write_atomic(const std::string& path, const std::vector<Segment>& segs, con
 bool fsync_dir(const std::string& path);
 bool read_file(const std::string& path, std::vector<uint8_t>& out, size_t cap);
 int read_or_tmp(const std::string& path, std::vector<uint8_t>& out, size_t cap);
+unsigned leftovers(const std::string& path);
 std::string dir_of(const std::string& path);
 std::string base_of(const std::string& path);
 bool mkdirs(const std::string& path);
