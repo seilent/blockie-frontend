@@ -19,6 +19,7 @@ struct StoreHost {
     std::function<bool()> online;
     std::function<bool()> stale;
     std::function<std::vector<IndexPort>()> index;
+    std::function<SteamState()> steam;
     std::function<void()> rescan;
     std::function<void()> reread;
     std::function<void(const std::vector<HomeGame>& shown, const std::vector<HomeGame>& want)> preview_art;
@@ -40,6 +41,7 @@ public:
     bool have_catalog = false;
     std::vector<StoreItem> items;
     std::vector<StoreGenre> rows;
+    bool l2 = false;
 
     void attach();
     void set_catalog(bool ok, Catalog c, int64_t now);
@@ -60,6 +62,11 @@ private:
     void settle(int64_t now);
     void open_port(const StoreItem& it, int64_t now);
     void ask(HelperCmd c, int64_t now);
+    bool login_ready() const;
+    void login(bool on, int64_t now);
+    void login_push(int64_t now);
+    void login_pop(int64_t now);
+    void shot(const StoreItem* it);
     void result(const HelperResult& r);
     void toast(const StoreToast& t, int64_t now);
 
@@ -68,6 +75,9 @@ private:
     PortsHelper& helper_;
     Children& kids_;
     std::unordered_set<std::string> updated_;
+    std::string copying_;
+    bool login_due_ = false;
+    bool shot_due_ = false;
     int64_t preview_at_ = -1;
     bool grid_due_ = false;
     bool leave_due_ = false;

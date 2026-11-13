@@ -7,7 +7,7 @@
 
 namespace fd {
 
-enum class Screen { Home, Settings, Bluetooth, Port };
+enum class Screen { Home, Settings, Bluetooth, Port, SteamLogin };
 enum class MenuKind { System, Settings };
 
 class NavHost {

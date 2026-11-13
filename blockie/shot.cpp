@@ -20,6 +20,7 @@
 
 #include <dirent.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -409,6 +410,7 @@ struct PageOpts {
     std::string storage = "82:106:4.3:7.8";
     std::string about = "|0a1b2c3|5.10.233-blockie-test";
     std::string btsub = "not connected";
+    std::string steam;
     std::string toast;
     std::string zone;
     bool zone_set = false;
@@ -507,6 +509,14 @@ bool page_fixtures(SettingsPage& sp, const PageOpts& o)
         return false;
     }
     sp.set_row(kAboutRow, info_row("", about_lines(av[0], av[1], av[2])), 0);
+    struct stat sb;
+    if (!o.steam.empty() && (stat(o.steam.c_str(), &sb) != 0 || !S_ISREG(sb.st_mode))) {
+        fprintf(stderr, "blockie-shot: --steam takes a steam.tsv file, not %s\n", o.steam.c_str());
+        return false;
+    }
+    if (!o.steam.empty() && read_steam(o.steam).signed_in)
+        sp.set_row(kSteamRow, steam_row(true), 0);
+    sp.on_action = [](const std::string& id) { fprintf(stderr, "blockie-shot: action %s\n", id.c_str()); };
     for (const std::string& h : o.hides)
         sp.set_row(h, SettingsRowState{}, 0);
     if (!o.toast.empty()) {
@@ -1321,6 +1331,11 @@ public:
                 fprintf(stderr, "blockie-shot: %lld ms reversal at e %lld ms\n", (long long)ctl.t0(),
                         (long long)ctl.back_e());
             }
+            if (ctl.active() && ctl.t0() != start_logged_) {
+                start_logged_ = ctl.t0();
+                fprintf(stderr, "blockie-shot: %lld ms %s start from %d us to %d us\n", (long long)ctl.t0(),
+                        fold_kind_name(ctl.kind()), ctl.from_us(), ctl.to_us());
+            }
             const SlidePlan* sp = flow.plan();
             bool swap = sp && sp->left == LeftMove::T5 && ctl.active() &&
                         (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse);
@@ -1875,6 +1890,7 @@ private:
     fx seen_toast_e_ = 0;
     bool collapse_landed_ = false;
     int64_t back_logged_ = -1;
+    int64_t start_logged_ = -1;
     Buffer rest_sel_;
     Buffer rest_det_;
     FILE* blocks_ = nullptr;
@@ -3040,8 +3056,9 @@ constexpr int kMenuStripPx = 37;
 
 struct StoreShotOpts {
     bool on = false;
-    std::string port, helper;
+    std::string port, helper, steam;
     bool offline = false;
+    bool steampage = false;
     int64_t cap = -1;
     int64_t art_delay = 0;
 };
@@ -3074,8 +3091,13 @@ std::vector<std::string> store_rows(const HomeFlow& flow, const PortPage& pp, Sc
         out.push_back(name + " " + std::to_string(r.x0) + " " + std::to_string(r.y0) + " " + std::to_string(r.x1) +
                       " " + std::to_string(r.y1) + (art ? " art" : " text"));
     };
-    kind = top == Screen::Port ? "port" : flow.nav.store ? "s-a" : "home";
-    if (top == Screen::Port) {
+    kind = top == Screen::Port         ? "port"
+           : top == Screen::SteamLogin ? "steam"
+           : flow.nav.store            ? "s-a"
+                                       : "home";
+    if (top == Screen::SteamLogin) {
+        row("steam-box", login_box(), true);
+    } else if (top == Screen::Port) {
         row("port-art", Rect{kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide}, true);
         int pitch = px(sz().rowHeight);
         for (int k = 0; k < pp.action_count(tf); k++) {
@@ -3126,6 +3148,7 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
     while (ports.size() > 1 && ports.back() == '/')
         ports.pop_back();
     std::string catalog_path = ports + kCatalogDb;
+    std::string steam_path = so.steam.empty() ? ports + kSteamTsv : so.steam;
     std::vector<HelperLine> hlines;
     if (!so.helper.empty()) {
         std::vector<std::string> raw;
@@ -3140,18 +3163,24 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
             size_t a = l.find(' '), b = a == std::string::npos ? a : l.find(' ', a + 1);
             std::string cmd = l.substr(0, a), ms = a == std::string::npos ? std::string() : l.substr(a + 1, b - a - 1);
             std::string rest = b == std::string::npos ? std::string() : l.substr(b + 1);
-            bool known = cmd == "refresh" || cmd == "install" || cmd == "update" || cmd == "uninstall";
+            bool known = cmd == "refresh" || cmd == "install" || cmd == "update" || cmd == "uninstall" ||
+                         cmd == "steam-get" || cmd == "steam-logout";
             bool digits = !ms.empty() && ms.size() <= 7 && ms.find_first_not_of("0123456789") == std::string::npos;
             bool shape = rest == "ignore-term" || rest.compare(0, 9, "progress\t") == 0 ||
-                         rest.compare(0, 5, "done\t") == 0 ||
-                         rest.compare(0, 5, "fail\t") == 0 || (cmd == "refresh" && rest.compare(0, 8, "catalog ") == 0);
-            if (rest.compare(0, 8, "catalog ") == 0) {
-                std::string path = real_path(rest.substr(8));
+                         rest.compare(0, 5, "done\t") == 0 || rest.compare(0, 5, "fail\t") == 0 ||
+                         (cmd == "steam-get" && rest.compare(0, 3, "qr\t") == 0) ||
+                         (cmd == "refresh" && rest.compare(0, 8, "catalog ") == 0) || rest.compare(0, 6, "steam ") == 0;
+            for (const char* key : {"catalog ", "steam "}) {
+                size_t n = std::strlen(key);
+                if (rest.compare(0, n, key) != 0)
+                    continue;
+                std::string path = real_path(rest.substr(n));
                 shape = shape && !root.empty() && path.compare(0, root.size() + 1, root + "/") == 0;
-                rest = "catalog " + path;
+                rest = key + path;
             }
             if (!known || !digits || !shape || l.size() > kHelperLineCap) {
-                fprintf(stderr, "blockie-shot: --helperlines takes CMD MS LINE, not %s\n", l.c_str());
+                fprintf(stderr, "blockie-shot: --helperlines takes CMD MS LINE, refused a %zu byte %s line\n", l.size(),
+                        known ? cmd.c_str() : "unknown");
                 return 2;
             }
             hlines.push_back({cmd, std::atoll(ms.c_str()), rest});
@@ -3168,6 +3197,7 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
     Children kids;
     PortsHelper helper;
     StoreFlow sf(flow, portp, helper, kids);
+    sf.l2 = so.steampage;
     ToastStrip toast;
     Repeat rep;
     std::unordered_map<int64_t, Art> arts;
@@ -3273,6 +3303,7 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
         return false;
     };
     sf.host.index = index;
+    sf.host.steam = [&]() { return read_steam(steam_path); };
     sf.host.rescan = [&]() {
         flow.home_model().systems[0].games = (int)index().size();
         if (!nav.store && nav.system_view && nav.focus == 0 && nav.stack.empty())
@@ -3293,7 +3324,7 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
         if (so.art_delay > 0) {
             int64_t key = it ? it->id + kStoreIdBase : -1;
             auto show = [&](const Art& art) {
-                if (nav.top() == Screen::Port)
+                if (nav.top() == Screen::Port || nav.top() == Screen::SteamLogin)
                     portp.set_art(art);
             };
             if (key == shot_want) {
@@ -3380,6 +3411,8 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
     flow.draw_page = [&](Canvas& c, Screen s, int64_t t) {
         if (s == Screen::Port)
             portp.draw(c, ink, t);
+        else if (s == Screen::SteamLogin)
+            portp.draw_login(c, ink, t);
     };
     flow.page_input = [&](Screen s, PadAction a, bool r) { return sf.page_input(s, a, r, now); };
     flow.page_seed_y = [&](Screen s) { return sf.seed_y(s); };
@@ -3450,6 +3483,8 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
         wrote = fprintf(rows, "fold %lld step %s %d 0 0 0 0 %d from\n", (long long)fold_t0, fk, rev, sid) > 0 && wrote;
         put_surface(store_rows(flow, portp, nav.top(), now, kind, true));
         wrote = fprintf(rows, "fold %lld step %s %d 0 0 0 0 %d to\n", (long long)fold_t0, fk, rev, sid) > 0 && wrote;
+        fprintf(stderr, "blockie-shot: %lld ms %s start from %d us to %d us\n", (long long)fold_t0, fk,
+                flow.ctl.from_us(), flow.ctl.to_us());
     };
     enum class Gate { Drop, Keep, Act };
     auto input = [&](PadAction a, bool r) {
@@ -3501,6 +3536,10 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
             hnext++;
             if (h.line.compare(0, 8, "catalog ") == 0) {
                 catalog_path = h.line.substr(8);
+                return;
+            }
+            if (h.line.compare(0, 6, "steam ") == 0) {
+                steam_path = h.line.substr(6);
                 return;
             }
             if (h.line == "ignore-term")
@@ -3625,17 +3664,21 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
             std::vector<std::string> set = store_rows(flow, portp, top, tf, kind);
             if (set != logged)
                 put_surface(set);
-            bool moving = flow.animating(tf) || (top == Screen::Port && portp.animating(tf)) || toast.animating(tf);
+            bool moving = flow.animating(tf) || (top == Screen::Port && portp.animating(tf)) ||
+                          (top == Screen::SteamLogin && portp.login_animating(tf)) || toast.animating(tf);
             std::string focus = top == Screen::Port ? std::to_string(portp.focus())
                                 : nav.system_view   ? std::to_string(nav.sys_focus)
                                                     : std::to_string(nav.focus);
             bool toasting = toast.visible(tf) || (top == Screen::Port && portp.toasting(tf));
-            bool dialog = top == Screen::Port && portp.dialog_shown();
+            bool dialog = (top == Screen::Port && portp.dialog_shown()) ||
+                          (top == Screen::SteamLogin && portp.login_dialog_shown());
             wrote = fprintf(side, "%d %lld %d %d 0 1 0 0 0 0 kind=%s rows=%d focus=%s pivot=- working=%s dialog=%d "
-                                  "toast=%d online=%d%s%s\n",
+                                  "toast=%d online=%d qr=%d%s%s\n",
                             written, (long long)tf, flow.boundary(tf), moving ? 1 : 0, kind.c_str(), sid,
                             focus.c_str(), helper.running() ? run_cmd.c_str() : "none", dialog ? 1 : 0,
-                            toasting ? 1 : 0, online ? 1 : 0, keys.empty() ? "" : " keys=", keys.c_str()) > 0 &&
+                            toasting ? 1 : 0, online ? 1 : 0,
+                            (top == Screen::Port || top == Screen::SteamLogin) && portp.qr_shown() ? 1 : 0,
+                            keys.empty() ? "" : " keys=", keys.c_str()) > 0 &&
                     wrote;
             written++;
         }
@@ -3647,7 +3690,9 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
             rc = 1;
             break;
         }
-        bool page_moving = nav.top() == Screen::Port && (portp.animating(tf) || portp.deadline(tf) >= 0);
+        bool login_top = nav.top() == Screen::SteamLogin;
+        bool page_moving = (nav.top() == Screen::Port && (portp.animating(tf) || portp.deadline(tf) >= 0)) ||
+                           (login_top && (portp.login_animating(tf) || portp.deadline(tf, false) >= 0));
         bool pending = helper.running() || sf.deadline() >= 0 || toast.animating(tf) || toast.visible(tf) ||
                        !later.empty();
         if (next >= steps.size() && !rep.active() && !pending && !flow.animating(tf) && !page_moving && tail-- <= 0)
@@ -3905,9 +3950,10 @@ int main(int argc, char** argv)
             drive.helper = h == "install" ? HelperOp::Install
                            : h == "update" ? HelperOp::Update
                            : h == "remove" ? HelperOp::Remove
-                                           : HelperOp::None;
+                           : h == "steam-get" ? HelperOp::SteamGet
+                                              : HelperOp::None;
             if (drive.helper == HelperOp::None) {
-                fprintf(stderr, "blockie-shot: --helper takes install, update or remove\n");
+                fprintf(stderr, "blockie-shot: --helper takes install, update, remove or steam-get\n");
                 return 2;
             }
         }
@@ -3949,8 +3995,12 @@ int main(int argc, char** argv)
             store_shot.port = argv[++i];
         else if (a == "--helperlines" && i + 1 < argc)
             store_shot.helper = argv[++i];
+        else if (a == "--steam" && i + 1 < argc)
+            store_shot.steam = page_opts.steam = argv[++i];
         else if (a == "--offline")
             store_shot.offline = true;
+        else if (a == "--steampage")
+            store_shot.steampage = true;
         else if (out.empty())
             out = a;
         else {
@@ -3983,7 +4033,7 @@ int main(int argc, char** argv)
                 " [--sheetrows 6|7] [--zone ID] [--zone-missing] [--zonetab PATH] [--set ID=VALUE] [--hide ID]"
                 " [--battery CAP:STATUS|unknown] [--volume PCT[:muted]|fail] [--radio on|off|gone]"
                 " [--storage FREE:TOTAL:SYSFREE:SYSTOTAL|nocard:SYSFREE:SYSTOTAL] [--about OS_RELEASE|FRONTEND|KERNEL]"
-                " [--toast LINE1|LINE2] [--scatter]"
+                " [--toast LINE1|LINE2] [--steam STEAM.TSV] [--scatter]"
                 " [--gamedetail SYSTEM|TITLE] [--bt unavailable|off|empty|list|searching|sheet|confirm [--hp]]\n"
                 "       blockie-shot --pageflip push|pop --frames DIR [same options]\n"
                 "       blockie-shot --page settings --frames DIR [--script KEY|fail|missing:d|u:MS,...] [--from MS]"
@@ -4001,7 +4051,8 @@ int main(int argc, char** argv)
                 " [--artless-sys N[,N...]]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [--startup-at MS] [--input-lead MS]"
                 " [--exit quit|crash|oom|busy|config|exec|core|audio|spawn] [--quitstamp] [--port]"
-                " [--helper install|update|remove] [--portsdir DATA/roms/ports] [--libretro DIR] [same options]\n"
+                " [--helper install|update|remove|steam-get] [--portsdir DATA/roms/ports] [--libretro DIR]"
+                " [same options]\n"
                 "       blockie-shot --portmsg CALLS [OUT.png] [--frames DIR] [--plate black|FILE.png] [--at MS]"
                 " [--tail N] [--theme light|dark]\n"
                 "         CALLS lines: AT ARGV... [-- LINE...]; ARGV is blockie-portmsg's argv, the words after --"
@@ -4009,8 +4060,8 @@ int main(int argc, char** argv)
                 "         AT line -- LINE... feeds the open --progress, AT eof ends its stdin, AT key:K[:d|:u]"
                 " with K up down left right accept back context prev next start, AT end stops the scope\n"
                 "       blockie-shot --drive --store [OUT.png] [--frames DIR] --portsdir DATA/roms/ports"
-                " [--storeport NAME] [--helperlines FILE] [--offline] [--script KEY:d|u:MS,...] [--at MS] [--from MS]"
-                " [--tail N] [--light] [--cap MS] [--art-delay MS]\n"
+                " [--storeport NAME] [--helperlines FILE] [--steam STEAM.TSV] [--steampage] [--offline]"
+                " [--script KEY:d|u:MS,...] [--at MS] [--from MS] [--tail N] [--light] [--cap MS] [--art-delay MS]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm|pause [OUT.png] [--frames DIR] [--gates FILE]"
                 " [--pickgates FILE] [--plate home|plain|FILE.png] [--idle MS]"

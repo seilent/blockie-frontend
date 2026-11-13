@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ports.h"
@@ -10,11 +11,13 @@
 namespace fd {
 
 constexpr const char* kCatalogDb = "/.blockie/catalog.db";
+constexpr const char* kSteamTsv = "/.blockie/steam.tsv";
 constexpr const char* kStoreImages = "/PortMaster/config/images_";
 constexpr int kCatalogVersion = 1;
 constexpr size_t kNameCap = 128;
 constexpr size_t kTextCap = 256;
 constexpr size_t kBodyCap = 64u << 10;
+constexpr size_t kSteamTsvCap = 64u << 10;
 constexpr int64_t kStoreIdBase = int64_t(1) << 40;
 constexpr int64_t kStoreShotBase = int64_t(2) << 40;
 constexpr int64_t kCatalogStaleS = 24 * 3600;
@@ -54,11 +57,17 @@ struct StoreItem {
     int64_t size = 0;
     int64_t game_id = -1;
     bool installed = false, update = false;
+    bool steam = false;
 };
 
 struct StoreGenre {
     std::string word;
     std::vector<int> items;
+};
+
+struct SteamState {
+    bool signed_in = false;
+    std::unordered_map<std::string, bool> ports;
 };
 
 std::string cap_text(const std::string& s, size_t cap);
@@ -68,6 +77,7 @@ std::string images_base(const std::string& ports_dir);
 std::string confined_in(const std::string& path, const std::string& base);
 std::string confined_image(const std::string& path, const std::string& ports_dir);
 bool read_catalog(const std::string& path, const std::string& ports_dir, Catalog& out);
+SteamState read_steam(const std::string& path);
 
 class Library;
 std::vector<IndexPort> index_ports(Library& lib);

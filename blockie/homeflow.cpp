@@ -62,6 +62,7 @@ void HomeFlow::setup()
     ctl.keep = [this]() {
         kept_ = model;
         kept_nav_ = nav;
+        kept_t9_ = t9_.shown(now_);
     };
     ctl.begun = [this]() {
         bool l5 = ctl.from_target() && !ctl.reversed();
@@ -443,6 +444,11 @@ SelectorModel HomeFlow::posed(const SelectorModel& base, const Nav& n, bool at_t
         m.game_system = tt.system;
         m.game_next = tt.next;
     }
+    if (&base == &kept_ && n.pane == Pane::Details) {
+        m.game_title = kept_t9_.title;
+        m.game_system = kept_t9_.system;
+        m.game_next = kept_t9_.next;
+    }
     if (ctl.folding(t) && ctl.kind() == FoldKind::Startup) {
         m.poses.resize(m.systems.size());
         for (int i = 0; i < (int)m.systems.size(); i++) {
@@ -495,6 +501,7 @@ void HomeFlow::show_recent(int k)
     bool in = k >= 0 && k < (int)home.recent.size();
     model.game_title = in ? home.recent[k].name : std::string();
     model.game_system = in ? home.recent[k].system : std::string();
+    model.game_next = in ? home.recent[k].next : std::string();
 }
 
 FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open)
@@ -676,12 +683,14 @@ FoldPlay HomeFlow::page_play(Screen base, bool push)
             run->rows.insert(run->rows.end(), h.letters.begin(), h.letters.end());
             run->rows.insert(run->rows.end(), h.tabs.begin(), h.tabs.end());
         }
+        run->pop = !push;
         next_run_ = run;
         return page_fold(run);
     }
     FoldPlan plan = page_seed_ >= 0 ? fold_page_row(page_seed_) : fold_page(nav.focus - nav.menu_top);
     FoldPlay p;
     p.duration = fold_duration(plan);
+    p.kept_from = !push && over == Screen::SteamLogin;
     auto shared = std::make_shared<const FoldPlan>(plan);
     p.forward = [shared](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
         fold_compose(a, b, dst, *shared, t);
@@ -770,6 +779,20 @@ void HomeFlow::swap_tiles(int64_t now, const std::function<void()>& change)
         kept_.section_label = model.section_label;
         redraw_ = true;
         want_ = Want::Swap;
+        start_wanted();
+        InputResult r;
+        r.changed = true;
+        return r;
+    });
+    sync(ctl.started());
+}
+
+void HomeFlow::page_change(int64_t now, const std::function<void()>& change)
+{
+    now_ = now;
+    want_ = Want::None;
+    ctl.input(now, [&]() {
+        change();
         start_wanted();
         InputResult r;
         r.changed = true;

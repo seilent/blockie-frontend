@@ -11,7 +11,6 @@ namespace fd {
 
 namespace {
 
-constexpr int ms_of(fx t) { return t >> kFxBits; }
 int px64(pos64 u) { return (int)((((u * ppu()) >> kFxBits) + kHalf) >> kFxBits); }
 int index_px(fx at, int pitch) { return (int)(((int64_t)at * pitch + kHalf) >> kFxBits); }
 
@@ -66,7 +65,7 @@ void BtPage::open(int64_t now)
 
 void BtPage::close()
 {
-    for (Overlay* o : {&sheet_, &dialog_}) {
+    for (BtOverlay* o : {&sheet_, &dialog_}) {
         o->shown = false;
         o->fade.set(0);
         o->scale.set(kOne);
@@ -92,7 +91,7 @@ void BtPage::set_model(const BtState& s, int64_t now)
         return;
     if (state_.prompt.kind == BtPrompt::None) {
         if (dialog_.shown)
-            hide(dialog_, ms_of(tok::motion_dialogHide), now);
+            hide(dialog_, fx_round(tok::motion_dialogHide), now);
         return;
     }
     show_dialog(now);
@@ -111,7 +110,7 @@ void BtPage::send(BtCmd::Type t, const std::string& path, bool yes)
 
 BtPage::Act BtPage::action(PadAction a, bool repeat, int64_t now)
 {
-    for (Overlay* o : {&sheet_, &dialog_})
+    for (BtOverlay* o : {&sheet_, &dialog_})
         if (!o->fade.done(now) || !o->scale.done(now)) {
             o->fade.set(o->fade.to);
             o->scale.set(o->scale.to);
@@ -191,7 +190,7 @@ void BtPage::open_sheet(const BtRow& r, int64_t now)
     sheet_.focus = 0;
     sheet_.bar.set(0);
     sheet_.scale.set(kOne);
-    sheet_.fade.run(now, sheet_.fade.at(now), kOne, ms_of(tok::motion_sheet), Curve::Decel);
+    sheet_.fade.run(now, sheet_.fade.at(now), kOne, fx_round(tok::motion_sheet), Curve::Decel);
 }
 
 void BtPage::show_dialog(int64_t now)
@@ -214,11 +213,11 @@ void BtPage::show_dialog(int64_t now)
     dirty_ = true;
     if (!fresh)
         return;
-    dialog_.fade.run(now, 0, kOne, ms_of(tok::motion_dialog), Curve::Pop);
-    dialog_.scale.run(now, tok::motion_dialogScale, kOne, ms_of(tok::motion_dialog), Curve::BezierPop);
+    dialog_.fade.run(now, 0, kOne, fx_round(tok::motion_dialog), Curve::Pop);
+    dialog_.scale.run(now, tok::motion_dialogScale, kOne, fx_round(tok::motion_dialog), Curve::BezierPop);
 }
 
-void BtPage::hide(Overlay& o, int ms, int64_t now)
+void BtPage::hide(BtOverlay& o, int ms, int64_t now)
 {
     o.shown = false;
     o.fade.run(now, o.fade.at(now), 0, ms, &o == &sheet_ ? Curve::Decel : Curve::Pop);
@@ -226,7 +225,7 @@ void BtPage::hide(Overlay& o, int ms, int64_t now)
     dirty_ = true;
 }
 
-void BtPage::move(Overlay& o, int delta, int64_t now)
+void BtPage::move(BtOverlay& o, int delta, int64_t now)
 {
     int n = (int)o.items.size();
     if (n == 0)
@@ -236,7 +235,7 @@ void BtPage::move(Overlay& o, int delta, int64_t now)
         return;
     o.focus = to;
     if (o.fade.done(now))
-        o.bar.run(now, o.bar.at(now), fx_int(to), ms_of(tok::motion_focusCursor), Curve::Sine);
+        o.bar.run(now, o.bar.at(now), fx_int(to), fx_round(tok::motion_focusCursor), Curve::Sine);
     else
         o.bar.set(fx_int(to));
 }
@@ -257,11 +256,11 @@ void BtPage::sheet_action(PadAction a, bool repeat, int64_t now)
             send(sheet_.connected ? BtCmd::Disconnect : BtCmd::Connect, sheet_.path);
         else
             send(BtCmd::Forget, sheet_.path);
-        hide(sheet_, ms_of(tok::motion_sheet), now);
+        hide(sheet_, fx_round(tok::motion_sheet), now);
         break;
     case PadAction::Back:
         if (!repeat)
-            hide(sheet_, ms_of(tok::motion_sheet), now);
+            hide(sheet_, fx_round(tok::motion_sheet), now);
         break;
     default:
         break;
@@ -286,7 +285,7 @@ void BtPage::dialog_action(PadAction a, bool repeat, int64_t now)
             send(BtCmd::Answer, dialog_.path, a == PadAction::Accept && dialog_.focus == 0);
         else
             send(BtCmd::Dismiss, dialog_.path);
-        hide(dialog_, ms_of(tok::motion_dialogHide), now);
+        hide(dialog_, fx_round(tok::motion_dialogHide), now);
         break;
     default:
         break;
@@ -295,7 +294,7 @@ void BtPage::dialog_action(PadAction a, bool repeat, int64_t now)
 
 void BtPage::land(int64_t now)
 {
-    for (Overlay* o : {&sheet_, &dialog_}) {
+    for (BtOverlay* o : {&sheet_, &dialog_}) {
         o->fade.set(o->fade.to);
         o->scale.set(o->scale.to);
         o->bar.set(fx_int(o->focus));
@@ -305,13 +304,13 @@ void BtPage::land(int64_t now)
     dirty_ = true;
 }
 
-bool BtPage::visible(const Overlay& o, int64_t now) const { return o.shown || o.fade.at(now) > 0; }
+bool BtPage::visible(const BtOverlay& o, int64_t now) const { return o.shown || o.fade.at(now) > 0; }
 
 bool BtPage::moving(int64_t at) const
 {
     if (list_.animating(at))
         return true;
-    for (const Overlay* o : {&sheet_, &dialog_})
+    for (const BtOverlay* o : {&sheet_, &dialog_})
         if (!o->fade.done(at) || !o->scale.done(at) || !o->bar.done(at))
             return true;
     return false;
@@ -342,8 +341,8 @@ void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now)
     draw_sweep(c, now);
     if (visible(sheet_, now))
         draw_sheet(c, ink, now);
-    if (visible(dialog_, now))
-        draw_dialog(c, ink, now);
+    if (visible(dialog_, now) && !draw_dialog(c, fonts_, ink, dialog_, now, t, false))
+        retry_ = true;
     c.set_clip(keep);
     dirty_ = false;
     drawn_secs_ = bt_seconds(state_, now);
@@ -426,33 +425,6 @@ void BtPage::draw_sheet(Canvas& c, InkLayer& ink, int64_t now)
     }
     int bx = edge - px(tok::focus_barOffset), by = rows_top + index_px(sheet_.bar.at(now), pitch);
     k.blend({bx, by, bx + px(tok::focus_barWidth), by + pitch}, kWhite, alpha256(p));
-    ink.compose(c.surface(), t.ink);
-    if (!ok)
-        retry_ = true;
-}
-
-void BtPage::draw_dialog(Canvas& c, InkLayer& ink, int64_t now)
-{
-    const Theme& t = theme();
-    fx a = dialog_.fade.at(now);
-    Zoom z{dialog_.scale.at(now), kPortraitW * 32, kPortraitH * 32};
-    int edge = px(tok::edge), pitch = px(sz().settingsPitch), top = px(tok::contentTop);
-    c.blend(kScreen, t.scrim_dialog, t.scrim_dialog_a256 * alpha256(a) >> 8);
-    Canvas& k = ink.begin(kScreen);
-    TextStyle ts = role::dialogTitle.style(), is = sz().dialogItem.style();
-    bool ok = fonts_.draw(k, ts, dialog_.title.c_str(), edge * 64, px(tok::pivotBaseline), kWhite,
-                          alpha256(fx_mul(role::dialogTitle.alpha, a)), z);
-    int asc = fonts_.ascent(is.px), desc = fonts_.descent(is.px);
-    for (size_t i = 0; i < dialog_.items.size(); i++) {
-        int base = top + (int)i * pitch + (pitch - asc - desc) / 2 + asc;
-        fx ia = (int)i == dialog_.focus ? sz().dialogItem.alpha : tok::type_dialogItem_alphaDim;
-        ok = fonts_.draw(k, is, dialog_.items[i].c_str(), edge * 64, base, kWhite, alpha256(fx_mul(ia, a)), z) && ok;
-    }
-    if (!dialog_.items.empty()) {
-        int bx = edge - px(tok::focus_barOffset), by = top + index_px(dialog_.bar.at(now), pitch);
-        Rect bar{bx, by, bx + px(tok::focus_barWidth), by + pitch};
-        k.fill_aa(Rect64::of(bar, z), kWhite, alpha256(a));
-    }
     ink.compose(c.surface(), t.ink);
     if (!ok)
         retry_ = true;

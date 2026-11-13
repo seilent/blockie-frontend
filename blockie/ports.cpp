@@ -35,6 +35,8 @@ bool number(const std::string& s, int64_t& out)
     return true;
 }
 
+bool takes_name(HelperCmd c) { return c != HelperCmd::Refresh && c != HelperCmd::SteamLogout; }
+
 }
 
 const char* helper_word(HelperCmd c)
@@ -44,6 +46,8 @@ const char* helper_word(HelperCmd c)
     case HelperCmd::Install: return "install";
     case HelperCmd::Update: return "update";
     case HelperCmd::Remove: return "uninstall";
+    case HelperCmd::SteamGet: return "steam-get";
+    case HelperCmd::SteamLogout: return "steam-logout";
     }
     return "refresh";
 }
@@ -54,9 +58,21 @@ HelperOp helper_op(HelperCmd c)
     case HelperCmd::Install: return HelperOp::Install;
     case HelperCmd::Update: return HelperOp::Update;
     case HelperCmd::Remove: return HelperOp::Remove;
-    case HelperCmd::Refresh: break;
+    case HelperCmd::SteamGet: return HelperOp::SteamGet;
+    case HelperCmd::Refresh:
+    case HelperCmd::SteamLogout: break;
     }
     return HelperOp::None;
+}
+
+bool helper_qr_url(const std::string& url)
+{
+    if (url.empty() || url.size() > kHelperQrCap || url.compare(0, 8, "https://") != 0)
+        return false;
+    for (char ch : url)
+        if ((unsigned char)ch < 0x21 || (unsigned char)ch > 0x7E)
+            return false;
+    return true;
 }
 
 PortsHelper::~PortsHelper()
@@ -77,7 +93,11 @@ void PortsHelper::line(const std::string& l)
             on_progress(p);
         return;
     }
-    std::string want = cmd_ == HelperCmd::Refresh ? std::string("refresh") : name_;
+    if (f[0] == "qr") {
+        qr(f.size() == 2 && helper_qr_url(f[1]) ? f[1] : std::string());
+        return;
+    }
+    std::string want = takes_name(cmd_) ? name_ : std::string(helper_word(cmd_));
     if (f[0] == "done" && f.size() == 2 && f[1] == want) {
         have_ = true;
         last_ = HelperResult{cmd_, name_, true, ""};
@@ -91,6 +111,8 @@ bool PortsHelper::ask(Children& kids, HelperCmd c, const std::string& name)
 {
     kids_ = &kids;
     if (running()) {
+        if (queued_ && (next_cmd_ != c || next_name_ != name) && on_result)
+            on_result(HelperResult{next_cmd_, next_name_, false, "cancel"});
         queued_ = true;
         next_cmd_ = c;
         next_name_ = name;
@@ -129,11 +151,12 @@ bool PortsHelper::holds(const std::string& name, HelperCmd& c) const
 bool PortsHelper::start(HelperCmd c, const std::string& name)
 {
     std::vector<std::string> argv{path, helper_word(c)};
-    if (c != HelperCmd::Refresh)
+    if (takes_name(c))
         argv.push_back(name);
     cmd_ = c;
-    name_ = c == HelperCmd::Refresh ? std::string() : name;
+    name_ = takes_name(c) ? name : std::string();
     buf_.clear();
+    skip_ = false;
     have_ = false;
     stopped_ = false;
     kill_at_ = -1;
@@ -173,12 +196,27 @@ void PortsHelper::drain()
         buf_.append(chunk, (size_t)r);
         size_t nl;
         while ((nl = buf_.find('\n')) != std::string::npos) {
-            line(buf_.substr(0, nl));
+            if (skip_)
+                skip_ = false;
+            else if (nl <= kHelperLineCap)
+                line(buf_.substr(0, nl));
+            else if (buf_.compare(0, 3, "qr\t") == 0)
+                qr(std::string());
             buf_.erase(0, nl + 1);
         }
-        if (buf_.size() > kHelperLineCap)
+        if (buf_.size() > kHelperLineCap) {
+            if (!skip_ && buf_.compare(0, 3, "qr\t") == 0)
+                qr(std::string());
             buf_.clear();
+            skip_ = true;
+        }
     }
+}
+
+void PortsHelper::qr(const std::string& url)
+{
+    if (cmd_ == HelperCmd::SteamGet && !stopped_ && on_qr)
+        on_qr(url);
 }
 
 void PortsHelper::readable() { drain(); }

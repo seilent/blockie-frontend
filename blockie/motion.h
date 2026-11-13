@@ -13,6 +13,7 @@ struct FoldPlay {
     int64_t duration = 0;
     int64_t tail = 0;
     bool clamp_back = false;
+    bool kept_from = false;
     bool details = false;
     Rect to_bound = kScreen;
     std::function<Rect(const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t prev)> forward;

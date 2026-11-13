@@ -49,6 +49,7 @@ struct PageRun {
     eng::Frame frame;
     std::vector<PageRow> rows;
     int pair = 0;
+    bool pop = false;
 };
 
 Rect page_art(int split, bool band);

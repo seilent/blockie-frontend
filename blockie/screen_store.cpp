@@ -26,38 +26,6 @@ void blit_art(Canvas& c, const Image* art, Rect r, int a)
     c.blit(*art, r.x0 + (r.x1 - r.x0 - art->w) / 2, r.y0 + (r.y1 - r.y0 - art->h) / 2, a);
 }
 
-void open_overlay(StoreOverlay& o, int focus, int64_t now)
-{
-    o.shown = true;
-    o.focus = focus;
-    o.bar.set(fx_int(focus));
-    o.fade.run(now, 0, kOne, ms_of(tok::motion_dialog), Curve::Pop);
-    o.scale.run(now, tok::motion_dialogScale, kOne, ms_of(tok::motion_dialog), Curve::BezierPop);
-}
-
-void hide_overlay(StoreOverlay& o, int64_t now)
-{
-    o.shown = false;
-    o.fade.run(now, o.fade.at(now), 0, ms_of(tok::motion_dialogHide), Curve::Pop);
-    o.scale.set(o.scale.at(now));
-}
-
-bool overlay_moving(const StoreOverlay& o, int64_t now)
-{
-    return !o.fade.done(now) || !o.scale.done(now) || !o.bar.done(now);
-}
-
-void move_overlay(StoreOverlay& o, int to, int64_t now)
-{
-    if (to == o.focus)
-        return;
-    o.focus = to;
-    if (o.fade.done(now))
-        o.bar.run(now, o.bar.at(now), fx_int(to), ms_of(tok::motion_focusCursor), Curve::Sine);
-    else
-        o.bar.set(fx_int(to));
-}
-
 void draw_toast_of(Canvas& c, Fonts& f, InkLayer& ink, const ToastClock& tc, int64_t now, const Theme& t)
 {
     if (tc.phase(now) == 0)
@@ -70,6 +38,20 @@ void draw_toast_of(Canvas& c, Fonts& f, InkLayer& ink, const ToastClock& tc, int
     draw_toast(c, f, ink, v, t);
 }
 
+struct StopWords {
+    const char* title;
+    const char* keep;
+};
+
+StopWords stop_words(HelperCmd cmd)
+{
+    if (cmd == HelperCmd::SteamGet)
+        return {"stop getting files", "keep getting files"};
+    if (cmd == HelperCmd::Update)
+        return {"stop update", "keep updating"};
+    return {"stop install", "keep installing"};
+}
+
 }
 
 PortPage::PortPage(Fonts& f, GlyphCache& g) : fonts_(f), glyphs_(g) {}
@@ -79,11 +61,14 @@ std::vector<PortPage::Action> PortPage::actions() const
     std::vector<Action> out;
     bool installing = working_ && cmd_ == HelperCmd::Install;
     bool updating = working_ && cmd_ == HelperCmd::Update;
+    bool getting = working_ && cmd_ == HelperCmd::SteamGet;
     if (!item_.installed) {
         if ((online_ || installing) && item_.port >= 0)
             out.push_back({Kind::Install, "install", "plus"});
         return out;
     }
+    if (item_.steam && !item_.update && (online_ || getting))
+        out.push_back({Kind::SteamGet, "get files", "disc"});
     out.push_back({Kind::Play, "play", "play"});
     if (item_.update && (online_ || updating))
         out.push_back({Kind::Update, "update", "repeat"});
@@ -108,9 +93,14 @@ void PortPage::open(const StoreItem& it, bool online, bool working)
     words_.clear();
     arc_ = 0;
     has_pending_ = false;
-    dialog_ = StoreOverlay{};
+    dialog_ = Overlay{};
+    login_dialog_ = Overlay{};
     dialog_.fade.set(0);
+    login_dialog_.fade.set(0);
+    login_wait_ = false;
     art_.reset();
+    copying_ = false;
+    qr_ = QrGrid();
     toast_.hide();
     layout();
 }
@@ -204,6 +194,8 @@ void PortPage::set_working(bool on, HelperCmd cmd, bool queued, int64_t now)
     if (!on)
         return;
     arc_ = 0;
+    copying_ = false;
+    qr_ = QrGrid();
     no_total_ = cmd == HelperCmd::Remove && !queued;
     spin0_ = now;
     words_ = queued                      ? progress_words(HelperProgress{"wait", 0, -1})
@@ -220,6 +212,13 @@ void PortPage::progress(const HelperProgress& p, int64_t now)
 {
     if (!working_)
         return;
+    if (p.what != "login")
+        qr_ = QrGrid();
+    if (p.what == "copy" && !copying_) {
+        copying_ = true;
+        if (dialog_.shown && stop_dialog_)
+            hide_overlay(dialog_, now, true);
+    }
     if (now - shown_at_ < kProgressMs) {
         pending_ = p;
         has_pending_ = true;
@@ -235,11 +234,13 @@ void PortPage::progress(const HelperProgress& p, int64_t now)
 void PortPage::finished(bool done, int64_t now)
 {
     working_ = false;
+    copying_ = false;
+    qr_ = QrGrid();
     has_pending_ = false;
     arc_ = done ? 360 : 0;
     hold_until_ = done ? now + kPortDoneHoldMs : now;
     if (dialog_.shown && stop_dialog_)
-        hide_overlay(dialog_, now);
+        hide_overlay(dialog_, now, true);
     if (!done)
         words_.clear();
 }
@@ -261,7 +262,7 @@ void PortPage::tick(int64_t now)
     }
 }
 
-int64_t PortPage::deadline(int64_t now) const
+int64_t PortPage::deadline(int64_t now, bool dots) const
 {
     int64_t d = toast_.deadline(now);
     auto take = [&](int64_t at) {
@@ -272,7 +273,7 @@ int64_t PortPage::deadline(int64_t now) const
         take(shown_at_ + kProgressMs);
     if (arc_ == 360)
         take(hold_until_);
-    if (working_ && no_total_)
+    if (dots && working_ && no_total_)
         take(now + kBusyFrameMs);
     return d;
 }
@@ -280,27 +281,37 @@ int64_t PortPage::deadline(int64_t now) const
 void PortPage::dialog(bool stop, int64_t now)
 {
     stop_dialog_ = stop;
-    bool upd = cmd_ == HelperCmd::Update;
-    dialog_.title = stop ? (upd ? "stop update" : "stop install") : "remove " + item_.title;
-    dialog_.items = stop ? std::vector<std::string>{"stop", upd ? "keep updating" : "keep installing"}
-                         : std::vector<std::string>{"remove", "cancel"};
-    open_overlay(dialog_, 1, now);
+    if (stop) {
+        open_stop(dialog_, now);
+        return;
+    }
+    dialog_.title = "remove " + item_.title;
+    dialog_.items = {"remove", "cancel"};
+    open_overlay(dialog_, 1, now, true);
 }
 
-void PortPage::dialog_action(PadAction a, bool repeat, int64_t now, Act& out)
+void PortPage::open_stop(Overlay& d, int64_t now)
+{
+    StopWords w = stop_words(cmd_);
+    d.title = w.title;
+    d.items = {"stop", w.keep};
+    open_overlay(d, 1, now, true);
+}
+
+void PortPage::dialog_action(Overlay& d, bool stop, PadAction a, bool repeat, int64_t now, Act& out)
 {
     switch (a) {
     case PadAction::Up:
     case PadAction::Down:
-        move_overlay(dialog_, std::clamp(dialog_.focus + (a == PadAction::Up ? -1 : 1), 0, 1), now);
+        move_overlay(d, std::clamp(d.focus + (a == PadAction::Up ? -1 : 1), 0, 1), 0, now);
         break;
     case PadAction::Accept:
     case PadAction::Back:
         if (repeat)
             break;
-        if (a == PadAction::Accept && dialog_.focus == 0)
-            out = stop_dialog_ ? Act::Stop : Act::Remove;
-        hide_overlay(dialog_, now);
+        if (a == PadAction::Accept && d.focus == 0)
+            out = stop ? Act::Stop : Act::Remove;
+        hide_overlay(d, now, true);
         break;
     default:
         break;
@@ -324,11 +335,11 @@ PortPage::Act PortPage::action(PadAction a, bool repeat, int64_t now)
         tick(now);
     }
     if (dialog_.shown) {
-        dialog_action(a, repeat, now, out);
+        dialog_action(dialog_, stop_dialog_, a, repeat, now, out);
         return out;
     }
     if (working_) {
-        if (a == PadAction::Back && !repeat)
+        if (a == PadAction::Back && !repeat && !copying_)
             dialog(true, now);
         return out;
     }
@@ -367,6 +378,7 @@ PortPage::Act PortPage::action(PadAction a, bool repeat, int64_t now)
         case Kind::Update: out = Act::Update; break;
         case Kind::Play: out = Act::Play; break;
         case Kind::Remove: dialog(false, now); break;
+        case Kind::SteamGet: out = Act::SteamGet; break;
         }
         break;
     case PadAction::Back:
@@ -393,6 +405,8 @@ Row PortPage::row_of(const Action& a) const
     }
     if (r.secondary.empty() && a.kind == Kind::Install)
         r.secondary = size_words(item_.size);
+    if (r.secondary.empty() && a.kind == Kind::SteamGet)
+        r.secondary = "from steam";
     return r;
 }
 
@@ -400,7 +414,8 @@ bool PortPage::live(const Action& a) const
 {
     return (working_ || arc_ == 360) && ((cmd_ == HelperCmd::Install && a.kind == Kind::Install) ||
                                          (cmd_ == HelperCmd::Update && a.kind == Kind::Update) ||
-                                         (cmd_ == HelperCmd::Remove && a.kind == Kind::Remove));
+                                         (cmd_ == HelperCmd::Remove && a.kind == Kind::Remove) ||
+                                         (cmd_ == HelperCmd::SteamGet && a.kind == Kind::SteamGet));
 }
 
 void PortPage::draw_row(Canvas& k, const Action& a, int top, fx alpha, bool focused, int64_t now)
@@ -455,33 +470,6 @@ void PortPage::draw_column(Canvas& c, InkLayer& ink, int64_t now, fx pane)
     ink.compose(c.surface(), theme().ink);
 }
 
-void PortPage::draw_dialog(Canvas& c, InkLayer& ink, int64_t now)
-{
-    const Theme& t = theme();
-    fx a = dialog_.fade.at(now);
-    Zoom z{dialog_.scale.at(now), kPortraitW * 32, kPortraitH * 32};
-    int edge = px(tok::edge), pitch = px(sz().settingsPitch), top = px(tok::contentTop);
-    c.blend(kScreen, t.scrim_dialog, t.scrim_dialog_a256 * alpha256(a) >> 8);
-    Canvas& k = ink.begin(kScreen);
-    TextStyle ts = role::dialogTitle.style(), is = sz().dialogItem.style();
-    ts.tcase = Case::Mixed;
-    Rect keep = k.clip();
-    k.set_clip(Rect{0, 0, kPortDialogClip, kPortraitH}.intersect(keep));
-    fonts_.draw(k, ts, dialog_.title.c_str(), edge * 64, px(tok::pivotBaseline), kWhite,
-                alpha256(fx_mul(role::dialogTitle.alpha, a)), z);
-    k.set_clip(keep);
-    int asc = fonts_.ascent(is.px), desc = fonts_.descent(is.px);
-    for (size_t i = 0; i < dialog_.items.size(); i++) {
-        int base = top + (int)i * pitch + (pitch - asc - desc) / 2 + asc;
-        fx ia = (int)i == dialog_.focus ? sz().dialogItem.alpha : tok::type_dialogItem_alphaDim;
-        fonts_.draw(k, is, dialog_.items[i].c_str(), edge * 64, base, kWhite, alpha256(fx_mul(ia, a)), z);
-    }
-    int bx = edge - px(tok::focus_barOffset), by = top + index_px(dialog_.bar.at(now), pitch);
-    Rect bar{bx, by, bx + px(tok::focus_barWidth), by + pitch};
-    k.fill_aa(Rect64::of(bar, z), kWhite, alpha256(a));
-    ink.compose(c.surface(), t.ink);
-}
-
 void PortPage::draw(Canvas& c, InkLayer& ink, int64_t now)
 {
     tick(now);
@@ -492,14 +480,73 @@ void PortPage::draw(Canvas& c, InkLayer& ink, int64_t now)
     bool col = column_focus();
     fx rows_a = col ? tok::motion_quickplayAlpha : tok::alpha_full;
     fx col_a = col ? tok::alpha_full : tok::motion_quickplayAlpha;
-    blit_art(c, art_.get(), Rect{kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide},
-             256);
+    Rect art{kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide};
+    if (qr_shown() && !login_wait_)
+        qr_draw(c, qr_, art, t.light ? t.ink : t.bg, t.light ? t.bg : t.ink);
+    else
+        blit_art(c, art_.get(), art, 256);
     draw_rows(c, ink, now, rows_a);
     draw_column(c, ink, now, col_a);
-    if (dialog_.shown || dialog_.fade.at(now) > 0)
-        draw_dialog(c, ink, now);
+    draw_dialog(c, fonts_, ink, dialog_, now, t, true, kPortDialogClip);
     draw_toast_of(c, fonts_, ink, toast_, now, t);
     c.set_clip(keep);
+}
+
+Rect login_box()
+{
+    return Rect{px(tok::hubEdge), px(tok::contentTop), kPortraitW - px(tok::hubEdge), kPortraitH - px(tok::qpHintDrop)};
+}
+
+void PortPage::draw_login(Canvas& c, InkLayer& ink, int64_t now)
+{
+    tick(now);
+    const Theme& t = theme();
+    Rect keep = c.clip();
+    c.set_clip(kScreen.intersect(keep));
+    draw_page_ground(c, t);
+    draw_page_chrome(c, fonts_, kLoginWord, nullptr, t);
+    Canvas& k = ink.begin(kScreen);
+    fonts_.draw(k, role::listCount.style(), words_.c_str(), u64(tok::hubEdge), px(tok::queueCountBaseline), kWhite,
+                alpha256(role::listCount.alpha));
+    ink.compose(c.surface(), t.ink);
+    if (qr_shown())
+        qr_draw(c, qr_, login_box(), t.light ? t.ink : t.bg, t.light ? t.bg : t.ink);
+    draw_dialog(c, fonts_, ink, login_dialog_, now, t, true, kPortDialogClip);
+    c.set_clip(keep);
+}
+
+PortPage::Act PortPage::login_action(PadAction a, bool repeat, int64_t now)
+{
+    Act out = Act::None;
+    if (overlay_moving(login_dialog_, now)) {
+        login_dialog_.fade.set(login_dialog_.fade.to);
+        login_dialog_.scale.set(login_dialog_.scale.to);
+        login_dialog_.bar.set(fx_int(login_dialog_.focus));
+    }
+    if (login_dialog_.shown)
+        dialog_action(login_dialog_, true, a, repeat, now, out);
+    else if (a == PadAction::Back && !repeat && working_ && !copying_)
+        open_stop(login_dialog_, now);
+    return out;
+}
+
+void PortPage::drop_login_dialog()
+{
+    login_dialog_.shown = false;
+    login_dialog_.fade.set(0);
+    login_dialog_.scale.set(kOne);
+}
+
+bool PortPage::overlays_idle(int64_t now) const
+{
+    return !dialog_.shown && !overlay_moving(dialog_, now);
+}
+
+int64_t PortPage::overlays_end() const
+{
+    if (dialog_.shown)
+        return -1;
+    return std::max({dialog_.fade.end(), dialog_.scale.end(), dialog_.bar.end()});
 }
 
 bool PortPage::animating(int64_t now) const

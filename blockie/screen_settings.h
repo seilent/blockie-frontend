@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../core/fx.h"
+#include "../core/tween.h"
 #include "../gfx/font.h"
 #include "../gfx/pixel.h"
 #include "ink.h"
@@ -17,6 +18,7 @@
 
 namespace fd {
 
+int u64(fx u);
 void draw_page_ground(Canvas& c, const Theme& th);
 void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th, bool clipped = false);
 void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Theme& th);
@@ -53,6 +55,21 @@ int value_sheet_rows(Fonts& f);
 int settings_row_y(int row);
 std::vector<Rect> settings_regions(int rows);
 
+struct Overlay {
+    bool shown = false;
+    std::string title;
+    std::vector<std::string> items;
+    int focus = 0, first = 0, mark = -1;
+    Tween fade, scale, bar;
+};
+
+void open_overlay(Overlay& o, int focus, int64_t now, bool dialog);
+void hide_overlay(Overlay& o, int64_t now, bool dialog);
+bool overlay_moving(const Overlay& o, int64_t now);
+void move_overlay(Overlay& o, int to, int rows, int64_t now);
+bool draw_dialog(Canvas& c, Fonts& f, InkLayer& ink, const Overlay& o, int64_t now, const Theme& th, bool mixed_case,
+                 int title_right = kPortraitW);
+
 struct ToastView {
     fx e = 0;
     fx text = kOne;
@@ -77,6 +94,8 @@ struct SettingsRowSpec {
     bool mixed = false;
     bool setd = false;
     SetdType type = SetdType::S;
+    const char* confirm = "";
+    std::vector<const char*> confirm_items;
 };
 
 struct SettingsRowState {
@@ -108,12 +127,14 @@ constexpr const char* kBluetoothRow = "network.bluetooth";
 constexpr const char* kBatteryRow = "power.battery";
 constexpr const char* kStorageRow = "system.storage";
 constexpr const char* kAboutRow = "system.about";
+constexpr const char* kSteamRow = "network.steam";
 constexpr int kSettingsPivots = 7;
 extern const char* const kSettingsPivotWords[kSettingsPivots];
 std::vector<SettingsRowSpec> settings_rows();
 SettingsRowState volume_row(bool ok, int pct, bool muted);
 SettingsRowState radio_row(bool up, bool on);
 SettingsRowState info_row(const std::string& text, std::vector<InfoLine> lines = {});
+SettingsRowState steam_row(bool signed_in);
 
 struct SettingsView {
     int focus = 0;
@@ -132,6 +153,7 @@ struct SettingsView {
     int64_t switch_at = 0;
     int64_t now = 0;
     RowSheetView rowsheet;
+    const Overlay* confirm = nullptr;
     ToastView toast;
 };
 
@@ -143,7 +165,8 @@ void settings_rows_switch(const Surface& from, const Surface& to, const Surface&
 std::vector<std::string> row_sheet_wrap(Fonts& f, const TextStyle& st, const std::string& s, int first64, int next64);
 void draw_row_sheet(Canvas& c, Fonts& f, const RowSheetView& s, const Theme& th);
 void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th);
-void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th);
+void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th,
+                      fx alpha = kOne);
 
 class SettingsPage {
 public:
@@ -187,6 +210,9 @@ public:
         page_bar_at_ = -kFar;
         switch_at_ = -kFar;
         rowsheet_at_ = -kFar;
+        confirm_.fade.set(confirm_.fade.to);
+        confirm_.scale.set(confirm_.scale.to);
+        confirm_.bar.set(fx_int(confirm_.focus));
     }
     SettingsView view(int64_t now) const;
     SettingsView open_view(int64_t now) const;
@@ -255,6 +281,8 @@ private:
     bool rowsheet_ = false;
     int rowsheet_row_ = -1;
     int64_t rowsheet_at_ = -kFar;
+    Overlay confirm_;
+    int confirm_row_ = -1;
     ToastClock toast_;
 };
 

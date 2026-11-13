@@ -520,8 +520,10 @@ int main()
         r.settle(5000);
         r.settle(5000);
         check(first && !second && !third && queued, "a second ask waits while one helper runs");
-        check(r.results.size() == 2 && r.results[0].name == "blockie-test-a.zip" &&
-                  r.results[1].name == "blockie-test-c.zip" && r.h.op == fd::HelperOp::None,
+        check(r.results.size() == 3 && r.results[0].cmd == fd::HelperCmd::Install &&
+                  r.results[0].name == "blockie-test-b.zip" && !r.results[0].done && r.results[0].why == "cancel" &&
+                  r.results[1].name == "blockie-test-a.zip" && r.results[1].done &&
+                  r.results[2].name == "blockie-test-c.zip" && r.results[2].done && r.h.op == fd::HelperOp::None,
               "helpers run in turn, a newer ask replaces the pending one");
     }
 
@@ -553,6 +555,238 @@ int main()
         if (leak >= 0)
             close(leak);
         check(leak >= 3 && r.results.size() == 1 && r.results[0].done, "a helper child holds fds 0 to 2 only");
+    }
+
+    {
+        std::string st = ports + fd::kSteamTsv;
+        fd::SteamState none = fd::read_steam(st);
+        check(!none.signed_in && none.ports.empty(), "sf1: a missing steam.tsv is no Steam rows");
+        write_file(st,
+                   "signed\t1\nport\tblockie-test-a.zip\tget\nport\tblockie-test-b.zip\tgot\n"
+                   "account\tblockie-test-x\naccount\tblockie-test-y.zip\tget\n"
+                   "port\tblockie-test-c.zip\tmaybe\nport\t\tget\n"
+                   "port\tblockie-test-d.zip\tget\textra\nport\t" + std::string(fd::kNameCap + 1, 'n') + "\tget\n"
+                   "port\tblockie-test-e.zip\tget",
+                   0644);
+        fd::SteamState s = fd::read_steam(st);
+        check(s.signed_in && s.ports.size() == 3 && !s.ports.at("blockie-test-a.zip") &&
+                  s.ports.at("blockie-test-b.zip") && s.ports.count("blockie-test-e.zip"),
+              "sf1: steam.tsv gives signed and get or got per port, unknown keys and bad lines dropped");
+        write_file(st, "port\tblockie-test-a.zip\tget\nport\tblockie-test-b.zip\tget\nsigned\t1\n", 0644);
+        fd::SteamState late = fd::read_steam(st);
+        check(!late.signed_in && late.ports.empty(), "sf1: a steam.tsv whose line 1 is not signed is no Steam rows");
+        const std::string cut = "port\tblockie-test-g.zip\tget";
+        std::string big = "signed\t0\n";
+        while (big.size() + 36 + cut.size() < fd::kSteamTsvCap)
+            big += "port\tblockie-test-f.zip\tget\n";
+        big += "pad\t" + std::string(fd::kSteamTsvCap - big.size() - cut.size() - 5, 'x') + "\n";
+        big += cut + "\nport\tblockie-test-h.zip\tget\n";
+        write_file(st, big, 0644);
+        fd::SteamState capped = fd::read_steam(st);
+        check(big.find(cut) + cut.size() == fd::kSteamTsvCap && !capped.signed_in && capped.ports.size() == 1 &&
+                  capped.ports.count("blockie-test-f.zip"),
+              "sf1: steam.tsv reads to its cap and drops the line its cap cuts and the rest");
+        unlink(st.c_str());
+        const std::string body = "signed\t1\nport\tblockie-test-a.zip\tget\n";
+        bool made = mkfifo(st.c_str(), 0600) == 0;
+        fd::SteamState idle = fd::read_steam(st);
+        int w = open(st.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        bool fed = w >= 0 && write(w, body.data(), body.size()) == (ssize_t)body.size();
+        fd::SteamState fifo = fd::read_steam(st);
+        if (w >= 0)
+            close(w);
+        unlink(st.c_str());
+        std::string real = ports + "/blockie-test-steam.tsv";
+        write_file(real, body, 0644);
+        bool linked = symlink(real.c_str(), st.c_str()) == 0;
+        fd::SteamState sym = fd::read_steam(st);
+        unlink(real.c_str());
+        check(made && fed && linked && !idle.signed_in && !fifo.signed_in && fifo.ports.empty() && !sym.signed_in &&
+                  sym.ports.empty(),
+              "sf1: a FIFO or a symlink at the steam.tsv path is no Steam rows and the read does not block");
+        unlink(st.c_str());
+    }
+
+    {
+        check(fd::progress_words({"login", 0, -1}) == "signing in" &&
+                  fd::progress_words({"login", 1, 300}) == "signing in 299" &&
+                  fd::progress_words({"login", 299, 300}) == "signing in 1" &&
+                  fd::progress_words({"check", 0, -1}) == "checking" &&
+                  fd::progress_words({"copy", 3, 9}) == "copying" &&
+                  fd::progress_words({"download", 0, 6012954214}) == "0 kb of 5.6 gb",
+              "sf1: steam progress words from the helper's lines");
+        check(fd::progress_arc({"login", 150, 300}) == 180 && fd::progress_arc({"login", 0, -1}) == 0 &&
+                  fd::progress_arc({"copy", 3, 9}) == 0 && fd::progress_arc({"check", 0, -1}) == 0,
+              "sf1: the sign in arc runs over 300 s, check and copy draw the no total form");
+        struct Want {
+            const char* why;
+            const char* line2;
+        };
+        bool all = true;
+        for (const Want& w : {Want{"network", "download failed"}, Want{"space", "card full"},
+                              Want{"owned", "not in your library"}, Want{"expired", "sign in timed out"},
+                              Want{"login", "sign in failed"}, Want{"exists", "files already there"},
+                              Want{"busy", "a game is running"}, Want{"nodata", "no card"}, Want{"other", ""}}) {
+            fd::StoreToast t = fd::store_toast({fd::HelperCmd::SteamGet, "blockie-test-port.zip", false, w.why});
+            all = all && t.show && t.line1 == "get files failed" && t.line2 == w.line2;
+        }
+        check(all, "sf1: a failed get toasts get files failed with its reason");
+        check(!fd::store_toast({fd::HelperCmd::SteamGet, "blockie-test-port.zip", false, "cancel"}).show &&
+                  !fd::store_toast({fd::HelperCmd::SteamGet, "blockie-test-port.zip", true, ""}).show,
+              "sf1: a stopped or done get shows no toast");
+        fd::StoreToast so = fd::store_toast({fd::HelperCmd::SteamLogout, "", false, "other"});
+        check(so.show && so.line1 == "sign out failed" && so.line2.empty(), "sf1: a failed sign out toasts one line");
+        check(fd::helper_op(fd::HelperCmd::SteamGet) == fd::HelperOp::SteamGet &&
+                  fd::helper_op(fd::HelperCmd::SteamLogout) == fd::HelperOp::None,
+              "sf1: a get holds the launch refusal, a sign out does not");
+    }
+
+    {
+        const std::string u38 = "https://s.team/q/1/1111111111111111111";
+        const std::string u512 = "https://s.team/q/1/" + std::string(493, '3');
+        check(u38.size() == 38 && u512.size() == 512 && fd::helper_qr_url(u38) && fd::helper_qr_url(u512) &&
+                  !fd::helper_qr_url(u512 + "3") && !fd::helper_qr_url("http://s.team/q/1/1") &&
+                  !fd::helper_qr_url("https://s.team/q 1") && !fd::helper_qr_url("https://s.team/q\x7f") &&
+                  !fd::helper_qr_url(""),
+              "sf1: a qr url is 1 to 512 bytes of 0x21 to 0x7E starting https://");
+        fd::Children kids;
+        fd::PortsHelper h;
+        std::vector<std::string> argv;
+        std::vector<std::string> codes;
+        std::vector<fd::HelperResult> results;
+        h.spawn = [&](const std::vector<std::string>& a, int* out) {
+            argv = a;
+            *out = -1;
+            return (pid_t)1;
+        };
+        h.signal_child = [](pid_t, int) {};
+        h.on_qr = [&](const std::string& u) { codes.push_back(u); };
+        h.on_result = [&](const fd::HelperResult& r) { results.push_back(r); };
+        h.ask(kids, fd::HelperCmd::Install, "blockie-test-port.zip");
+        h.line("qr\t" + u38);
+        h.finish();
+        check(codes.empty(), "sf1: a qr line outside a get is ignored");
+        h.ask(kids, fd::HelperCmd::SteamGet, "blockie-test-port.zip");
+        bool args = argv.size() == 3 && argv[1] == "steam-get" && argv[2] == "blockie-test-port.zip";
+        h.line("qr\t" + u38);
+        h.line("qr\t" + u38 + "\tx");
+        h.line("qr\thttps://s.team/q 1");
+        h.line("qr\t" + u512 + "3");
+        h.line("qr\thttp://s.team/q/1/1111111111111111111");
+        check(args && codes.size() == 5 && codes[0] == u38 && codes[1].empty() && codes[2].empty() &&
+                  codes[3].empty() && codes[4].empty(),
+              "sf1: a good qr line shows its code, a third field, a space, 513 bytes or http clear it");
+        h.stop(0);
+        h.line("qr\t" + u38);
+        check(codes.size() == 5, "sf1: a qr line after stop is dropped");
+        h.finish();
+        check(results.size() == 2 && results[1].cmd == fd::HelperCmd::SteamGet && results[1].why == "cancel",
+              "sf1: a stopped get reads as a cancel");
+        h.ask(kids, fd::HelperCmd::SteamLogout, "");
+        bool bare = argv.size() == 2 && argv[1] == "steam-logout";
+        h.line("fail\tsteam-logout\tother");
+        h.line("done\t");
+        h.finish();
+        bool failed = results.size() == 3 && !results[2].done && results[2].why == "other";
+        h.ask(kids, fd::HelperCmd::SteamLogout, "");
+        h.line("done\tsteam-logout");
+        h.finish();
+        check(bare && failed && results.size() == 4 && results[3].cmd == fd::HelperCmd::SteamLogout &&
+                  results[3].done,
+              "sf1: steam-logout runs with no name and its done line is matched by its word");
+    }
+
+    {
+        const std::string u38 = "https://s.team/q/1/1111111111111111111";
+        int pp[2] = {-1, -1};
+        bool piped = pipe2(pp, O_NONBLOCK | O_CLOEXEC) == 0;
+        fd::Children kids;
+        fd::PortsHelper h;
+        std::vector<std::string> codes;
+        std::vector<fd::HelperProgress> prog;
+        std::vector<fd::HelperResult> results;
+        h.spawn = [&](const std::vector<std::string>&, int* out) {
+            *out = pp[0];
+            return (pid_t)1;
+        };
+        h.signal_child = [](pid_t, int) {};
+        h.on_qr = [&](const std::string& u) { codes.push_back(u); };
+        h.on_progress = [&](const fd::HelperProgress& p) { prog.push_back(p); };
+        h.on_result = [&](const fd::HelperResult& r) { results.push_back(r); };
+        h.ask(kids, fd::HelperCmd::SteamGet, "blockie-test-port.zip");
+        auto put = [&](const std::string& s) {
+            bool ok = write(pp[1], s.data(), s.size()) == (ssize_t)s.size();
+            h.readable();
+            return ok;
+        };
+        const std::string longqr = "qr\thttps://s.team/q/1/" + std::string(4080, '4');
+        const std::string wide = "progress\t" + std::string(4090, 'w') + "\t9\t300";
+        bool wrote = piped && put(longqr + "\n") && put(longqr) &&
+                     put("progress\tlogin\t9\t300\nprogress\tlogin\t1\t300\n") && put(wide + "\n") &&
+                     put(wide.substr(0, 2048)) && put(wide.substr(2048) + "\n") &&
+                     put("qr\t" + u38 + "\ndone\tblockie-test-port.zip\n");
+        if (pp[1] >= 0)
+            close(pp[1]);
+        h.finish();
+        check(wrote && codes.size() == 3 && codes[0].empty() && codes[1].empty() && codes[2] == u38 &&
+                  prog.size() == 1 && prog[0].what == "login" && prog[0].done == 1 && results.size() == 1 &&
+                  results[0].done,
+              "sf1: a helper line over the 4096 cap is dropped to its newline however the reads split it, a qr line "
+              "also clears the code");
+    }
+
+    {
+        fd::Children kids;
+        fd::PortsHelper h;
+        std::vector<fd::HelperResult> results;
+        std::vector<std::vector<std::string>> runs;
+        h.spawn = [&](const std::vector<std::string>& a, int* out) {
+            runs.push_back(a);
+            *out = -1;
+            return (pid_t)1;
+        };
+        h.signal_child = [](pid_t, int) {};
+        h.on_result = [&](const fd::HelperResult& r) { results.push_back(r); };
+        h.ask(kids, fd::HelperCmd::Refresh, "");
+        h.ask(kids, fd::HelperCmd::SteamLogout, "");
+        h.ask(kids, fd::HelperCmd::SteamLogout, "");
+        bool kept = results.empty();
+        h.ask(kids, fd::HelperCmd::Install, "blockie-test-port.zip");
+        bool told = results.size() == 1 && results[0].cmd == fd::HelperCmd::SteamLogout && !results[0].done &&
+                    results[0].why == "cancel";
+        h.finish();
+        check(kept && told && runs.size() == 2 && runs[1].size() == 3 && runs[1][1] == "install",
+              "sf1: a queued ask replaced by another is answered as a cancel, the same ask again keeps it");
+    }
+
+    {
+        int a[2] = {-1, -1}, b[2] = {-1, -1};
+        bool piped = pipe2(a, O_NONBLOCK | O_CLOEXEC) == 0 && pipe2(b, O_NONBLOCK | O_CLOEXEC) == 0;
+        int* next = a;
+        fd::Children kids;
+        fd::PortsHelper h;
+        std::vector<fd::HelperResult> results;
+        h.spawn = [&](const std::vector<std::string>&, int* out) {
+            *out = next[0];
+            next = b;
+            return (pid_t)1;
+        };
+        h.signal_child = [](pid_t, int) {};
+        h.on_result = [&](const fd::HelperResult& r) { results.push_back(r); };
+        h.ask(kids, fd::HelperCmd::Install, "blockie-test-port.zip");
+        const std::string big(5000, 'x'), done = "done\tblockie-test-port.zip\n";
+        bool wrote = piped && write(a[1], big.data(), big.size()) == (ssize_t)big.size();
+        h.readable();
+        if (a[1] >= 0)
+            close(a[1]);
+        h.finish();
+        h.ask(kids, fd::HelperCmd::Install, "blockie-test-port.zip");
+        wrote = wrote && write(b[1], done.data(), done.size()) == (ssize_t)done.size();
+        if (b[1] >= 0)
+            close(b[1]);
+        h.finish();
+        check(wrote && results.size() == 2 && !results[0].done && results[1].done,
+              "sf1: a new helper run reads its first line after the last run ended inside an over cap line");
     }
 
     rm_rf(root);

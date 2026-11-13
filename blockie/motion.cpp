@@ -255,8 +255,13 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
         }
     } else if (k != FoldKind::Return && last) {
         adopt_check(false, moving, now);
-        last(from_.surface());
-        start_tag_ = "rest";
+        if (play_.kept_from && render_kept && (stale_ || (redraw_pending && redraw_pending()))) {
+            render_kept(from_.surface());
+            start_tag_ = "kept";
+        } else {
+            last(from_.surface());
+            start_tag_ = "rest";
+        }
     }
     from_us_ = clock_us ? (int)(clock_us() - c0) : -1;
     if (settle)

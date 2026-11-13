@@ -513,6 +513,8 @@ int main(int argc, char** argv)
                   words(launch_helper_busy(HelperOp::Update), kNs, "a port is updating") &&
                   words(launch_helper_busy(HelperOp::Remove), kNs, "a port is being removed"),
               "the helper busy refusal names what the helper does");
+        check(words(launch_helper_busy(HelperOp::SteamGet), kNs, "a port is getting files"),
+              "sf1: the helper busy refusal during a get says a port is getting files");
         LaunchFlow f;
         f.start(false, true, true);
         LaunchOutcome r = f.reaped(exited(1), false, "", 0);

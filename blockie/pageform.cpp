@@ -404,6 +404,7 @@ FoldPlay page_fold(const std::shared_ptr<PageRun>& run)
     p.duration = form_duration(run->form);
     p.tail = eng::kTailMs;
     p.clamp_back = true;
+    p.kept_from = run->pop;
     p.advance = [run](int64_t t0, int64_t now) {
         if (t0 != run->t0) {
             run->in->begin(t0, run->t0 >= 0);

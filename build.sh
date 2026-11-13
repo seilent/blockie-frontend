@@ -18,6 +18,8 @@ else
 fi
 fe_commit=${BLOCKIE_FE_COMMIT:-}
 [[ $fe_commit =~ ^[0-9a-f]*$ ]] || { echo "build.sh: BLOCKIE_FE_COMMIT '$fe_commit' is not a hex commit" >&2; exit 2; }
+steam_files=${BLOCKIE_FE_STEAM_FILES:-0}
+[[ $steam_files =~ ^[01]$ ]] || { echo "build.sh: BLOCKIE_FE_STEAM_FILES '$steam_files' is not 0 or 1" >&2; exit 2; }
 destdir=${DESTDIR:-}
 prefix=${PREFIX:-/usr}
 target=all
@@ -458,7 +460,8 @@ build_app() {
     pool "$appobj/scraper.o" "$cxx" "${scanflags[@]}" $curl_cflags $appcflags "$root/blockie/scraper.cpp"
     pool "$appobj/wl_keys.o" "$cxx" "${gflags[@]}" $xkb_cflags $appcflags "$root/blockie/wl_keys.cpp"
     pool "$appobj/frame_gate.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/frame_gate.cpp"
-    pool "$appobj/main.o" "$cxx" "${gflags[@]}" -pthread $appcflags "$root/blockie/main.cpp"
+    pool "$appobj/main.o" "$cxx" "${gflags[@]}" -pthread -DBLOCKIE_FE_STEAM_FILES="$steam_files" $appcflags \
+        "$root/blockie/main.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/app"

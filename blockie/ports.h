@@ -16,9 +16,10 @@ constexpr const char* kPortsHelperPath = "/usr/libexec/blockie/blockie-ports";
 constexpr int64_t kHelperStopMs = 10000;
 constexpr size_t kHelperLineCap = 4096;
 constexpr size_t kHelperWhatCap = 32;
+constexpr size_t kHelperQrCap = 512;
 
-enum class HelperOp { None, Install, Update, Remove };
-enum class HelperCmd { Refresh, Install, Update, Remove };
+enum class HelperOp { None, Install, Update, Remove, SteamGet };
+enum class HelperCmd { Refresh, Install, Update, Remove, SteamGet, SteamLogout };
 
 struct HelperResult {
     HelperCmd cmd = HelperCmd::Refresh;
@@ -35,6 +36,7 @@ struct HelperProgress {
 
 const char* helper_word(HelperCmd c);
 HelperOp helper_op(HelperCmd c);
+bool helper_qr_url(const std::string& url);
 
 class PortsHelper {
 public:
@@ -44,6 +46,7 @@ public:
     std::function<void(const HelperResult&)> on_result;
     std::function<void(const HelperProgress&)> on_progress;
     std::function<void(HelperCmd, const std::string&)> on_start;
+    std::function<void(const std::string& url)> on_qr;
     std::function<pid_t(const std::vector<std::string>& argv, int* out)> spawn;
     std::function<void(pid_t pid, int sig)> signal_child;
 
@@ -56,6 +59,7 @@ public:
     bool ask(Children& kids, HelperCmd c, const std::string& name);
     bool cancel(HelperCmd c, const std::string& name, int64_t now);
     bool running() const { return pid_ > 0; }
+    bool stopping() const { return stopped_; }
     bool holds(const std::string& name, HelperCmd& c) const;
     HelperCmd cmd() const { return cmd_; }
     const std::string& name() const { return name_; }
@@ -69,6 +73,7 @@ public:
 private:
     bool start(HelperCmd c, const std::string& name);
     void drain();
+    void qr(const std::string& url);
     void send(int sig);
 
     Children* kids_ = nullptr;
@@ -77,6 +82,7 @@ private:
     HelperCmd cmd_ = HelperCmd::Refresh;
     std::string name_;
     std::string buf_;
+    bool skip_ = false;
     bool have_ = false;
     bool stopped_ = false;
     HelperResult last_;

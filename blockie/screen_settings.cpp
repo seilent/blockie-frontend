@@ -9,6 +9,7 @@
 #include "../core/curves.h"
 #include "../gfx/compose.h"
 #include "../ui/rows.h"
+#include "../ui/size.h"
 #include "leftmove.h"
 #include "setd_key.h"
 
@@ -33,8 +34,6 @@ constexpr fx kRowsTop = 98 * kOne;
 
 int sheet_ms() { return fx_round(tok::motion_sheet); }
 
-int u64(fx u) { return (to_px(u) + 512) >> 10; }
-
 fx glide(fx from, int to, int64_t at, int64_t now)
 {
     int d = fx_round(tok::motion_focusCursor);
@@ -57,7 +56,7 @@ fx t12(int64_t at, bool open, int64_t now)
 bool is_row(const SettingsRowSpec& s, const char* id) { return std::strcmp(s.id, id) == 0; }
 
 void draw_rows(Canvas& c, Fonts& f, InkLayer& ink, const std::vector<SettingsRowView>& rows, int focus, fx bar,
-               const Theme& th)
+               const Theme& th, fx alpha)
 {
     if (rows.empty())
         return;
@@ -74,11 +73,14 @@ void draw_rows(Canvas& c, Fonts& f, InkLayer& ink, const std::vector<SettingsRow
     fx b = bar >= 0 ? bar : fx_int(focus);
     draw_focus_bar(lc, top + (int)(((int64_t)b * pitch + kHalf) >> kFxBits), tok::settingsPitch);
     ink.compose(c.surface(), th.ink);
+    if (alpha < kOne)
+        c.blend(area, th.bg, alpha256(kOne - alpha));
 }
 
 }
 
-void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th)
+void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th,
+                      fx alpha)
 {
     if (v.pivots.empty())
         return;
@@ -87,7 +89,7 @@ void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, cons
     ch.set_header_part(ChromePart{0, 0, kOne, true});
     int dy = px(tok::pivotBaseline) - px(tok::page_pivotBaseline);
     for (int i = 0; i < ch.pivots(); i++)
-        ch.set_pivot_part(i, ChromePart{0, dy, kOne, false});
+        ch.set_pivot_part(i, ChromePart{0, dy, alpha, false});
     ch.set_active(v.from_pivot >= 0 ? v.from_pivot : v.pivot);
     if (v.from_pivot >= 0)
         ch.switch_to(v.pivot, v.switch_at, v.dir);
@@ -97,7 +99,85 @@ void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, cons
     ink.compose(c.surface(), th.ink);
 }
 
+int u64(fx u) { return (to_px(u) + 512) >> 10; }
+
 void draw_page_ground(Canvas& c, const Theme& th) { c.fill(c.surface().rect(), th.bg); }
+
+void open_overlay(Overlay& o, int focus, int64_t now, bool dialog)
+{
+    o.shown = true;
+    o.focus = focus;
+    o.bar.set(fx_int(focus));
+    if (dialog) {
+        o.fade.run(now, 0, kOne, fx_round(tok::motion_dialog), Curve::Pop);
+        o.scale.run(now, tok::motion_dialogScale, kOne, fx_round(tok::motion_dialog), Curve::BezierPop);
+    } else {
+        o.scale.set(kOne);
+        o.fade.run(now, o.fade.at(now), kOne, fx_round(tok::motion_sheet), Curve::Decel);
+    }
+}
+
+void hide_overlay(Overlay& o, int64_t now, bool dialog)
+{
+    o.shown = false;
+    o.fade.run(now, o.fade.at(now), 0, fx_round(dialog ? tok::motion_dialogHide : tok::motion_sheet),
+               dialog ? Curve::Pop : Curve::Decel);
+    o.scale.set(o.scale.at(now));
+}
+
+bool overlay_moving(const Overlay& o, int64_t now)
+{
+    return !o.fade.done(now) || !o.scale.done(now) || !o.bar.done(now);
+}
+
+void move_overlay(Overlay& o, int to, int rows, int64_t now)
+{
+    if (to == o.focus)
+        return;
+    o.focus = to;
+    if (o.focus < o.first)
+        o.first = o.focus;
+    if (rows > 0 && o.focus >= o.first + rows)
+        o.first = o.focus - rows + 1;
+    if (o.fade.done(now))
+        o.bar.run(now, o.bar.at(now), fx_int(to), fx_round(tok::motion_focusCursor), Curve::Sine);
+    else
+        o.bar.set(fx_int(to));
+}
+
+bool draw_dialog(Canvas& c, Fonts& f, InkLayer& ink, const Overlay& o, int64_t now, const Theme& th, bool mixed_case,
+                 int title_right)
+{
+    fx a = o.fade.at(now);
+    if (!o.shown && a <= 0)
+        return true;
+    Zoom z{o.scale.at(now), kPortraitW * 32, kPortraitH * 32};
+    int edge = px(tok::edge), pitch = px(sz().settingsPitch), top = px(tok::contentTop);
+    c.blend(kScreen, th.scrim_dialog, th.scrim_dialog_a256 * alpha256(a) >> 8);
+    Canvas& k = ink.begin(kScreen);
+    TextStyle ts = role::dialogTitle.style(), is = sz().dialogItem.style();
+    if (mixed_case)
+        ts.tcase = Case::Mixed;
+    Rect keep = k.clip();
+    k.set_clip(Rect{0, 0, title_right, kPortraitH}.intersect(keep));
+    bool ok = f.draw(k, ts, o.title.c_str(), edge * 64, px(tok::pivotBaseline), kWhite,
+                     alpha256(fx_mul(role::dialogTitle.alpha, a)), z);
+    k.set_clip(keep);
+    int asc = f.ascent(is.px), desc = f.descent(is.px);
+    for (size_t i = 0; i < o.items.size(); i++) {
+        int base = top + (int)i * pitch + (pitch - asc - desc) / 2 + asc;
+        fx ia = (int)i == o.focus ? sz().dialogItem.alpha : tok::type_dialogItem_alphaDim;
+        ok = f.draw(k, is, o.items[i].c_str(), edge * 64, base, kWhite, alpha256(fx_mul(ia, a)), z) && ok;
+    }
+    if (!o.items.empty()) {
+        int bx = edge - px(tok::focus_barOffset);
+        int by = top + (int)(((int64_t)o.bar.at(now) * pitch + kHalf) >> kFxBits);
+        Rect bar{bx, by, bx + px(tok::focus_barWidth), by + pitch};
+        k.fill_aa(Rect64::of(bar, z), kWhite, alpha256(a));
+    }
+    ink.compose(c.surface(), th.ink);
+    return ok;
+}
 
 void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Theme& th)
 {
@@ -449,6 +529,9 @@ std::vector<SettingsRowSpec> settings_rows()
     radio.words = {"on", "off"};
     radio.values = {"on", "off"};
     row("network", "bluetooth", RowKind::Push, kBluetoothRow);
+    SettingsRowSpec& steam = row("network", "steam", RowKind::Action, kSteamRow);
+    steam.confirm = "sign out of steam";
+    steam.confirm_items = {"sign out", "cancel"};
     row("power", "battery", RowKind::Info, kBatteryRow);
     key("power", "screen off after", "power.screen_off", SetdType::U,
         {"30 min", "10 min", "5 min", "2 min", "1 min", "never"}, {"1800", "600", "300", "120", "60", "0"});
@@ -479,6 +562,8 @@ SettingsRowState radio_row(bool up, bool on)
         st.value = on ? "on" : "off";
     return st;
 }
+
+SettingsRowState steam_row(bool signed_in) { return signed_in ? info_row("signed in") : SettingsRowState{}; }
 
 SettingsRowState info_row(const std::string& text, std::vector<InfoLine> lines)
 {
@@ -515,7 +600,8 @@ void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, co
 {
     draw_page_ground(c, th);
     draw_page_chrome(c, f, kWord, nullptr, th, true);
-    draw_page_pivots(c, f, ink, kWord, v, th);
+    fx keep = kOne - (v.confirm ? v.confirm->fade.at(v.now) : 0);
+    draw_page_pivots(c, f, ink, kWord, v, th, keep);
     int64_t t = v.now - v.switch_at;
     if (v.from_pivot >= 0 && t >= 0 && t < settings_switch_ms()) {
         Rect sr = c.surface().rect();
@@ -526,14 +612,16 @@ void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, co
         Canvas tc(to.surface());
         fc.fill(area, th.bg);
         tc.fill(area, th.bg);
-        draw_rows(fc, f, ink, v.from_rows, v.from_focus, -kOne, th);
-        draw_rows(tc, f, ink, v.rows, v.focus, v.bar, th);
+        draw_rows(fc, f, ink, v.from_rows, v.from_focus, -kOne, th, keep);
+        draw_rows(tc, f, ink, v.rows, v.focus, v.bar, th, keep);
         settings_rows_switch(from.surface(), to.surface(), c.surface(), area, t, v.dir, th.bg);
     } else {
-        draw_rows(c, f, ink, v.rows, v.focus, v.bar, th);
+        draw_rows(c, f, ink, v.rows, v.focus, v.bar, th, keep);
     }
     draw_value_sheet(c, f, v.sheet, th);
     draw_row_sheet(c, f, v.rowsheet, th);
+    if (v.confirm)
+        draw_dialog(c, f, ink, *v.confirm, v.now, th, false);
     draw_toast(c, f, ink, v.toast, th);
 }
 
@@ -547,6 +635,8 @@ void SettingsPage::set_table(std::vector<SettingsRowSpec> t)
     rowsheet_ = false;
     sheet_row_ = -1;
     rowsheet_row_ = -1;
+    confirm_ = Overlay{};
+    confirm_row_ = -1;
     kind_ = Kind::Theme;
     items();
     std::fill(std::begin(pfocus_), std::end(pfocus_), 0);
@@ -660,6 +750,11 @@ bool SettingsPage::shut_sheets(int row, int64_t now)
         rowsheet_at_ = now;
         shut = true;
     }
+    if (confirm_.shown && confirm_row_ == row) {
+        land();
+        hide_overlay(confirm_, now, true);
+        shut = true;
+    }
     return shut;
 }
 
@@ -727,6 +822,8 @@ void SettingsPage::reset(bool light)
     rowsheet_ = false;
     sheet_row_ = -1;
     rowsheet_row_ = -1;
+    confirm_ = Overlay{};
+    confirm_row_ = -1;
     kind_ = Kind::Theme;
     items();
     sheet_focus_ = light ? 1 : 0;
@@ -962,6 +1059,8 @@ bool SettingsPage::animating(int64_t now) const
     if (now - sheet_at_ < sheet_ms() || now - bar_at_ < cursor || now - page_bar_at_ < cursor ||
         now - switch_at_ < settings_switch_ms() || now - rowsheet_at_ < sheet_ms())
         return true;
+    if (overlay_moving(confirm_, now))
+        return true;
     return toast_.animating(now);
 }
 
@@ -974,6 +1073,18 @@ fx SettingsPage::page_bar(int64_t now) const { return glide(page_bar_from_, pfoc
 bool SettingsPage::action(PadAction a, bool repeat, int64_t now)
 {
     land();
+    if (confirm_.shown) {
+        int n = (int)confirm_.items.size();
+        if (a == PadAction::Up || a == PadAction::Down) {
+            int to = std::clamp(confirm_.focus + (a == PadAction::Up ? -1 : 1), 0, std::max(0, n - 1));
+            move_overlay(confirm_, to, 0, now);
+        } else if (!repeat && (a == PadAction::Accept || a == PadAction::Back)) {
+            if (a == PadAction::Accept && confirm_.focus == 0 && on_action)
+                on_action(table_[(size_t)confirm_row_].id);
+            hide_overlay(confirm_, now, true);
+        }
+        return false;
+    }
     if (rowsheet_) {
         if (a == PadAction::Back && !repeat) {
             rowsheet_ = false;
@@ -1064,7 +1175,12 @@ bool SettingsPage::action(PadAction a, bool repeat, int64_t now)
                 on_push(s.id);
             break;
         case RowKind::Action:
-            if (on_action)
+            if (*s.confirm) {
+                confirm_row_ = row;
+                confirm_.title = s.confirm;
+                confirm_.items.assign(s.confirm_items.begin(), s.confirm_items.end());
+                open_overlay(confirm_, std::max(0, (int)confirm_.items.size() - 1), now, true);
+            } else if (on_action)
                 on_action(s.id);
             break;
         case RowKind::RowSheet:
@@ -1141,6 +1257,7 @@ SettingsView SettingsPage::view(int64_t now) const
         r.open = rowsheet_;
         r.progress = t12(rowsheet_at_, rowsheet_, now);
     }
+    v.confirm = &confirm_;
     if (toast_.phase(now) != 0) {
         ToastView& t = v.toast;
         t.line1 = toast_.line1(now);

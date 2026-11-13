@@ -52,28 +52,24 @@ private:
         uint64_t key(int row, int col) const override;
         bool find(uint64_t key, int& row, int& col) const override;
     };
-    struct Overlay {
-        bool shown = false, connected = false;
-        std::string title, path;
-        std::vector<std::string> items;
-        int focus = 0;
-        Tween fade, scale, bar;
+    struct BtOverlay : Overlay {
+        bool connected = false;
+        std::string path;
     };
 
     void send(BtCmd::Type t, const std::string& path = "", bool yes = false);
     void accept();
     void open_sheet(const BtRow& r, int64_t now);
     void show_dialog(int64_t now);
-    void hide(Overlay& o, int ms, int64_t now);
-    void move(Overlay& o, int delta, int64_t now);
+    void hide(BtOverlay& o, int ms, int64_t now);
+    void move(BtOverlay& o, int delta, int64_t now);
     void sheet_action(PadAction a, bool repeat, int64_t now);
     void dialog_action(PadAction a, bool repeat, int64_t now);
-    bool visible(const Overlay& o, int64_t now) const;
+    bool visible(const BtOverlay& o, int64_t now) const;
     bool moving(int64_t at) const;
     void draw_rows(Canvas& k, int64_t now, fx bar_alpha);
     void draw_sweep(Canvas& c, int64_t now);
     void draw_sheet(Canvas& c, InkLayer& ink, int64_t now);
-    void draw_dialog(Canvas& c, InkLayer& ink, int64_t now);
 
     Fonts& fonts_;
     GlyphCache& glyphs_;
@@ -81,7 +77,7 @@ private:
     BtState state_;
     Rows rows_;
     ListView list_;
-    Overlay sheet_, dialog_;
+    BtOverlay sheet_, dialog_;
     bool dirty_ = true, retry_ = false;
     int drawn_secs_ = -1;
     int64_t drawn_at_ = -1;

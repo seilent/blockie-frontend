@@ -6,6 +6,7 @@
 
 #include "../../ui/roles.h"
 #include "../../ui/rows.h"
+#include "../../ui/size.h"
 #include "../bt_model.h"
 #include "../leftmove.h"
 #include "../screen_settings.h"
@@ -678,8 +679,8 @@ int main(int argc, char** argv)
         }
         check(order == "display:theme,display:brightness,sound:volume,sound:volume step,controls:vibration,"
                        "games:shaders,games:integer scale,games:resume,games:rewind,network:wi-fi,network:bluetooth,"
-                       "power:battery,power:screen off after,system:time zone,system:storage,system:android gpu,"
-                       "system:android performance,system:about,",
+                       "network:steam,power:battery,power:screen off after,system:time zone,system:storage,"
+                       "system:android gpu,system:android performance,system:about,",
               "rows: the item 3 table in pivot order");
         check(pairs && unique, "rows: every row has a value per word, ids are unique");
         auto row = [&](const char* id) {
@@ -733,7 +734,7 @@ int main(int argc, char** argv)
             p.land();
         }
         check(most <= 6, "rows: no pivot holds more than 6 rows");
-        check(values == "dark,10,0,2,off,on,off,off,off,off,,,5 min,asia / tokyo,,soft,on,,",
+        check(values == "dark,10,0,2,off,on,off,off,off,off,,,,5 min,asia / tokyo,,soft,on,,",
               "rows: values read as their words (true on, 0 off, 300 5 min, policy on)");
     }
 
@@ -1143,6 +1144,70 @@ int main(int argc, char** argv)
                   same,
               "open_view on the system pivot, display left on its second row, equals the view after reset: its "
               "pivots, pivot 0, row 0 and pivot 0's two rows, the input to the page rows and the page head");
+    }
+
+    {
+        SettingsPage p;
+        std::vector<std::string> acts;
+        p.on_action = [&](const std::string& id) { acts.push_back(id); };
+        p.reset(false);
+        int64_t t = 1000000;
+        bool hidden = p.view(t).pivots.size() == 1;
+        p.set_row(kSteamRow, info_row("signed in"), t);
+        p.action(PadAction::Next, false, t += 1000);
+        SettingsView v = p.view(t += 1000);
+        bool row = std::string(p.pivot()) == "network" && v.rows.size() == 1 && v.rows[0].title == "steam" &&
+                   v.rows[0].value == "signed in";
+        check(hidden && row, "sf1: the steam row shows on network only while signed in, value signed in");
+        p.action(PadAction::Accept, false, t += 1000);
+        Overlay c = *p.view(t += 1000).confirm;
+        bool opened = c.shown && c.title == "sign out of steam" && c.items.size() == 2 && c.items[0] == "sign out" &&
+                      c.items[1] == "cancel" && c.focus == 1;
+        p.action(PadAction::Accept, false, t += 1000);
+        bool cancelled = !p.view(t += 1000).confirm->shown && acts.empty();
+        check(opened && cancelled, "sf1: accept opens sign out of steam on cancel, and cancel does nothing");
+        p.action(PadAction::Accept, false, t += 1000);
+        p.action(PadAction::Back, false, t += 1000);
+        bool back = !p.view(t += 1000).confirm->shown && acts.empty();
+        p.action(PadAction::Accept, false, t += 1000);
+        p.action(PadAction::Up, false, t += 1000);
+        bool on_out = p.view(t += 1000).confirm->focus == 0;
+        p.action(PadAction::Accept, false, t += 1000);
+        check(back && on_out && acts.size() == 1 && acts[0] == kSteamRow && !p.view(t += 1000).confirm->shown,
+              "sf1: back keeps the sign in, sign out asks for the action once");
+        p.action(PadAction::Accept, false, t += 1000);
+        p.set_row(kSteamRow, SettingsRowState{}, t += 1000);
+        SettingsView gone = p.view(t += 1000);
+        check(!gone.confirm->shown && gone.pivots.size() == 1 && acts.size() == 1,
+              "sf1: the row goes in place once signed out, closing its confirm");
+        Buffer b;
+        Canvas cv(b.surface());
+        InkLayer ink;
+        p.set_row(kSteamRow, info_row("signed in"), t);
+        p.action(PadAction::Next, false, t += 1000);
+        p.action(PadAction::Accept, false, t += 1000);
+        p.land();
+        draw_settings(cv, fonts, ink, p.view(t), theme_dark());
+        Surface sb = b.surface();
+        int lit = 0;
+        for (int y = px(tok::contentTop) + px(sz().settingsPitch); y < px(tok::contentTop) + 2 * px(sz().settingsPitch);
+             y++)
+            for (int x = 0; x < kPortraitW; x++)
+                lit += sb.at(x, y) == LiveF::pack(0xFFFFFF) ? 1 : 0;
+        check(lit > 0, "sf1: the sign out confirm draws its focused cancel row");
+        Buffer b2;
+        Canvas cv2(b2.surface());
+        InkLayer ink2;
+        p.set_row(kSteamRow, info_row("blockie test value"), t);
+        p.land();
+        bool still = p.view(t).confirm->shown;
+        draw_settings(cv2, fonts, ink2, p.view(t), theme_dark());
+        Surface sb2 = b2.surface();
+        int differ = 0;
+        for (int y = 0; y < kPortraitH; y++)
+            for (int x = 0; x < kPortraitW; x++)
+                differ += sb.at(x, y) != sb2.at(x, y) ? 1 : 0;
+        check(still && differ == 0, "sf1: the sign out confirm fades the rows, bar and pivots out under its scrim");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

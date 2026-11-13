@@ -607,8 +607,8 @@ int main(int argc, char** argv)
 
         g.input(PadAction::Back, false, pt);
         run = g.page_run();
-        bool pop = g.ctl.kind() == FoldKind::Pop && !g.ctl.reversed() && run && run->form.closing &&
-                   g.nav.top() == Screen::Settings;
+        bool pop = g.ctl.kind() == FoldKind::Pop && !g.ctl.reversed() && run && run->form.closing && run->pop &&
+                   g.nav.top() == Screen::Settings && std::string(g.ctl.start_tag()) == "rest";
         Surface bs = bt.surface();
         check(pop && page_lands(g, gout, pt, &bs),
               (name + ": back on bluetooth runs a fresh pop from the page at rest to settings at rest").c_str());
@@ -616,7 +616,10 @@ int main(int argc, char** argv)
         Buffer settings;
         copy(gout.surface(), settings.surface());
         Surface ss = settings.surface();
+        g.redraw();
         g.input(PadAction::Back, false, pt);
+        check(g.ctl.kind() == FoldKind::Pop && std::string(g.ctl.start_tag()) == "kept",
+              (name + ": a page pop with a redraw pending starts from the kept page rendered fresh").c_str());
         run = g.page_run();
         bool art_pop = run && run->form.closing && run->form.under.size() == 4 &&
                        run->form.under[1].ink == eng::Ink::Art;
@@ -1094,6 +1097,80 @@ int main(int argc, char** argv)
         };
         check(owed(true, false) && !owed(false, false) && !owed(true, true),
               "the grid glow is owed an idle prepare at home only with a language and not in large mode");
+    }
+
+    {
+        HomeFlow nf(fonts, o);
+        nf.model.systems = {{"GB", 3, ""}};
+        nf.kinds = {MenuKind::System};
+        nf.games = [](int) {
+            return std::vector<HomeGame>{{1000, "Synth System Game 0", "GB", "blockie test porter"},
+                                         {1001, "Synth System Game 1", "GB", ""}};
+        };
+        Buffer nout;
+        nf.last_frame = [&nout](const Surface& s) {
+            for (int y = 0; y < s.h; y++)
+                copy_px(s.row(y), nout.surface().row(y), s.w);
+        };
+        nf.port_context = [&nf](int) {
+            nf.nav.stack.push_back(Screen::Port);
+            nf.push(Screen::Port);
+            return true;
+        };
+        nf.setup();
+        std::vector<HomeGame> rec = {{905, "Synth Recent E", "GB", "blockie test porter"}};
+        nf.home.deal_recent(nf.model, rec);
+        int64_t nt = settle(nf, nout, 0);
+        nf.input(PadAction::Left, false, nt);
+        check(nf.nav.pane == Pane::Details && nf.model.game_next == "blockie test porter",
+              "recent in shows game 0's next line beside its title and system");
+        nt = settle(nf, nout, nt);
+        nf.input(PadAction::Back, false, nt);
+        nt = settle(nf, nout, nt);
+        nf.input(PadAction::Accept, false, nt);
+        nt = settle(nf, nout, nt);
+        nf.input(PadAction::Context, false, nt);
+        nt = settle(nf, nout, nt);
+        bool paged = nf.nav.top() == Screen::Port;
+        nf.input(PadAction::Back, false, nt);
+        nf.frame(nt + 16, nout.surface());
+        nf.input(PadAction::Back, false, nt + 32);
+        check(paged && nf.ctl.kind() == FoldKind::Collapse && nf.kept_text().title == "Synth System Game 0" &&
+                  nf.kept_text().next == "blockie test porter",
+              "a quick double back from a port page opened in the grid keeps the shown detail text for the collapse");
+    }
+
+    {
+        HomeFlow kf(fonts, o);
+        kf.model.systems = {{"GB", 3, ""}};
+        kf.kinds = {MenuKind::System};
+        kf.games = [](int) { return std::vector<HomeGame>(); };
+        Buffer kout;
+        kf.last_frame = [&kout](const Surface& s) {
+            for (int y = 0; y < s.h; y++)
+                copy_px(s.row(y), kout.surface().row(y), s.w);
+        };
+        kf.setup();
+        std::vector<HomeGame> rec = {{906, "Synth Recent F", "GB"}, {907, "Synth Recent G", "GBA"}};
+        kf.home.deal_recent(kf.model, rec);
+        int64_t kt = settle(kf, kout, 0);
+        kf.input(PadAction::Left, false, kt);
+        kt = settle(kf, kout, kt);
+        kf.input(PadAction::Right, false, kt);
+        bool out_window = kf.t9().shown(kt).id == 906;
+        Buffer ka, kb;
+        kf.ctl.keep();
+        kf.ctl.render_kept(ka.surface());
+        kt = settle(kf, kout, kt);
+        kf.ctl.keep();
+        kf.ctl.render_kept(kb.surface());
+        Surface sa = ka.surface(), sb = kb.surface();
+        int differ = 0;
+        for (int y = 0; y < sa.h; y++)
+            for (int x = 0; x < sa.w; x++)
+                differ += sa.at(x, y) != sb.at(x, y) ? 1 : 0;
+        check(out_window && kf.kept_text().id == 907 && differ > 0,
+              "render_kept in T9's out window draws the snapshot's text, not the live text");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

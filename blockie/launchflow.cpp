@@ -22,11 +22,12 @@ struct PortWords {
     const char* installing;
     const char* updating;
     const char* removing;
+    const char* getting;
 };
 
 constexpr PortWords kPortWords = {
     "the port quit",        "out of memory",      "the port's files are missing",
-    "a port is installing", "a port is updating", "a port is being removed",
+    "a port is installing", "a port is updating", "a port is being removed", "a port is getting files",
 };
 
 int ms(fx v) { return fx_round(v); }
@@ -144,9 +145,13 @@ LaunchOutcome launch_helper_busy(HelperOp op)
 {
     LaunchOutcome o;
     o.line1 = kNotStarted;
-    o.line2 = op == HelperOp::Update   ? kPortWords.updating
-              : op == HelperOp::Remove ? kPortWords.removing
-                                       : kPortWords.installing;
+    switch (op) {
+    case HelperOp::Update: o.line2 = kPortWords.updating; break;
+    case HelperOp::Remove: o.line2 = kPortWords.removing; break;
+    case HelperOp::SteamGet: o.line2 = kPortWords.getting; break;
+    case HelperOp::None:
+    case HelperOp::Install: o.line2 = kPortWords.installing; break;
+    }
     return o;
 }
 

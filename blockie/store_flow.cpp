@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "../ui/qr.h"
+
 namespace fd {
 
 HomeGame store_game(const StoreItem& it) { return HomeGame{it.id, it.title, it.porter, size_words(it.size)}; }
@@ -21,7 +23,7 @@ void StoreFlow::attach()
         grid_due_ = false;
         leave_due_ = false;
         rest_due_ = false;
-        host.shot(nullptr);
+        shot(nullptr);
         host.closed();
     };
     flow_.open_port = [this](const HomeGame& g) {
@@ -42,17 +44,33 @@ void StoreFlow::attach()
     };
     helper_.on_result = [this](const HelperResult& r) { result(r); };
     helper_.on_progress = [this](const HelperProgress& p) {
+        if (p.what == "copy" && helper_.cmd() == HelperCmd::SteamGet)
+            copying_ = helper_.name();
         bool here = helper_.cmd() != HelperCmd::Refresh && helper_.name() == pp_.item().name;
-        if (flow_.nav.top() == Screen::Port && here) {
+        Screen top = flow_.nav.top();
+        if ((top == Screen::Port || top == Screen::SteamLogin) && here) {
             pp_.progress(p, host.now());
             host.redraw();
         }
+        if (l2 && here && helper_.cmd() == HelperCmd::SteamGet)
+            login(p.what == "login", host.now());
     };
     helper_.on_start = [this](HelperCmd c, const std::string& name) {
         if (c == HelperCmd::Remove && name == pp_.item().name && flow_.nav.top() == Screen::Port) {
             pp_.set_working(true, c, false, host.now());
             host.redraw();
         }
+    };
+    helper_.on_qr = [this](const std::string& url) {
+        Screen top = flow_.nav.top();
+        if ((top != Screen::Port && top != Screen::SteamLogin) || helper_.name() != pp_.item().name)
+            return;
+        QrGrid q;
+        if (!url.empty() && qr_encode(url, q) && qr_module_px(q, kStoreShotSide) >= 2)
+            pp_.set_qr(std::move(q));
+        else
+            pp_.clear_qr();
+        host.redraw();
     };
 }
 
@@ -115,9 +133,13 @@ void StoreFlow::set_catalog(bool ok, Catalog c, int64_t now)
 void StoreFlow::rebuild(int64_t now)
 {
     items = store_items(have_catalog ? &catalog : nullptr, host.index());
-    for (StoreItem& it : items)
+    SteamState steam = host.steam ? host.steam() : SteamState{};
+    for (StoreItem& it : items) {
         if (updated_.count(it.name))
             it.update = false;
+        auto s = steam.ports.find(it.name);
+        it.steam = it.installed && s != steam.ports.end() && !s->second;
+    }
     std::vector<StoreGenre> was = rows;
     rows = store_genres(items, have_catalog);
     Nav& nav = flow_.nav;
@@ -127,7 +149,7 @@ void StoreFlow::rebuild(int64_t now)
                 bool art = it.shot != pp_.item().shot || it.cover != pp_.item().cover;
                 pp_.set_item(it, host.online(), now);
                 if (art)
-                    host.shot(&it);
+                    shot(&it);
             }
     if (!nav.store)
         return;
@@ -168,6 +190,9 @@ int64_t StoreFlow::deadline() const
         int64_t t = host.now();
         d = d < 0 ? t : std::min(d, t);
     }
+    int64_t e = login_due_ ? pp_.overlays_end() : -1;
+    if (e >= 0)
+        d = d < 0 ? e : std::min(d, e);
     return d;
 }
 
@@ -211,8 +236,22 @@ void StoreFlow::settle(int64_t now)
         flow_.swap_tiles(now, [this]() { deal(); });
 }
 
+void StoreFlow::shot(const StoreItem* it)
+{
+    shot_due_ = false;
+    host.shot(it);
+}
+
 void StoreFlow::tick(int64_t now)
 {
+    if (shot_due_)
+        shot(nullptr);
+    if (login_due_ && pp_.overlays_idle(now)) {
+        login_due_ = false;
+        pp_.set_login_wait(false);
+        if (login_ready())
+            login_push(now);
+    }
     if (preview_at_ >= 0 && now >= preview_at_) {
         preview_at_ = -1;
         if (flow_.nav.system_view)
@@ -242,15 +281,67 @@ void StoreFlow::open_port(const StoreItem& it, int64_t now)
     pp_.open(it, host.online(), working);
     if (working)
         pp_.set_working(true, c, !(helper_.running() && helper_.name() == it.name), now);
+    if (working && c == HelperCmd::SteamGet && copying_ == it.name)
+        pp_.set_copying();
     flow_.nav.stack.push_back(Screen::Port);
     flow_.push(Screen::Port);
-    host.shot(&it);
+    shot(&it);
 }
 
 void StoreFlow::ask(HelperCmd c, int64_t now)
 {
     pp_.set_working(true, c, helper_.running(), now);
     helper_.ask(kids_, c, pp_.item().name);
+}
+
+bool StoreFlow::login_ready() const
+{
+    return l2 && helper_.running() && helper_.cmd() == HelperCmd::SteamGet &&
+           helper_.name() == pp_.item().name && !helper_.stopping() && flow_.nav.top() == Screen::Port;
+}
+
+void StoreFlow::login(bool on, int64_t now)
+{
+    if (!on) {
+        login_due_ = false;
+        pp_.set_login_wait(false);
+        login_pop(now);
+        return;
+    }
+    if (!login_ready())
+        return;
+    if (pp_.overlays_idle(now)) {
+        login_due_ = false;
+        pp_.set_login_wait(false);
+        login_push(now);
+        return;
+    }
+    login_due_ = true;
+    pp_.set_login_wait(true);
+}
+
+void StoreFlow::login_push(int64_t now)
+{
+    flow_.redraw();
+    flow_.page_change(now, [this]() {
+        flow_.nav.stack.push_back(Screen::SteamLogin);
+        flow_.push(Screen::SteamLogin);
+    });
+    host.redraw();
+}
+
+void StoreFlow::login_pop(int64_t now)
+{
+    if (flow_.nav.top() != Screen::SteamLogin)
+        return;
+    pp_.clear_qr();
+    pp_.drop_login_dialog();
+    flow_.redraw();
+    flow_.page_change(now, [this]() {
+        flow_.nav.stack.pop_back();
+        flow_.pop(Screen::SteamLogin);
+    });
+    host.redraw();
 }
 
 void StoreFlow::toast(const StoreToast& t, int64_t now)
@@ -268,6 +359,17 @@ void StoreFlow::result(const HelperResult& r)
     int64_t now = host.now();
     if (host.result)
         host.result(r);
+    if (r.cmd == HelperCmd::SteamGet && r.name == copying_)
+        copying_.clear();
+    login_due_ = false;
+    pp_.set_login_wait(false);
+    if (r.cmd == HelperCmd::SteamGet && r.name == pp_.item().name)
+        login_pop(now);
+    if (r.cmd == HelperCmd::SteamLogout) {
+        rebuild(now);
+        host.redraw();
+        return;
+    }
     if (r.cmd == HelperCmd::Refresh) {
         if (r.done)
             host.reread();
@@ -294,16 +396,32 @@ void StoreFlow::result(const HelperResult& r)
     host.redraw();
 }
 
-bool StoreFlow::page_input(Screen, PadAction a, bool repeat, int64_t now)
+bool StoreFlow::page_input(Screen s, PadAction a, bool repeat, int64_t now)
 {
+    if (s == Screen::SteamLogin) {
+        if (pp_.login_action(a, repeat, now) != PortPage::Act::Stop)
+            return false;
+        login_due_ = false;
+        pp_.clear_qr();
+        pp_.drop_login_dialog();
+        flow_.redraw();
+        helper_.cancel(pp_.cmd(), pp_.item().name, now);
+        return true;
+    }
     switch (pp_.action(a, repeat, now)) {
     case PortPage::Act::Pop:
-        host.shot(nullptr);
+        shot_due_ = true;
         return true;
     case PortPage::Act::Install: ask(HelperCmd::Install, now); break;
     case PortPage::Act::Update: ask(HelperCmd::Update, now); break;
     case PortPage::Act::Remove: ask(HelperCmd::Remove, now); break;
-    case PortPage::Act::Stop: helper_.cancel(pp_.cmd(), pp_.item().name, now); break;
+    case PortPage::Act::SteamGet: ask(HelperCmd::SteamGet, now); break;
+    case PortPage::Act::Stop:
+        login_due_ = false;
+        pp_.set_login_wait(false);
+        pp_.clear_qr();
+        helper_.cancel(pp_.cmd(), pp_.item().name, now);
+        break;
     case PortPage::Act::Play: {
         const StoreItem& it = pp_.item();
         if (it.game_id >= 0)

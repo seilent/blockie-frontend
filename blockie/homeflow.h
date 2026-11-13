@@ -80,6 +80,7 @@ public:
     void theme_changed();
     void enter_store(const SelectorModel& m);
     void swap_tiles(int64_t now, const std::function<void()>& change);
+    void page_change(int64_t now, const std::function<void()>& change);
     void reset_menu(std::vector<SelectorItem> systems, int focus);
     void launch_page(const HomeGame& g) { launch(g); }
     SelectorModel& home_model() { return store_ ? store_->model : model; }
@@ -117,6 +118,7 @@ public:
     bool opening() const { return opening_; }
     const SelectorModel& kept() const { return kept_; }
     const Nav& kept_nav() const { return kept_nav_; }
+    const T9Text& kept_text() const { return kept_t9_; }
     int boundary(int64_t t) const;
     bool take_step_in();
     Rect take_art_rect();
@@ -181,6 +183,7 @@ private:
     PageMove pm_;
     SelectorModel kept_;
     Nav kept_nav_;
+    T9Text kept_t9_;
     int64_t now_ = 0;
     bool launched_ = false;
     int page_seed_ = -1;

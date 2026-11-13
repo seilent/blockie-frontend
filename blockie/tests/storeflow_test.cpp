@@ -2,7 +2,9 @@
 #include <string>
 #include <vector>
 
+#include "../../ui/qr.h"
 #include "../store_flow.h"
+#include "../theme.h"
 
 using namespace fd;
 
@@ -43,6 +45,7 @@ struct Rig {
     int rescans = 0, rereads = 0, toasts = 0, spawns = 0, launches = 0, redraws = 0, shots = 0;
     bool online = true;
     std::vector<IndexPort> index;
+    SteamState steam;
 
     explicit Rig(Fonts& f) : fonts(f), sf(flow, pp, helper, kids)
     {
@@ -57,6 +60,7 @@ struct Rig {
         sf.host.online = [this]() { return online; };
         sf.host.stale = []() { return false; };
         sf.host.index = [this]() { return index; };
+        sf.host.steam = [this]() { return steam; };
         sf.host.rescan = [this]() { rescans++; };
         sf.host.reread = [this]() { rereads++; };
         sf.host.preview_art = [](const std::vector<HomeGame>&, const std::vector<HomeGame>&) {};
@@ -80,7 +84,10 @@ struct Rig {
         flow.page_input = [this](Screen s, PadAction a, bool r) { return sf.page_input(s, a, r, now); };
         flow.draw_page = [this](Canvas& c, Screen s, int64_t t) {
             InkLayer ink;
-            pp.draw(c, ink, t);
+            if (s == Screen::SteamLogin)
+                pp.draw_login(c, ink, t);
+            else
+                pp.draw(c, ink, t);
         };
         flow.setup();
     }
@@ -132,6 +139,33 @@ bool to_hold(Rig& r)
     r.now += 16;
     return asked && r.flow.nav.top() == Screen::Port && r.pp.action_count(r.now) == 1 &&
            r.pp.action_count(r.now + kPortDoneHoldMs) == 2;
+}
+
+const std::string kUrl38 = "https://s.team/q/1/1111111111111111111";
+
+bool to_port(Rig& r, bool update = false)
+{
+    Catalog c;
+    c.ports = {port("blockie-test-a.zip", "action")};
+    c.ports[0].update = update;
+    r.index = {{7, "blockie-test-a", "blockie-test-a.zip", "blockie-test-a", ""}};
+    r.sf.set_catalog(true, c, r.now);
+    r.flow.input(PadAction::Context, false, r.now);
+    r.land();
+    r.flow.input(PadAction::Accept, false, r.now);
+    r.land();
+    r.flow.input(PadAction::Accept, false, r.now);
+    r.land();
+    return r.flow.nav.top() == Screen::Port && r.pp.item().installed;
+}
+
+bool getting(Rig& r)
+{
+    r.steam.ports = {{"blockie-test-a.zip", false}};
+    bool open = to_port(r);
+    r.flow.input(PadAction::Accept, false, r.now);
+    return open && r.helper.running() && r.helper.cmd() == HelperCmd::SteamGet &&
+           r.helper.name() == "blockie-test-a.zip";
 }
 
 bool to_remove(Rig& r)
@@ -572,6 +606,420 @@ int main(int argc, char** argv)
         check(r.flow.nav.top() == Screen::Port && same && r.shots == opened + 1 &&
                   r.pp.item().shot == c.ports[0].screenshot,
               "f2: a refresh that changes the open port's screenshot asks for it again, an unchanged one does not");
+    }
+
+    {
+        Rig r(fonts);
+        r.steam.ports = {{"blockie-test-a.zip", false}};
+        bool open = to_port(r);
+        check(open && r.pp.action_count(r.now) == 3 && r.pp.focus() == 0,
+              "sf1: get in steam.tsv opens the port page on get files above play and remove");
+        r.flow.input(PadAction::Accept, false, r.now);
+        check(r.helper.running() && r.helper.cmd() == HelperCmd::SteamGet && r.launches == 0,
+              "sf1: accept on get files runs steam-get for the port");
+        Rig g(fonts);
+        g.steam.ports = {{"blockie-test-a.zip", true}};
+        open = to_port(g);
+        g.flow.input(PadAction::Accept, false, g.now);
+        check(open && g.pp.action_count(g.now) == 2 && g.launches == 1 && !g.helper.running(),
+              "sf1: a got port has no get files row");
+        Rig u(fonts);
+        u.steam.ports = {{"blockie-test-a.zip", false}};
+        open = to_port(u, true);
+        u.flow.input(PadAction::Accept, false, u.now);
+        check(open && u.pp.action_count(u.now) == 3 && u.launches == 1 && !u.helper.running(),
+              "sf1: with an update offered there is no get files row");
+        Rig o(fonts);
+        o.steam.ports = {{"blockie-test-a.zip", false}};
+        o.online = false;
+        open = to_port(o);
+        o.flow.input(PadAction::Accept, false, o.now);
+        check(open && o.pp.action_count(o.now) == 2 && o.launches == 1 && !o.helper.running(),
+              "sf1: offline there is no get files row");
+        Rig n(fonts);
+        open = to_port(n);
+        check(open && n.pp.action_count(n.now) == 2, "sf1: a port with no steam.tsv line has no get files row");
+    }
+
+    {
+        Rig r(fonts);
+        bool run = getting(r);
+        r.helper.line("progress\tlogin\t0\t-");
+        r.helper.line("progress\tcopy\t0\t3");
+        r.flow.input(PadAction::Back, false, r.now);
+        check(run && !r.pp.dialog_shown() && r.pp.copying() && r.flow.nav.top() == Screen::Port,
+              "sf1: back while copying does nothing");
+        Rig d(fonts);
+        run = getting(d);
+        d.helper.line("progress\tdownload\t1048576\t6012954214");
+        d.flow.input(PadAction::Back, false, d.now);
+        bool asked = d.pp.dialog_shown();
+        d.flow.input(PadAction::Up, false, d.now);
+        d.helper.line("progress\tcopy\t0\t3");
+        bool closed = !d.pp.dialog_shown();
+        d.flow.input(PadAction::Accept, false, d.now);
+        check(run && asked && closed && d.helper.running() && d.helper.deadline() < 0,
+              "sf1: the first copy line closes an open stop confirm and its accept does nothing");
+        Rig s(fonts);
+        run = getting(s);
+        s.flow.input(PadAction::Back, false, s.now);
+        s.flow.input(PadAction::Up, false, s.now);
+        s.flow.input(PadAction::Accept, false, s.now);
+        check(run && s.helper.deadline() >= 0, "sf1: stop on the stop confirm stops the get");
+    }
+
+    {
+        Rig r(fonts);
+        bool run = getting(r);
+        r.helper.line("progress\tcopy\t3\t3");
+        r.helper.line("done\tblockie-test-a.zip");
+        r.steam.ports = {{"blockie-test-a.zip", true}};
+        r.helper.finish();
+        r.now += 16;
+        bool held = r.pp.action_count(r.now) == 3 && r.pp.action_count(r.now + kPortDoneHoldMs) == 2;
+        r.flow.input(PadAction::Accept, false, r.now);
+        bool quiet = r.launches == 0 && !r.helper.running() && r.pp.action_count(r.now) == 2;
+        r.flow.input(PadAction::Accept, false, r.now);
+        check(run && held && quiet && r.launches == 1 && r.pp.focus() == 0,
+              "sf1: a done get holds 250 ms, an accept in the hold does nothing, then the focus is on play");
+        Rig f(fonts);
+        run = getting(f);
+        f.helper.line("fail\tblockie-test-a.zip\towned");
+        f.steam.ports.clear();
+        bool toasts = f.pp.toasting(f.now);
+        f.helper.finish();
+        check(run && !toasts && f.pp.toasting(f.now) && f.pp.action_count(f.now) == 2,
+              "sf1: fail owned toasts and the row goes once steam.tsv drops it");
+    }
+
+    {
+        Rig r(fonts);
+        bool run = getting(r);
+        r.helper.line("progress\tlogin\t0\t-");
+        r.helper.line("qr\t" + kUrl38);
+        bool shown = r.pp.qr_shown();
+        r.helper.line("progress\tlogin\t1\t300");
+        bool kept = r.pp.qr_shown();
+        r.helper.line("qr\thttp://s.team/q/1/1111111111111111111");
+        bool refused = !r.pp.qr_shown();
+        r.helper.line("qr\t" + kUrl38);
+        r.helper.line("progress\tcheck\t0\t-");
+        bool checked = !r.pp.qr_shown();
+        r.helper.line("qr\t" + kUrl38);
+        r.flow.input(PadAction::Back, false, r.now);
+        r.flow.input(PadAction::Up, false, r.now);
+        r.flow.input(PadAction::Accept, false, r.now);
+        bool stopped = !r.pp.qr_shown();
+        r.helper.line("qr\t" + kUrl38);
+        check(run && shown && kept && refused && checked && stopped && !r.pp.qr_shown(),
+              "sf1: the code shows on a qr line and clears on a refused line, a non login line and stop");
+        r.helper.finish();
+        check(!r.pp.qr_shown(), "sf1: a finished get leaves no code");
+    }
+
+    {
+        QrGrid v3, v4, v18;
+        bool enc = qr_encode(kUrl38, v3) && qr_encode("https://s.team/q/1/" + std::string(41, '2'), v4) &&
+                   qr_encode("https://s.team/q/1/" + std::string(493, '3'), v18);
+        check(enc && v3.version == 3 && qr_module_px(v3, kStoreShotSide) == 9 && v4.version == 4 &&
+                  qr_module_px(v4, kStoreShotSide) == 8 && v18.version == 18 && qr_module_px(v18, kStoreShotSide) == 3,
+              "sf1: 38 bytes is version 3 at 9 px, 60 bytes version 4 at 8 px, 512 bytes version 18 at 3 px");
+        bool ok[2] = {false, false};
+        for (int light = 0; light < 2; light++) {
+            set_theme_light(light != 0);
+            Rig r(fonts);
+            bool run = getting(r);
+            r.helper.line("qr\t" + kUrl38);
+            Buffer b;
+            Canvas c(b.surface());
+            InkLayer ink;
+            r.pp.draw(c, ink, r.now);
+            Surface sb = b.surface();
+            Pix dark = LiveF::pack(0x111111), white = LiveF::pack(0xFFFFFF);
+            int x0 = kPortArtX + 1, y0 = kPortArtTop + 1, m0 = x0 + 4 * 9, n0 = y0 + 4 * 9;
+            ok[light] = run && sb.at(x0, y0) == white && sb.at(m0 - 1, n0) == white && sb.at(m0, n0) == dark &&
+                        sb.at(m0 + 7 * 9 - 1, n0) == dark && sb.at(m0 + 7 * 9, n0) == white &&
+                        sb.at(x0 + 333 - 1, y0 + 333 - 1) == white && (light || sb.at(x0 - 1, y0) == dark);
+        }
+        set_theme_light(false);
+        check(ok[0] && ok[1],
+              "sf1: the code fills the art rect on the page canvas, 9 px modules in a white quiet zone, both themes");
+    }
+
+    {
+        auto reopen = [&](Rig& r) {
+            int64_t id = r.pp.item().id;
+            r.flow.nav.stack.pop_back();
+            r.flow.pop(Screen::Port);
+            r.land();
+            r.flow.open_port(HomeGame{id, "", "", ""});
+            r.land();
+            r.flow.input(PadAction::Back, false, r.now);
+            return r.flow.nav.top() == Screen::Port && !r.pp.dialog_shown() && r.pp.copying();
+        };
+        Rig r(fonts);
+        bool run = getting(r);
+        r.helper.line("progress\tcopy\t0\t3");
+        check(run && reopen(r), "sf1: a page reopened through the deep link mid copy keeps Back doing nothing");
+        Rig q(fonts);
+        run = getting(q);
+        q.helper.line("progress\tcopy\t0\t3");
+        q.helper.ask(q.kids, HelperCmd::SteamGet, "blockie-test-b.zip");
+        q.helper.ask(q.kids, HelperCmd::Install, "blockie-test-c.zip");
+        check(run && reopen(q),
+              "sf1: a cancelled queued get for another port keeps the copy hold on the reopened page");
+    }
+
+    {
+        Rig r(fonts);
+        r.helper.ask(r.kids, HelperCmd::SteamLogout, "");
+        r.helper.line("fail\tsteam-logout\tother");
+        r.helper.finish();
+        check(r.toasts == 0, "sf1: a failed sign out leaves its toast to the host");
+    }
+
+    {
+        auto login = [&](Rig& r) {
+            bool run = getting(r);
+            r.helper.line("progress\tlogin\t0\t-");
+            r.land();
+            return run && r.flow.nav.top() == Screen::SteamLogin;
+        };
+        Rig r(fonts);
+        r.sf.l2 = true;
+        bool up = login(r);
+        size_t depth = r.flow.nav.stack.size();
+        r.helper.line("qr\t" + kUrl38);
+        r.helper.line("progress\tlogin\t1\t300");
+        r.now += kProgressMs;
+        r.pp.tick(r.now);
+        check(up && r.pp.qr_shown() && r.pp.words() == "signing in 299" && r.flow.nav.top() == Screen::SteamLogin &&
+                  r.flow.nav.stack.size() == depth,
+              "sf1 l2: a login line pushes the page once, its qr and count lines reach it on top");
+        Rig dl(fonts);
+        dl.sf.l2 = true;
+        bool dots = login(dl) && !dl.pp.arcing();
+        check(dots && dl.pp.deadline(dl.now) > dl.now && dl.pp.deadline(dl.now, false) < 0,
+              "sf1 l2: the busy dots ask for frames only while the port page is on top");
+        r.helper.line("progress\tcheck\t0\t-");
+        r.land();
+        bool popped = r.flow.nav.top() == Screen::Port && !r.pp.qr_shown() && r.flow.nav.stack.size() == depth - 1;
+        r.helper.line("progress\tlogin\t0\t-");
+        r.land();
+        check(popped && r.flow.nav.top() == Screen::SteamLogin,
+              "sf1 l2: a check line pops the page and a retry login pushes it again");
+    }
+
+    {
+        Rig w(fonts);
+        w.sf.l2 = true;
+        bool run = getting(w);
+        w.now += 10000;
+        w.sf.tick(w.now);
+        w.flow.input(PadAction::Back, false, w.now);
+        w.helper.line("progress\tlogin\t0\t-");
+        bool waits = w.flow.nav.top() == Screen::Port && w.pp.login_wait() && w.sf.deadline() < 0;
+        w.flow.input(PadAction::Accept, false, w.now);
+        int64_t at = w.sf.deadline();
+        bool timed = at == w.now + fx_round(tok::motion_dialogHide);
+        w.now = at - 1;
+        w.sf.tick(w.now);
+        bool early = w.flow.nav.top() == Screen::Port;
+        w.now = at;
+        w.sf.tick(w.now);
+        check(run && waits && timed && early && w.flow.nav.top() == Screen::SteamLogin && !w.pp.login_wait(),
+              "sf1 l2: a login under an open confirm waits, the deadline is the close's end and the push starts there");
+        Rig a(fonts);
+        a.sf.l2 = true;
+        run = getting(a);
+        a.flow.input(PadAction::Back, false, a.now);
+        a.helper.line("progress\tlogin\t0\t-");
+        a.helper.line("qr\t" + kUrl38);
+        a.flow.input(PadAction::Accept, false, a.now);
+        Buffer b;
+        Canvas c(b.surface());
+        InkLayer ink;
+        a.pp.draw(c, ink, a.pp.overlays_end());
+        Surface sb = b.surface();
+        check(run && a.pp.qr_shown() && a.pp.login_wait() &&
+                  sb.at(kPortArtX + kStoreShotSide / 2, kPortArtTop + 1) == sb.at(2, kPortraitH - 2),
+              "sf1 l2: while the push waits the port page's art slot draws no code");
+        Rig d(fonts);
+        d.sf.l2 = true;
+        run = getting(d);
+        d.flow.input(PadAction::Back, false, d.now);
+        d.helper.line("progress\tlogin\t0\t-");
+        d.flow.input(PadAction::Up, false, d.now);
+        d.flow.input(PadAction::Accept, false, d.now);
+        bool stopped = !d.pp.login_wait();
+        d.now += 1000;
+        d.sf.tick(d.now);
+        Rig f(fonts);
+        f.sf.l2 = true;
+        run = run && getting(f);
+        f.flow.input(PadAction::Back, false, f.now);
+        f.helper.line("progress\tlogin\t0\t-");
+        f.helper.line("fail\tblockie-test-a.zip\tlogin");
+        f.helper.finish();
+        bool failed = !f.pp.login_wait();
+        f.now += 1000;
+        f.sf.tick(f.now);
+        check(run && stopped && failed && d.flow.nav.top() == Screen::Port && f.flow.nav.top() == Screen::Port,
+              "sf1 l2: stop and a result drop a waiting push");
+    }
+
+    {
+        auto login = [&](Rig& r) {
+            bool run = getting(r);
+            r.helper.line("progress\tlogin\t0\t-");
+            r.land();
+            return run && r.flow.nav.top() == Screen::SteamLogin;
+        };
+        Rig g(fonts);
+        g.sf.l2 = true;
+        bool on = login(g);
+        size_t depth = g.flow.nav.stack.size();
+        g.helper.line("qr\t" + kUrl38);
+        g.flow.input(PadAction::Back, false, g.now);
+        g.flow.input(PadAction::Up, false, g.now);
+        g.flow.input(PadAction::Accept, false, g.now);
+        bool clean = !g.pp.qr_shown() && !g.pp.login_dialog_visible(g.now);
+        g.land();
+        g.helper.line("progress\tlogin\t2\t300");
+        g.land();
+        bool kept = g.flow.nav.top() == Screen::Port && g.flow.nav.stack.size() == depth - 1;
+        g.helper.line("fail\tblockie-test-a.zip\tcancel");
+        g.helper.finish();
+        g.land();
+        Rig o(fonts);
+        o.sf.l2 = true;
+        on = on && login(o);
+        size_t deep = o.flow.nav.stack.size();
+        o.helper.line("progress\tcheck\t0\t-");
+        o.helper.line("done\tblockie-test-a.zip");
+        o.helper.finish();
+        o.land();
+        check(on && clean && kept && g.flow.nav.top() == Screen::Port && g.flow.nav.stack.size() == depth - 1 &&
+                  o.flow.nav.top() == Screen::Port && o.flow.nav.stack.size() == deep - 1,
+              "sf1 l2: every pop is guarded, stop then fail cancel and check then done each pop once");
+        Rig c(fonts);
+        c.sf.l2 = true;
+        on = login(c);
+        c.flow.input(PadAction::Back, false, c.now);
+        c.land();
+        bool asked = c.pp.login_dialog_shown();
+        c.helper.line("progress\tcheck\t0\t-");
+        check(on && asked && !c.pp.login_dialog_visible(c.now) && c.flow.nav.top() == Screen::Port &&
+                  c.helper.running(),
+              "sf1 l2: a check under the page's open confirm pops it with the confirm gone at once and no stop");
+        Rig e(fonts);
+        e.sf.l2 = true;
+        on = login(e);
+        e.helper.line("fail\tblockie-test-a.zip\tlogin");
+        e.helper.finish();
+        check(on && e.flow.nav.top() == Screen::Port && e.pp.toasting(e.now) && e.toasts == 0,
+              "sf1 l2: a result pops the page before its toast, which shows on the port page");
+        auto lit = [&](const Surface& s, int& lx, int& ly) {
+            Rect b = login_box();
+            uint32_t ground = s.at(2, kPortraitH - 2);
+            for (int y = b.y0; y < b.y1; y++)
+                for (int x = b.x0; x < b.x1; x++)
+                    if (s.at(x, y) != ground) {
+                        lx = x;
+                        ly = y;
+                        return true;
+                    }
+            return false;
+        };
+        int lx = 0, ly = 0;
+        Rig p(fonts);
+        p.sf.l2 = true;
+        on = login(p);
+        p.helper.line("qr\t" + kUrl38);
+        p.flow.redraw();
+        p.flow.frame(p.now, p.out.surface());
+        bool coded = lit(p.out.surface(), lx, ly);
+        p.helper.line("progress\tcheck\t0\t-");
+        p.flow.frame(p.now, p.out.surface());
+        Surface po = p.out.surface();
+        check(on && coded && po.at(lx, ly) == po.at(2, kPortraitH - 2),
+              "sf1 l2: the check pop's first frame renders the page fresh, with no code in the box");
+        Rig q(fonts);
+        q.sf.l2 = true;
+        on = login(q);
+        q.helper.line("qr\t" + kUrl38);
+        q.flow.redraw();
+        q.flow.frame(q.now, q.out.surface());
+        coded = lit(q.out.surface(), lx, ly);
+        q.flow.input(PadAction::Back, false, q.now);
+        q.land();
+        q.flow.input(PadAction::Up, false, q.now);
+        q.land();
+        q.flow.input(PadAction::Accept, false, q.now);
+        q.flow.frame(q.now, q.out.surface());
+        Surface qo = q.out.surface();
+        check(on && coded && q.flow.nav.top() == Screen::Port && qo.at(lx, ly) == qo.at(2, kPortraitH - 2),
+              "sf1 l2: the stop pop's first frame renders the page fresh, with no code in the box");
+    }
+
+    {
+        auto waiting = [&](Rig& r) {
+            bool run = getting(r);
+            r.now += 10000;
+            r.sf.tick(r.now);
+            r.flow.input(PadAction::Back, false, r.now);
+            r.helper.line("progress\tlogin\t0\t-");
+            return run && r.pp.login_wait();
+        };
+        Rig m(fonts);
+        m.sf.l2 = true;
+        bool on = waiting(m);
+        size_t depth = m.flow.nav.stack.size();
+        m.flow.input(PadAction::Accept, false, m.now);
+        m.now = m.sf.deadline();
+        m.helper.line("progress\tlogin\t1\t300");
+        bool once = m.flow.nav.top() == Screen::SteamLogin && !m.pp.login_wait();
+        m.sf.tick(m.now);
+        check(on && once && m.flow.nav.stack.size() == depth + 1,
+              "sf1 l2: a login line on the close end's wake pushes once and clears the wait");
+        Rig n(fonts);
+        n.sf.l2 = true;
+        on = waiting(n);
+        n.helper.line("progress\tcheck\t0\t-");
+        n.flow.input(PadAction::Accept, false, n.now);
+        n.now = n.pp.overlays_end();
+        n.sf.tick(n.now);
+        check(on && !n.pp.login_wait() && n.flow.nav.top() == Screen::Port,
+              "sf1 l2: a check line drops a waiting push");
+        Rig q(fonts);
+        q.sf.l2 = true;
+        on = waiting(q);
+        q.helper.ask(q.kids, HelperCmd::Install, "blockie-test-b.zip");
+        q.helper.ask(q.kids, HelperCmd::Install, "blockie-test-c.zip");
+        bool dropped = !q.pp.login_wait();
+        q.flow.input(PadAction::Accept, false, q.now);
+        q.now = q.pp.overlays_end();
+        q.sf.tick(q.now);
+        bool none = q.flow.nav.top() == Screen::Port;
+        q.helper.line("progress\tlogin\t1\t300");
+        check(on && dropped && none && q.flow.nav.top() == Screen::SteamLogin,
+              "sf1 l2: a replaced ask's cancel drops the waiting push and the next login line pushes");
+    }
+
+    {
+        Rig r(fonts);
+        bool open = to_port(r);
+        struct Shot {
+            bool active;
+            Screen top;
+        };
+        std::vector<Shot> shots;
+        r.sf.host.shot = [&](const StoreItem*) { shots.push_back({r.flow.ctl.active(), r.flow.nav.top()}); };
+        r.flow.input(PadAction::Back, false, r.now);
+        bool none_yet = shots.empty();
+        r.sf.tick(r.now);
+        check(open && none_yet && shots.size() == 1 && shots[0].active && shots[0].top != Screen::Port,
+              "f2: a port page pop asks for the next shot only once the pop has started");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

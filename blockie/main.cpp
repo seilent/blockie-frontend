@@ -75,11 +75,17 @@
 #include "wl_keys.h"
 #include "zones.h"
 
+#ifndef BLOCKIE_FE_STEAM_FILES
+#define BLOCKIE_FE_STEAM_FILES 0
+#endif
+
 namespace fd {
 
 namespace {
 
 using Art = std::shared_ptr<const Image>;
+
+constexpr bool kSteamFiles = BLOCKIE_FE_STEAM_FILES != 0;
 
 constexpr int kThemeWaitMs = 300;
 constexpr int kPrepareRows = 16;
@@ -484,6 +490,8 @@ static int run()
     auto render_page = [&](Canvas& c, Screen sc, int64_t now) {
         if (sc == Screen::Port)
             portp.draw(c, ink, now);
+        else if (sc == Screen::SteamLogin)
+            portp.draw_login(c, ink, now);
         else if (sc == Screen::Bluetooth)
             btp.draw(c, ink, now);
         else if (sc == Screen::Settings)
@@ -493,6 +501,8 @@ static int run()
         if (nav.top() == Screen::Settings && settings_page.animating(now))
             return true;
         if (nav.top() == Screen::Port && portp.animating(now))
+            return true;
+        if (nav.top() == Screen::SteamLogin && portp.login_animating(now))
             return true;
         return nav.top() == Screen::Bluetooth && btp.animating(now);
     };
@@ -826,7 +836,7 @@ static int run()
             if (drp.game_id != shot_id)
                 return;
             shot_art = drp.img;
-            if (nav.top() == Screen::Port)
+            if (nav.top() == Screen::Port || nav.top() == Screen::SteamLogin)
                 portp.set_art(shot_art);
             want_redraw('a');
             return;
@@ -933,7 +943,7 @@ static int run()
         int64_t id = it ? it->id + kStoreIdBase : -1;
         const std::string path = !it ? std::string() : !it->shot.empty() ? it->shot : it->cover;
         if (id == shot_id && path == shot_path) {
-            if (shot_art && nav.top() == Screen::Port)
+            if (shot_art && (nav.top() == Screen::Port || nav.top() == Screen::SteamLogin))
                 portp.set_art(shot_art);
             return;
         }
@@ -949,7 +959,7 @@ static int run()
         }
         if (id != shot_id || path.empty()) {
             shot_art.reset();
-            if (nav.top() == Screen::Port)
+            if (nav.top() == Screen::Port || nav.top() == Screen::SteamLogin)
                 portp.set_art(nullptr);
         }
         shot_id = id;
@@ -1002,6 +1012,11 @@ static int run()
             read_catalog_async();
         }
     };
+    auto sync_steam = [&]() {
+        settings_page.set_row(kSteamRow, steam_row(read_steam(ports_dir + kSteamTsv).signed_in), now_ms());
+        if (nav.top() == Screen::Settings)
+            want_redraw('s');
+    };
     sf.host.now = now_ms;
     sf.host.is_ports = [&](int sys) {
         return sys >= 0 && sys < (int)sys_ids.size() && sys_ids[(size_t)sys] == kPortsSystem;
@@ -1013,6 +1028,12 @@ static int run()
         return stat(path.c_str(), &sb) != 0 || time(nullptr) - sb.st_mtime > kCatalogStaleS;
     };
     sf.host.index = [&]() { return index_ports(lib); };
+    sf.host.steam = [&]() {
+        SteamState st = read_steam(ports_dir + kSteamTsv);
+        if (!kSteamFiles)
+            st.ports.clear();
+        return st;
+    };
     sf.host.rescan = rescan_ports;
     sf.host.reread = read_catalog_async;
     sf.host.preview_art = [&](const std::vector<HomeGame>& shown, const std::vector<HomeGame>& want) {
@@ -1030,6 +1051,14 @@ static int run()
     sf.host.toast = [&](const std::string& l1, const std::string& l2) { toast.show(now_ms(), l1, l2, true); };
     sf.host.closed = [&]() { recent_due = true; };
     sf.host.redraw = [&]() { want_redraw('h'); };
+    sf.host.result = [&](const HelperResult& r) {
+        sync_steam();
+        StoreToast t = r.cmd == HelperCmd::SteamLogout ? store_toast(r) : StoreToast{};
+        if (t.show && nav.top() == Screen::Settings)
+            settings_page.toast(now_ms(), t.line1, t.line2);
+        else if (t.show)
+            toast.show(now_ms(), t.line1, t.line2, nav.top() == Screen::Home);
+    };
     sf.attach();
     was_online = online();
     flow.launch_game = [&](const HomeGame& g) {
@@ -1054,6 +1083,7 @@ static int run()
             for (auto& k : row_keys)
                 if (!k->has_value())
                     k->fetch(now);
+            sync_steam();
             Storage st = read_storage(data_root, kVarDir, kSystemDir);
             settings_page.set_row(kStorageRow, info_row(storage_value(st), storage_lines(st)), now);
             settings_page.set_row(kAboutRow, info_row("", about_lines(kOsRelease, frontend_commit(), kernel_release())),
@@ -1071,7 +1101,7 @@ static int run()
         int64_t now = now_ms();
         if (sc == Screen::Settings)
             return settings_page.action(a, rep, now);
-        if (sc == Screen::Port) {
+        if (sc == Screen::Port || sc == Screen::SteamLogin) {
             want_redraw('i');
             return sf.page_input(sc, a, rep, now);
         }
@@ -1327,6 +1357,11 @@ static int run()
             return;
         nav.stack.push_back(Screen::Bluetooth);
         flow.push(Screen::Bluetooth);
+    };
+    settings_page.on_action = [&](const std::string& id) {
+        HelperCmd c = HelperCmd::Refresh;
+        if (id == kSteamRow && !(ports.holds(std::string(), c) && c == HelperCmd::SteamLogout))
+            ports.ask(kids, HelperCmd::SteamLogout, std::string());
     };
     std::string bt_sub = bt_subtitle(bt.state(), now_ms());
     settings_page.set_row(kBluetoothRow, info_row(bt_sub), now_ms());
@@ -1713,7 +1748,8 @@ static int run()
         until(toast.deadline(pnow));
         until(ports.deadline());
         until(sf.deadline());
-        int64_t port_due = nav.top() == Screen::Port ? portp.deadline(pnow) : -1;
+        bool port_top = nav.top() == Screen::Port || nav.top() == Screen::SteamLogin;
+        int64_t port_due = port_top ? portp.deadline(pnow, nav.top() == Screen::Port) : -1;
         until(port_due);
         until(launch.deadline());
         until(ready_report.deadline());
@@ -1805,14 +1841,14 @@ static int run()
                 continue;
             break;
         }
+        if (hi >= 0 && (fds[hi].revents & (POLLIN | POLLHUP | POLLERR)))
+            ports.readable();
         if (gate_pump(fds[0].revents) && !pump())
             break;
         if (fds[ei].revents & POLLIN)
             drain_event(gf.event.fd);
         if (bi >= 0 && (fds[bi].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR)))
             bus.pump();
-        if (hi >= 0 && (fds[hi].revents & (POLLIN | POLLHUP | POLLERR)))
-            ports.readable();
         if (ci >= 0 && (fds[ci].revents & POLLIN))
             take_catalog();
         if (port_due >= 0 && now_ms() >= port_due)

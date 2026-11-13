@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -9,7 +10,9 @@
 #include <functional>
 #include <unordered_map>
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "library.h"
 #include "ring_spin.h"
@@ -199,6 +202,50 @@ bool read_catalog(const std::string& path, const std::string& ports_dir, Catalog
     if (!ok)
         out.ports.clear();
     return ok;
+}
+
+SteamState read_steam(const std::string& path)
+{
+    SteamState out;
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY | O_NOFOLLOW);
+    if (fd < 0)
+        return out;
+    struct stat sb;
+    bool ok = fstat(fd, &sb) == 0 && S_ISREG(sb.st_mode);
+    std::string body(ok ? kSteamTsvCap : 0, '\0');
+    size_t got = 0;
+    while (got < body.size()) {
+        ssize_t r = read(fd, &body[got], body.size() - got);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        got += (size_t)r;
+    }
+    close(fd);
+    body.resize(got);
+    size_t end = body.size() < kSteamTsvCap ? body.size() : body.rfind('\n') + 1;
+    std::vector<std::string> lines;
+    for (size_t i = 0; i < end;) {
+        size_t nl = body.find('\n', i);
+        if (nl == std::string::npos)
+            nl = end;
+        lines.push_back(body.substr(i, nl - i));
+        i = nl + 1;
+    }
+    if (lines.empty() || (lines[0] != "signed\t0" && lines[0] != "signed\t1"))
+        return out;
+    out.signed_in = lines[0] == "signed\t1";
+    for (size_t k = 1; k < lines.size(); k++) {
+        const std::string& l = lines[k];
+        size_t a = l.find('\t'), b = a == std::string::npos ? a : l.find('\t', a + 1);
+        if (b == std::string::npos || l.compare(0, a, "port") != 0)
+            continue;
+        std::string name = l.substr(a + 1, b - a - 1), state = l.substr(b + 1);
+        if (!name.empty() && name.size() <= kNameCap && (state == "get" || state == "got"))
+            out.ports[name] = state == "got";
+    }
+    return out;
 }
 
 std::vector<StoreItem> store_items(const Catalog* cat, const std::vector<IndexPort>& index)
@@ -396,6 +443,12 @@ std::string progress_words(const HelperProgress& p)
 {
     if (p.what == "wait")
         return "waiting";
+    if (p.what == "login")
+        return p.total > 0 ? "signing in " + std::to_string(std::max<int64_t>(0, p.total - p.done)) : "signing in";
+    if (p.what == "check")
+        return "checking";
+    if (p.what == "copy")
+        return "copying";
     if (p.what == "unpack")
         return "unpacking";
     if (p.what == "install")
@@ -408,7 +461,7 @@ std::string progress_words(const HelperProgress& p)
     return p.what == "runtime" ? "runtime " + words : words;
 }
 
-bool progress_known(const HelperProgress& p) { return p.total > 0 && p.what != "wait"; }
+bool progress_known(const HelperProgress& p) { return p.total > 0 && p.what != "wait" && p.what != "copy"; }
 
 int progress_arc(const HelperProgress& p) { return progress_known(p) ? ring_arc(p.done, p.total, 0).sweep : 0; }
 
@@ -435,6 +488,19 @@ StoreToast store_toast(const HelperResult& r)
     StoreToast t;
     if (r.done || r.why == "cancel" || r.why == "unknown-runtime")
         return t;
+    if (r.cmd == HelperCmd::SteamGet || r.cmd == HelperCmd::SteamLogout) {
+        static const std::unordered_map<std::string, const char*> kSteamLine2 = {
+            {"network", "download failed"}, {"space", "card full"},          {"owned", "not in your library"},
+            {"expired", "sign in timed out"}, {"login", "sign in failed"},   {"exists", "files already there"},
+            {"busy", "a game is running"},    {"nodata", "no card"},
+        };
+        bool get = r.cmd == HelperCmd::SteamGet;
+        auto line2 = kSteamLine2.find(r.why);
+        t.show = true;
+        t.line1 = get ? "get files failed" : "sign out failed";
+        t.line2 = get && line2 != kSteamLine2.end() ? line2->second : "";
+        return t;
+    }
     static const std::unordered_map<std::string, const char*> kLine2 = {
         {"network", "download failed"},  {"space", "card full"},     {"md5", "download damaged"},
         {"runtime", "runtime download failed"}, {"nodata", "no card"}, {"busy", "a game is running"},

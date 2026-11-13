@@ -317,7 +317,12 @@ public:
         case Want::In: ctl.start(FoldKind::Expand, p2(true, true), now); break;
         case Want::Out: ctl.start(FoldKind::Collapse, p2(true, false), now); break;
         case Want::Push: ctl.start(FoldKind::Push, page(), now); break;
-        case Want::Pop: ctl.start(FoldKind::Pop, page(), now); break;
+        case Want::Pop: {
+            FoldPlay p = page();
+            p.kept_from = true;
+            ctl.start(FoldKind::Pop, p, now);
+            break;
+        }
         case Want::None: break;
         }
     }
@@ -1144,6 +1149,69 @@ int main()
         check(std::string(copy.start_tag()) == "rest", "motion: a fold from rest whose from side is copied from the "
                                                        "last frame is tagged rest");
     }
+
+    {
+        Host h(0, 12, true);
+        int kept = 0, lasts = 0;
+        auto render_kept = h.ctl.render_kept;
+        auto last = h.ctl.last;
+        h.ctl.render_kept = [&](const Surface& s) {
+            kept++;
+            render_kept(s);
+        };
+        h.ctl.last = [&](const Surface& s) {
+            lasts++;
+            last(s);
+        };
+        h.nav.focus = 2;
+        h.bar.set(h.bar_target());
+        h.press(PadAction::Accept, 0);
+        h.frame(5000, out);
+        kept = 0;
+        lasts = 0;
+        h.press(PadAction::Back, 5100);
+        bool copied = h.ctl.kind() == FoldKind::Pop && lasts == 1 && kept == 0;
+        h.frame(10000, out);
+        h.press(PadAction::Accept, 10100);
+        h.frame(15000, out);
+        kept = 0;
+        lasts = 0;
+        h.redraw = true;
+        h.press(PadAction::Back, 15100);
+        check(copied && h.ctl.kind() == FoldKind::Pop && kept == 1 && lasts == 0,
+              "a pop copies the last frame, and renders the kept page while a redraw is pending");
+        Host s(0, 12, true);
+        int sk = 0, sl = 0;
+        auto s_kept = s.ctl.render_kept;
+        auto s_last = s.ctl.last;
+        s.ctl.render_kept = [&](const Surface& f) {
+            sk++;
+            s_kept(f);
+        };
+        s.ctl.last = [&](const Surface& f) {
+            sl++;
+            s_last(f);
+        };
+        s.nav.focus = 2;
+        s.bar.set(s.bar_target());
+        s.press(PadAction::Accept, 0);
+        s.frame(16, out);
+        sk = 0;
+        sl = 0;
+        s.press(PadAction::Back, 5000);
+        bool page = s.ctl.kind() == FoldKind::Pop && !s.ctl.reversed() && sk == 1 && sl == 0;
+        s.frame(10000, out);
+        s.nav.focus = 0;
+        s.bar.set(s.bar_target());
+        s.press(PadAction::Accept, 10100);
+        s.frame(10116, out);
+        sk = 0;
+        sl = 0;
+        s.press(PadAction::Back, 15000);
+        check(page && s.ctl.kind() == FoldKind::Collapse && !s.ctl.reversed() && sk == 0 && sl == 1,
+              "after an unshown end a page pop renders the kept page fresh and a collapse copies the last frame");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

@@ -371,6 +371,9 @@ int main()
               "a port launch is refused while the helper installs");
         check(lc.check("gba", "mgba", fd::HelperOp::Remove) == fd::LaunchCheck::HelperBusy,
               "a game launch is refused while the helper removes a port");
+        check(lc.check("ports", "", fd::helper_op(fd::HelperCmd::SteamGet)) == fd::LaunchCheck::HelperBusy &&
+                  lc.check("ports", "", fd::helper_op(fd::HelperCmd::SteamLogout)) == fd::LaunchCheck::Go,
+              "sf1: a launch is refused while the helper gets Steam files, not during a sign out");
     }
 
     {
