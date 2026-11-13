@@ -39,17 +39,18 @@ public:
     void close();
 
     std::vector<PadAction> poll();
-    std::vector<PadEdge> poll_edges();
+    std::vector<PadEdge> poll_edges(std::vector<bool>* mode = nullptr);
     Held held(PadAction dir) const;
 
 private:
-    void resync(std::vector<PadEdge>& out);
+    void resync(std::vector<PadEdge>& out, std::vector<bool>* mode);
 
     int fd_ = -1;
     int hat_x_ = 0;
     int hat_y_ = 0;
     bool dpad_[4] = {false, false, false, false};
     bool dropping_ = false;
+    bool mode_ = false;
 };
 
 }

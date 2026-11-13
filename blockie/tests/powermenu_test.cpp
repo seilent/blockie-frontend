@@ -621,6 +621,265 @@ void term_cases()
     }
 }
 
+struct PauseRig : Rig {
+    PauseRig() { m.open_pause(parse_gates(kDefault), t); }
+    bool noted(const char* word)
+    {
+        std::string n;
+        return m.take_note(n) && n == word;
+    }
+};
+
+void pause_cases()
+{
+    {
+        PauseRig r;
+        PmView v = r.v();
+        check(v.surface == PmSurface::Pause && std::string(v.title) == "paused" && r.items() == "resume,quit" &&
+                  v.focus == 0,
+              "pause: title paused, rows resume and quit, focus on resume at open");
+        r.at(400);
+        r.act(PadAction::Accept);
+        check(r.m.done() && r.said("resume") && r.v().surface == PmSurface::None,
+              "pause: Accept on resume closes at once with resume");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.act(PadAction::Back);
+        r.at(100);
+        bool early = !r.said("resume") && r.v().surface == PmSurface::Pause;
+        r.at(60);
+        check(early && r.said("resume") && r.m.done(), "pause: Back closes over 150 ms, then resume");
+    }
+    {
+        PauseRig r;
+        r.at(100);
+        fx o0 = r.v().o;
+        r.act(PadAction::Back);
+        r.at(16);
+        fx o1 = r.v().o;
+        r.at(400);
+        check(o1 < o0 && r.said("resume") && !r.said("cancel"),
+              "pause: Back during the open reverses from where it is, then resume");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        check(r.said("quit") && r.m.done(), "pause: Accept on quit says quit and closes at once");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.m.power(r.t);
+        r.at(100);
+        PmView v = r.v();
+        bool mid = v.surface == PmSurface::Power && v.other.items.size() == 2 &&
+                   std::string(v.other.title) == "paused" && v.mix > kOne / 4 && v.mix < kOne * 3 / 4 && v.o == kOne &&
+                   v.s == kOne && r.m.power_drawn(r.t);
+        r.at(100);
+        v = r.v();
+        bool rest = v.surface == PmSurface::Power && v.other.items.empty() && r.items() == "power off,reboot" &&
+                    v.focus == 0;
+        check(mid && rest,
+              "pause: power crosses to the power dialog over 200 ms, scrim held, no scale, the pause body fading");
+        r.act(PadAction::Back);
+        bool back = r.noted("cancel") && r.v().surface == PmSurface::Pause && r.v().focus == 1;
+        r.at(100);
+        v = r.v();
+        bool midb = v.other.items.size() == 2 && std::string(v.other.title) == "power" && v.mix > kOne / 4 &&
+                    v.mix < kOne * 3 / 4;
+        r.at(120);
+        check(back && midb && r.v().other.items.empty() && !r.m.done() && r.lines.empty(),
+              "pause: Back on the power dialog crosses back to the pause, focus kept, a cancel note and no result");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(100);
+        fx pause_o = r.v().mix;
+        r.act(PadAction::Back);
+        PmView v = r.v();
+        bool from = v.surface == PmSurface::Pause && std::abs(v.mix - (kOne - pause_o)) <= kOne / 50;
+        r.at(50);
+        bool going = r.v().mix < kOne - pause_o;
+        r.at(60);
+        check(from && going && r.v().other.items.empty() && r.noted("cancel"),
+              "pause: Back during the cross reverses it from where it is");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(50);
+        r.act(PadAction::Down);
+        check(r.v().surface == PmSurface::Power && r.v().other.items.empty() && r.v().focus == 1,
+              "pause: Down during the cross lands it, then moves (rule 4, as the power dialog's open)");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.act(PadAction::Back);
+        r.m.power(r.t);
+        r.at(0);
+        check(r.said("resume") && r.m.done(), "pause: power during the Back close lands it, resume");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Back);
+        r.at(50);
+        r.m.power(r.t);
+        PmView v = r.v();
+        bool fresh = v.surface == PmSurface::Power && v.mix == kOne && v.focus == 0 && v.other.items.size() == 2;
+        r.at(100);
+        bool mid = r.v().mix > kOne / 4 && r.v().mix < kOne * 3 / 4;
+        r.at(110);
+        bool rest = r.v().surface == PmSurface::Power && r.v().other.items.empty() && r.v().focus == 0;
+        check(fresh && mid && rest,
+              "pause: power during the cross back lands it, then a fresh 200 ms cross opening on power off");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Back);
+        r.at(50);
+        r.act(PadAction::Back);
+        bool landed = r.v().surface == PmSurface::Pause && r.v().other.items.empty() && !r.m.done();
+        r.at(160);
+        check(landed && r.said("resume"),
+              "pause: Back during the cross back lands it, then closes the pause with resume");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        r.at(400);
+        r.now_gates = parse_gates("state=pending\nreason=io\n");
+        r.act(PadAction::Accept);
+        r.at(400);
+        PmView v = r.v();
+        check(v.surface == PmSurface::Toast && v.under && std::string(v.other.title) == "paused",
+              "pause: the failed gate toast from the pause draws over the pause");
+        bool never_empty = true;
+        for (int k = 0; k < 400 && r.v().surface == PmSurface::Toast; k++) {
+            r.at(16);
+            never_empty = never_empty && r.v().surface != PmSurface::None;
+        }
+        check(r.v().surface == PmSurface::Pause && never_empty && r.noted("failed gate") && r.lines.empty() &&
+                  !r.m.done(),
+              "pause: the failed gate toast ends on the pause at rest: a failed gate note, no result, no empty frame");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        r.at(400);
+        r.act(PadAction::Accept);
+        r.at(400);
+        bool boot = r.said("boot reboot") && r.v().surface == PmSurface::Toast && r.v().under;
+        r.m.fail("exit-code", r.t);
+        bool never_empty = true;
+        for (int k = 0; k < 400 && r.v().surface == PmSurface::Toast; k++) {
+            r.at(16);
+            never_empty = never_empty && r.v().surface != PmSurface::None;
+        }
+        check(boot && r.v().surface == PmSurface::Pause && never_empty && r.noted("failed boot") && !r.m.done(),
+              "pause: a boot that ran and failed shows its toast over the pause, then the pause, failed boot noted");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        r.at(100);
+        r.act(PadAction::Back);
+        r.at(30);
+        r.act(PadAction::Accept);
+        r.at(400);
+        check(r.v().surface == PmSurface::Pause && r.v().focus == 0 && !r.m.done() && r.lines.empty(),
+              "pause: Accept during the sheet's reversal lands it on the pause and is dropped, no quit or resume");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        r.at(400);
+        r.act(PadAction::Back);
+        r.at(100);
+        r.act(PadAction::Down);
+        check(r.v().surface == PmSurface::Pause && r.v().focus == 0 && !r.m.done(),
+              "pause: Down during the sheet's close lands it on the pause and is dropped");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.act(PadAction::Down);
+        r.at(300);
+        r.act(PadAction::Accept);
+        PmView v = r.v();
+        bool under = v.surface == PmSurface::Sheet && v.under && std::string(v.other.title) == "paused";
+        r.at(400);
+        r.act(PadAction::Back);
+        r.at(400);
+        check(under && r.v().surface == PmSurface::Pause && !r.v().under && r.noted("cancel") && !r.m.done(),
+              "pause: the reboot sheet rises over the pause and its Back ends on the pause");
+    }
+    {
+        PauseRig r;
+        r.at(400);
+        r.m.power(r.t);
+        r.at(300);
+        r.to_confirm();
+        bool confirm = r.v().surface == PmSurface::Confirm && r.v().under;
+        r.act(PadAction::Accept);
+        check(confirm && r.v().surface == PmSurface::Pause && !r.m.done() && r.lines.empty(),
+              "pause: the confirm's cancel ends on the pause, uncovered, with no result");
+    }
+    {
+        PauseRig r;
+        r.at(29999);
+        bool before = !r.m.done();
+        r.at(1);
+        check(before && r.said("screen-off"), "pause: 30 s with no input gives screen-off");
+    }
+    {
+        Rig r;
+        r.m.power(r.t);
+        check(r.v().surface == PmSurface::Power && r.v().other.items.empty() && !r.m.power_drawn(r.t),
+              "power mode: power does nothing");
+    }
+}
+
 void idle_cases()
 {
     {
@@ -793,6 +1052,178 @@ void alpha_cases(Fonts& f)
     set_theme_light(false);
 }
 
+void cross_cases(Fonts& f)
+{
+    set_theme_light(false);
+    InkLayer ink;
+    Buffer b;
+    std::vector<AlphaRegion> regions;
+    auto shot = [&](const PmView& v, std::vector<uint8_t>& out) {
+        Canvas c(b.surface());
+        draw_powermenu(c, f, ink, v, theme(), regions);
+        Surface sf = b.surface();
+        out.resize((size_t)sf.w * sf.h);
+        for (int y = 0; y < sf.h; y++)
+            for (int x = 0; x < sf.w; x++)
+                out[(size_t)y * sf.w + x] = (uint8_t)((LiveF::unpack(sf.at(x, y)) >> 8) & 0xFF);
+    };
+    std::vector<uint8_t> a, m, z;
+    int rest = -1;
+    {
+        PauseRig e;
+        e.at(400);
+        shot(e.v(), a);
+        rest = regions.empty() ? -1 : regions[0].a256;
+        e.m.power(e.t);
+        e.at(300);
+        shot(e.v(), z);
+    }
+    bool held = true, between = true;
+    int shared = 0, full = 0, frames = 0;
+    auto frame = [&](const PmView& v) {
+        shot(v, m);
+        frames++;
+        held = held && regions.size() == 1 && regions[0].a256 == rest;
+        for (size_t i = 0; i < a.size(); i++) {
+            between = between && m[i] + 1 >= std::min(a[i], z[i]);
+            if (a[i] == 255 && z[i] == 255) {
+                shared++;
+                full += m[i] == 255;
+            }
+        }
+    };
+    PauseRig r;
+    r.at(400);
+    r.m.power(r.t);
+    for (int k = 1; k * 16 < 200; k++) {
+        r.at(16);
+        frame(r.v());
+    }
+    r.at(300);
+    r.act(PadAction::Back);
+    for (int k = 1; k * 16 < 200; k++) {
+        r.at(16);
+        frame(r.v());
+    }
+    check(frames == 24 && held, "the cross: the scrim holds at the rest alpha in every frame, both ways");
+    check(between, "the cross: every pixel of every 16 ms frame, both ways, holds at least the ink of the nearer end");
+    check(shared > 0 && full == shared,
+          "the cross: pixels full in both bodies (the shared p, the bar) stay full in every frame");
+    r.at(300);
+    r.m.power(r.t);
+    r.at(300);
+    r.act(PadAction::Down);
+    r.at(300);
+    r.act(PadAction::Accept);
+    r.at(400);
+    std::vector<uint8_t> sh;
+    shot(r.v(), sh);
+    bool stacked = regions.size() >= 2 && regions[0].a256 == rest;
+    for (const AlphaRegion& g : regions)
+        stacked = stacked && g.a256 >= rest;
+    check(stacked, "the reboot sheet over the pause: the pause's scrim first, no region below it");
+    auto alpha_at = [](const std::vector<AlphaRegion>& rg, int x, int y) {
+        for (size_t i = rg.size(); i-- > 0;)
+            if (x >= rg[i].r.x0 && x < rg[i].r.x1 && y >= rg[i].r.y0 && y < rg[i].r.y1)
+                return std::clamp(rg[i].a256, 0, 256);
+        return 0;
+    };
+    auto over_ok = [&](const PmView& v) {
+        Buffer cb, ub, tb;
+        std::vector<AlphaRegion> cr, ur, tr;
+        PmView top = v;
+        top.under = false;
+        top.other = PmBody{};
+        PmView u;
+        u.surface = PmSurface::Pause;
+        u.title = v.other.title;
+        u.items = v.other.items;
+        u.alpha = v.other.alpha;
+        u.bar = v.other.bar;
+        u.o = kOne;
+        Canvas cc(cb.surface()), uc(ub.surface()), tc(tb.surface());
+        draw_powermenu(cc, f, ink, v, theme(), cr);
+        draw_powermenu(uc, f, ink, u, theme(), ur);
+        draw_powermenu(tc, f, ink, top, theme(), tr);
+        Surface cs = cb.surface(), us = ub.surface(), ts = tb.surface();
+        int worst = 0;
+        for (int y = 0; y < cs.h; y++)
+            for (int x = 0; x < cs.w; x++) {
+                double au = alpha_at(ur, x, y) / 256.0, at = alpha_at(tr, x, y) / 256.0;
+                double all = at + au * (1 - at);
+                worst = std::max(worst, std::abs((int)region_a8(alpha_at(cr, x, y)) - (int)std::lround(all * 255)));
+                if (all <= 0)
+                    continue;
+                uint32_t pc = LiveF::unpack(cs.at(x, y)), pu = LiveF::unpack(us.at(x, y));
+                uint32_t pt = LiveF::unpack(ts.at(x, y));
+                for (int sh = 0; sh <= 16; sh += 8) {
+                    double want = (((pt >> sh) & 0xFF) * at + ((pu >> sh) & 0xFF) * au * (1 - at)) / all;
+                    worst = std::max(worst, std::abs((int)((pc >> sh) & 0xFF) - (int)std::lround(want)));
+                }
+            }
+        return worst <= 1;
+    };
+    {
+        PauseRig q;
+        q.at(400);
+        q.m.power(q.t);
+        q.at(300);
+        q.act(PadAction::Down);
+        q.at(300);
+        q.act(PadAction::Accept);
+        q.at(40);
+        PmView sv = q.v();
+        bool sheet = sv.surface == PmSurface::Sheet && sv.under && sv.sheet.progress > 0 && sv.sheet.progress < kOne;
+        check(sheet && over_ok(sv),
+              "the composite: the reboot sheet at mid rise over the pause equals a straight alpha over within 1");
+        q.at(400);
+        q.act(PadAction::Down);
+        q.act(PadAction::Accept);
+        q.at(425);
+        PmView cv = q.v();
+        bool confirm = cv.surface == PmSurface::Confirm && cv.under && cv.o > 0 && cv.o < kOne;
+        check(confirm && over_ok(cv),
+              "the composite: the confirm at mid open over the pause equals a straight alpha over within 1");
+    }
+    {
+        PauseRig g;
+        g.at(400);
+        g.m.power(g.t);
+        g.at(300);
+        g.act(PadAction::Down);
+        g.at(300);
+        g.act(PadAction::Accept);
+        g.at(400);
+        g.now_gates = parse_gates("state=pending\nreason=io\n");
+        g.act(PadAction::Accept);
+        g.at(400);
+        std::vector<uint8_t> last, first;
+        std::vector<AlphaRegion> last_r, first_r;
+        bool toast = g.v().surface == PmSurface::Toast;
+        for (int k = 0; k < 400 && g.v().surface == PmSurface::Toast; k++) {
+            shot(g.v(), last);
+            last_r = regions;
+            g.at(16);
+        }
+        shot(g.v(), first);
+        first_r = regions;
+        bool paused = g.v().surface == PmSurface::Pause && !last_r.empty() && !first_r.empty();
+        Rect strip = last_r.empty() ? Rect{} : last_r.back().r;
+        bool covered = true, same = true;
+        Surface sf = b.surface();
+        for (int y = 0; y < sf.h; y++)
+            for (int x = 0; x < sf.w; x++) {
+                covered = covered && alpha_at(last_r, x, y) >= rest && alpha_at(first_r, x, y) >= rest;
+                bool in = x >= strip.x0 && x < strip.x1 && y >= strip.y0 && y < strip.y1;
+                size_t i = (size_t)y * sf.w + x;
+                same = same && (in || std::abs((int)last[i] - (int)first[i]) <= 1);
+            }
+        check(toast && paused && covered && same,
+              "the failed gate seam: the last toast frame and the first pause frame both hold the pause's scrim, "
+              "equal outside the strip");
+    }
+}
+
 void region_cap_cases(Fonts& f)
 {
     Rig r;
@@ -834,6 +1265,7 @@ struct FakeDev {
     DevInfo info;
     std::vector<int> grabs;
     int keys = 0;
+    int hat = 0;
     std::string real;
 };
 
@@ -888,7 +1320,20 @@ void grab_cases()
         d.grabs.erase(d.grabs.begin());
         return rc;
     };
-    ops.keys_down = [&](int fd) { return devs[by_fd[fd]].keys > 0; };
+    ops.keys_down = [&](int fd) {
+        FakeDev& d = devs[by_fd[fd]];
+        return input_held(
+            [&d](unsigned long* bits, size_t) {
+                bits[0] = d.keys > 0 ? 1UL : 0UL;
+                return true;
+            },
+            [&d](int code, int& value) {
+                if (code != ABS_HAT0Y)
+                    return false;
+                value = d.hat;
+                return true;
+            });
+    };
     ops.real = [&](const std::string& path) { return devs[path].real; };
 
     add("/dev/input/event0", "mtk-pmic-keys", false, false, {});
@@ -953,6 +1398,138 @@ void grab_cases()
         g.releasing(1000);
         check(g.held() > 0, "release waits for keys up");
         check(!g.releasing(2000) && g.held() == 0, "release gives up after 1000 ms");
+    }
+    for (auto& kv : devs) {
+        kv.second.grabs.clear();
+        kv.second.keys = 0;
+    }
+    {
+        devs["/dev/input/event2"].keys = 1;
+        MenuGrab g(ops, true);
+        g.start(0);
+        int others = g.held();
+        check(g.waiting() == 1 && g.deadline() == 1000,
+              "pause mode: a pad with a key down waits, the other pads and touch are grabbed at start");
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_EAST, 0);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        std::vector<PadEdge> e;
+        g.read(e);
+        check(e.empty() && g.waiting() == 1, "pause mode: the waiting node's events are read and act on nothing");
+        g.tick(300);
+        check(g.waiting() == 1, "pause mode: no grab while EVIOCGKEY still shows a key down");
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_SOUTH, 1);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        devs["/dev/input/event2"].keys = 0;
+        g.tick(400);
+        check(g.waiting() == 0 && g.held() == others + 1, "pause mode: grabbed at the first tick after the release");
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_EAST, 1);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        e.clear();
+        g.read(e);
+        check(e.size() == 1 && e[0].action == PadAction::Accept && e[0].down,
+              "pause mode: a press queued before the grab is dropped, a fresh press after it reads");
+    }
+    {
+        devs["/dev/input/event2"].keys = 1;
+        MenuGrab g(ops, true);
+        g.start(0);
+        check(g.tick(999) && g.waiting() == 1, "pause mode: still waiting at 999 ms with the key down");
+        int before = g.held();
+        check(g.tick(1000) && g.waiting() == 0 && g.held() == before + 1, "pause mode: grabbed anyway at 1000 ms");
+        g.begin_release(1000);
+        devs["/dev/input/event2"].keys = 0;
+        check(!g.releasing(1000) && g.held() == 0, "pause mode: the release wait as in power mode");
+    }
+    {
+        devs["/dev/input/event2"].keys = 1;
+        MenuGrab g(ops);
+        g.start(0);
+        check(g.waiting() == 0 && g.held() == 5, "power mode: a pad with a key down is grabbed at start as built");
+        devs["/dev/input/event2"].keys = 0;
+    }
+    {
+        devs["/dev/input/event2"].hat = 1;
+        MenuGrab g(ops, true);
+        g.start(0);
+        bool waits = g.waiting() == 1;
+        g.tick(300);
+        waits = waits && g.waiting() == 1;
+        devs["/dev/input/event2"].hat = 0;
+        g.tick(400);
+        check(waits && g.waiting() == 0, "pause mode: a held d-pad (ABS_HAT0Y) waits for its release");
+    }
+    {
+        MenuGrab g(ops);
+        g.start(0);
+        int all = g.held();
+        devs["/dev/input/event2"].hat = 1;
+        g.begin_release(100);
+        bool holds = g.releasing(100) && g.held() == 1 && all > 1;
+        check(holds && g.releasing(600) && g.held() == 1, "release: a held d-pad (ABS_HAT0Y) keeps its node grabbed");
+        devs["/dev/input/event2"].hat = 0;
+        check(!g.releasing(700) && g.held() == 0, "release: the node drops once the hat is back at 0");
+    }
+    {
+        MenuGrab g(ops, true);
+        g.start(0);
+        int before = g.held();
+        add("/dev/input/event8", "Pad three", true, false, {EBUSY, EBUSY, EBUSY, EBUSY, EBUSY, EBUSY});
+        devs["/dev/input/event8"].keys = 1;
+        g.tick(2000);
+        bool waits = g.waiting() == 1;
+        devs["/dev/input/event8"].keys = 0;
+        bool ok = g.tick(2100);
+        check(waits && ok && g.waiting() == 0 && g.busy() == 0 && g.held() == before,
+              "pause mode: a node found at a rescan waits for its key, then EBUSY skips it as a rescan does");
+        check(g.tick(2350) && g.tick(2600) && g.tick(3200), "pause mode: the skipped node fails no grab");
+    }
+    {
+        MenuGrab g(ops, true);
+        g.start(0);
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_MODE, 1);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        std::vector<PadEdge> e;
+        std::vector<bool> modes;
+        g.read(e, &modes);
+        bool down = e.empty() && modes.size() == 1 && modes[0];
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_MODE, 0);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        modes.clear();
+        g.read(e, &modes);
+        bool up = e.empty() && modes.size() == 1 && !modes[0];
+        push(devs["/dev/input/event2"].wfd, EV_KEY, BTN_MODE, 1);
+        push(devs["/dev/input/event2"].wfd, EV_SYN, SYN_REPORT, 0);
+        g.read(e);
+        check(down && up && e.empty(),
+              "BTN_MODE on a grabbed pad comes out as a mode edge only when asked, never as a pad action");
+    }
+    {
+        std::map<int, int> abs;
+        auto held = [&abs](unsigned long first) {
+            return input_held(
+                [first](unsigned long* bits, size_t) {
+                    bits[0] = first;
+                    return true;
+                },
+                [&abs](int code, int& value) {
+                    auto it = abs.find(code);
+                    if (it == abs.end())
+                        return false;
+                    value = it->second;
+                    return true;
+                });
+        };
+        bool none = !held(0);
+        abs = {{ABS_HAT0X, 0}, {ABS_HAT0Y, 0}, {ABS_GAS, 0}, {ABS_BRAKE, 0}};
+        bool rest = !held(0);
+        bool key = held(1);
+        abs[ABS_HAT0X] = -1;
+        bool left = held(0);
+        abs[ABS_HAT0X] = 0;
+        abs[ABS_BRAKE] = 40;
+        bool trigger = held(0);
+        check(none && rest && key && left && trigger,
+              "input_held: a key bit, a hat off zero or a trigger off zero is held; no axes or all at zero is not");
     }
     for (auto& kv : devs) {
         close(kv.second.rfd);
@@ -1146,7 +1723,8 @@ struct Loop {
     }
 };
 
-Loop start_loop(Fonts& f, MemPresenter& mp, const EvdevOps& ops, const PmRunOpts& base, bool chld_ign = false)
+Loop start_loop(Fonts& f, MemPresenter& mp, const EvdevOps& ops, const PmRunOpts& base, bool chld_ign = false,
+                int drop = -1)
 {
     Loop l;
     int p[2];
@@ -1161,6 +1739,8 @@ Loop start_loop(Fonts& f, MemPresenter& mp, const EvdevOps& ops, const PmRunOpts
         mp.log_to(p[1]);
         if (chld_ign)
             signal(SIGCHLD, SIG_IGN);
+        if (drop >= 0)
+            close(drop);
         MenuGrab g(ops);
         g.start(steady_ms());
         _exit(run_powermenu(mp, f, g, o));
@@ -1871,6 +2451,453 @@ void rest_cases(Fonts& f, const std::string& dir)
     unlink(fifo.c_str());
 }
 
+void pause_loop_cases(Fonts& f, const std::string& dir)
+{
+    EvdevOps none;
+    none.list = []() { return std::vector<std::string>(); };
+    none.open = [](const std::string&) { return -1; };
+    none.info = [](int, DevInfo&) { return false; };
+    none.grab = [](int) { return 0; };
+    none.keys_down = [](int) { return false; };
+    std::string gates = dir + "/pause-state", fifo = dir + "/pause-input";
+    write_file(gates, kDefault);
+    mkfifo(fifo.c_str(), 0600);
+    auto send = [](int fd, const char* text) {
+        if (write(fd, text, std::strlen(text)) < 0)
+            std::printf("FAIL pause write\n");
+    };
+    {
+        int in[2];
+        if (pipe(in) != 0) {
+            check(false, "pause loop: a stdin pipe");
+            return;
+        }
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, none, o);
+        close(in[0]);
+        std::string s;
+        check(l.line(s, 3000) && s == "shown", "pause loop: shown after the first presented frame");
+        send(in[1], "power\n");
+        check(l.line(s, 3000) && s == "shown power",
+              "pause loop: stdin power, then shown power once a frame with the power body is presented");
+        send(in[1], "back\n");
+        check(l.line(s, 3000) && s == "cancel", "pause loop: stdin back on the power dialog says cancel");
+        send(in[1], "bogus\n");
+        send(in[1], "back\n");
+        check(l.line(s, 3000) && s == "resume",
+              "pause loop: stdin back on the pause dialog closes it with resume, an unknown word ignored");
+        check(l.eof(3000) && l.end() == 0, "pause loop: the child exits 0 after resume");
+        close(in[1]);
+    }
+    {
+        int in[2];
+        if (pipe(in) != 0) {
+            check(false, "pause loop: a stdin pipe");
+            return;
+        }
+        PmRunOpts o;
+        o.gates = gates;
+        o.fifo = fifo;
+        o.pause = true;
+        o.in = in[0];
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, none, o);
+        close(in[0]);
+        std::string s;
+        bool shown = l.line(s, 3000) && s == "shown";
+        int fd = open(fifo.c_str(), O_WRONLY | O_NONBLOCK);
+        if (fd >= 0) {
+            send(fd, "down\naccept\n");
+            close(fd);
+        }
+        check(shown && l.line(s, 3000) && s == "quit" && l.closed_by("quit"),
+              "pause loop: Accept on quit says quit after the empty frame");
+        l.end();
+        close(in[1]);
+    }
+    {
+        int in[2], pad[2];
+        if (pipe(in) != 0 || pipe(pad) != 0) {
+            check(false, "pause loop: the stdin and pad pipes");
+            return;
+        }
+        fcntl(pad[0], F_SETFL, O_NONBLOCK);
+        EvdevOps one = none;
+        one.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+        one.open = [&pad](const std::string&) { return dup(pad[0]); };
+        one.info = [](int, DevInfo& d) {
+            d.id.name = "Pad invented";
+            d.joy = true;
+            return true;
+        };
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, one, o);
+        close(in[0]);
+        std::string s;
+        bool shown = l.line(s, 3000) && s == "shown";
+        send(in[1], "power\n");
+        bool later = l.line(s, 3000) && s == "shown power";
+        push(pad[1], EV_KEY, BTN_MODE, 1);
+        push(pad[1], EV_SYN, SYN_REPORT, 0);
+        bool down = l.line(s, 3000) && s == "key extra1 1";
+        push(pad[1], EV_KEY, BTN_MODE, 0);
+        push(pad[1], EV_SYN, SYN_REPORT, 0);
+        bool up = l.line(s, 3000) && s == "key extra1 0";
+        send(in[1], "back\n");
+        bool cancel = l.line(s, 3000) && s == "cancel";
+        send(in[1], "back\n");
+        check(shown && later && down && up && cancel && l.line(s, 3000) && s == "resume",
+              "pause loop: BTN_MODE on the grabbed pad goes to stdout as key extra1 1 and 0, no result");
+        l.end();
+        close(in[1]);
+        close(pad[0]);
+        close(pad[1]);
+    }
+    {
+        int in[2], pad[2];
+        if (pipe(in) != 0 || pipe(pad) != 0) {
+            check(false, "pause loop: the stdin and pad pipes");
+            return;
+        }
+        fcntl(pad[0], F_SETFL, O_NONBLOCK);
+        EvdevOps one = none;
+        one.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+        one.open = [&pad](const std::string&) { return dup(pad[0]); };
+        one.info = [](int, DevInfo& d) {
+            d.id.name = "Pad invented";
+            d.joy = true;
+            return true;
+        };
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, one, o);
+        close(in[0]);
+        std::string s;
+        bool shown = l.line(s, 3000) && s == "shown";
+        bool later = false;
+        int64_t until = steady_ms() + 3000;
+        while (!later && l.next(s, until))
+            later = s.rfind("note ", 0) == 0;
+        push(pad[1], EV_KEY, BTN_MODE, 0);
+        push(pad[1], EV_SYN, SYN_REPORT, 0);
+        push(pad[1], EV_KEY, BTN_MODE, 1);
+        push(pad[1], EV_SYN, SYN_REPORT, 0);
+        bool down = l.line(s, 3000) && s == "key extra1 1";
+        push(pad[1], EV_KEY, BTN_MODE, 0);
+        push(pad[1], EV_SYN, SYN_REPORT, 0);
+        bool up = l.line(s, 3000) && s == "key extra1 0";
+        send(in[1], "back\n");
+        check(shown && later && down && up && l.line(s, 3000) && s == "resume",
+              "pause loop: BTN_MODE on the pause dialog after a later note: a release with no press says nothing, then "
+              "key extra1 1 and 0");
+        l.end();
+        close(in[1]);
+        close(pad[0]);
+        close(pad[1]);
+    }
+    {
+        int in[2], pad[2];
+        if (pipe(in) != 0 || pipe(pad) != 0) {
+            check(false, "pause loop: the stdin and pad pipes");
+            return;
+        }
+        fcntl(pad[0], F_SETFL, O_NONBLOCK);
+        EvdevOps one = none;
+        one.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+        one.open = [&pad](const std::string&) { return dup(pad[0]); };
+        one.info = [](int, DevInfo& d) {
+            d.id.name = "Pad invented";
+            d.joy = true;
+            return true;
+        };
+        std::string ctl = dir + "/systemctl-pause-failed";
+        write_file(ctl, "if [ \"$1\" = is-system-running ]; then echo running; exit 0; fi\n"
+                        "printf 'LoadState=loaded\\nActiveState=failed\\nResult=exit-code\\n'\n"
+                        "printf 'StateChangeTimestampMonotonic=9000000000000000\\n'\n");
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        o.systemctl = {"sh", ctl};
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, one, o);
+        close(in[0]);
+        std::string s;
+        bool shown = l.line(s, 3000) && s == "shown";
+        send(in[1], "power\n");
+        bool later = l.line(s, 3000) && s == "shown power";
+        const uint16_t keys[][2] = {{EV_ABS, ABS_HAT0Y}, {EV_KEY, BTN_EAST}, {EV_KEY, BTN_EAST}};
+        for (const auto& k : keys) {
+            push(pad[1], k[0], k[1], 1);
+            push(pad[1], EV_SYN, SYN_REPORT, 0);
+            push(pad[1], k[0], k[1], 0);
+            push(pad[1], EV_SYN, SYN_REPORT, 0);
+            int got = 0;
+            int64_t until = steady_ms() + 3000;
+            std::string t;
+            while (got < 2 && l.next(t, until))
+                got += t.rfind("present ", 0) == 0;
+        }
+        bool boot = l.line(s, 8000) && s == "boot reboot";
+        bool failed = l.line(s, 12000) && s == "failed boot";
+        send(in[1], "back\n");
+        check(shown && later && boot && failed && l.line(s, 3000) && s == "resume",
+              "pause loop: a boot from the pause that fails says boot reboot, then failed boot back on the pause, then "
+              "resume");
+        l.end();
+        close(in[1]);
+        close(pad[0]);
+        close(pad[1]);
+    }
+    {
+        int in[2], pad[2];
+        if (pipe(in) != 0 || pipe(pad) != 0) {
+            check(false, "pause loop: the stdin and pad pipes");
+            return;
+        }
+        fcntl(pad[0], F_SETFL, O_NONBLOCK);
+        EvdevOps one = none;
+        one.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+        one.open = [&pad](const std::string&) { return dup(pad[0]); };
+        one.info = [](int, DevInfo& d) {
+            d.id.name = "Pad invented";
+            d.joy = true;
+            return true;
+        };
+        std::string ctl = dir + "/systemctl-pause-retry", state = dir + "/pause-retry-state",
+                    calls = dir + "/pause-retry-calls", stamp = dir + "/pause-retry-stamp";
+        write_file(state, "failed\n");
+        write_file(stamp, "9000000000000000\n");
+        write_file(calls, "");
+        write_file(ctl, "echo \"$1 $(date +%s%3N)\" >> '" + calls + "'\n" +
+                            "if [ \"$1\" = is-system-running ]; then echo running; exit 0; fi\n" +
+                            "printf 'LoadState=loaded\\nActiveState=%s\\nResult=exit-code\\n' \"$(cat '" + state +
+                            "')\"\n" + "printf 'StateChangeTimestampMonotonic=%s\\n' \"$(cat '" + stamp + "')\"\n");
+        std::string wakes = dir + "/pause-retry-wakes";
+        write_file(wakes, "");
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        o.systemctl = {"sh", ctl};
+        o.on_wake = [wakes](int64_t, int64_t wake, int64_t due) {
+            if (due < 0)
+                return;
+            FILE* w = std::fopen(wakes.c_str(), "a");
+            if (!w)
+                return;
+            std::fprintf(w, "%lld %lld\n", (long long)wake, (long long)due);
+            std::fclose(w);
+        };
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, one, o);
+        close(in[0]);
+        std::string s;
+        auto pick_reboot = [&]() {
+            send(in[1], "power\n");
+            bool ok = l.line(s, 3000) && s == "shown power";
+            const uint16_t keys[][2] = {{EV_ABS, ABS_HAT0Y}, {EV_KEY, BTN_EAST}, {EV_KEY, BTN_EAST}};
+            for (const auto& k : keys) {
+                push(pad[1], k[0], k[1], 1);
+                push(pad[1], EV_SYN, SYN_REPORT, 0);
+                push(pad[1], k[0], k[1], 0);
+                push(pad[1], EV_SYN, SYN_REPORT, 0);
+                int got = 0;
+                int64_t until = steady_ms() + 3000;
+                std::string t;
+                while (got < 2 && l.next(t, until))
+                    got += t.rfind("present ", 0) == 0;
+            }
+            return ok && l.line(s, 8000) && s == "boot reboot";
+        };
+        auto user_calls = [&calls]() {
+            std::ifstream in(calls);
+            std::string ln;
+            std::vector<long long> at;
+            while (std::getline(in, ln))
+                if (ln.rfind("--user ", 0) == 0)
+                    at.push_back(std::atoll(ln.c_str() + 7));
+            return at;
+        };
+        bool shown = l.line(s, 3000) && s == "shown";
+        bool first = pick_reboot();
+        bool failed = l.line(s, 12000) && s == "failed boot";
+        write_file(stamp, "1\n");
+        bool again = pick_reboot();
+        size_t before = user_calls().size();
+        std::vector<long long> at = user_calls();
+        for (int i = 0; i < 120 && at.size() < before + 4; i++) {
+            usleep(50000);
+            at = user_calls();
+        }
+        bool stale = !l.line(s, 1500);
+        write_file(state, "active\n");
+        write_file(stamp, "9000000000000000\n");
+        bool quiet = !l.line(s, 1500);
+        check(shown && first && failed && again && stale,
+              "pause loop: a boot retried from the pause with the unit still failed under an old change stamp says no "
+              "stale failed boot");
+        check(again && quiet,
+              "pause loop: a boot retried from the pause with the unit active says no stale failed boot");
+        std::ifstream wf(wakes);
+        long long wake = 0, due = 0;
+        int waits = 0;
+        bool early = true;
+        while (wf >> wake >> due) {
+            waits++;
+            early = early && wake >= 0 && wake <= due;
+        }
+        check(again && at.size() >= before + 4 && waits > 0 && early,
+              "pause loop: while a boot is probed, every poll wakes at or before the next probe time");
+        l.end();
+        close(in[1]);
+        close(pad[0]);
+        close(pad[1]);
+    }
+    {
+        std::string hold = dir + "/pause-hold";
+        struct Press {
+            uint16_t type, code;
+        };
+        const Press kDown{EV_ABS, ABS_HAT0Y}, kAccept{EV_KEY, BTN_EAST}, kBack{EV_KEY, BTN_SOUTH};
+        const std::vector<Press> sheet = {kDown, kAccept, kBack};
+        const std::vector<Press> confirm = {kDown, kAccept, kDown, kAccept, kAccept};
+        const std::pair<const std::vector<Press>*, const char*> runs[] = {{&sheet, "the reboot sheet's Back"},
+                                                                           {&confirm, "the confirm's cancel"}};
+        for (const auto& run : runs) {
+            int in[2], pad[2];
+            if (pipe(in) != 0 || pipe(pad) != 0) {
+                check(false, "pause loop: the stdin and pad pipes");
+                return;
+            }
+            fcntl(pad[0], F_SETFL, O_NONBLOCK);
+            EvdevOps one = none;
+            one.list = []() { return std::vector<std::string>{"/dev/input/event9"}; };
+            one.open = [&pad](const std::string&) { return dup(pad[0]); };
+            one.info = [](int, DevInfo& d) {
+                d.id.name = "Pad invented";
+                d.joy = true;
+                return true;
+            };
+            PmRunOpts o;
+            o.gates = gates;
+            o.pause = true;
+            o.in = in[0];
+            MemPresenter mp;
+            mp.hold_while(hold);
+            Loop l = start_loop(f, mp, one, o);
+            close(in[0]);
+            std::string s;
+            auto wait_for = [&l](const char* prefix, int n) {
+                int got = 0;
+                int64_t until = steady_ms() + 3000;
+                std::string t;
+                while (got < n && l.next(t, until))
+                    got += t.rfind(prefix, 0) == 0;
+                return got == n;
+            };
+            bool shown = l.line(s, 3000) && s == "shown";
+            bool later = wait_for("note ", 1);
+            write_file(hold, "");
+            send(in[1], "power\n");
+            bool drawn = wait_for("present ", 2);
+            for (size_t i = 0; i < run.first->size(); i++) {
+                const Press& k = (*run.first)[i];
+                push(pad[1], k.type, k.code, 1);
+                push(pad[1], EV_SYN, SYN_REPORT, 0);
+                push(pad[1], k.type, k.code, 0);
+                push(pad[1], EV_SYN, SYN_REPORT, 0);
+                if (i + 1 < run.first->size())
+                    drawn = wait_for("present ", 2) && drawn;
+            }
+            bool cancel = l.line(s, 3000) && s == "cancel";
+            unlink(hold.c_str());
+            send(in[1], "back\n");
+            bool resume = l.line(s, 3000) && s == "resume";
+            std::string what = std::string("pause loop, notes held: power then ") + run.second +
+                               " says cancel and resume, no shown power from frames noted after the cancel";
+            check(shown && later && drawn && cancel && resume && l.find("shown power") < 0, what.c_str());
+            l.end();
+            close(in[1]);
+            close(pad[0]);
+            close(pad[1]);
+        }
+        unlink(hold.c_str());
+    }
+    {
+        int in[2];
+        if (pipe(in) != 0) {
+            check(false, "pause loop: a stdin pipe");
+            return;
+        }
+        PmRunOpts o;
+        o.gates = gates;
+        o.pause = true;
+        o.in = in[0];
+        MemPresenter mp;
+        Loop l = start_loop(f, mp, none, o, false, in[1]);
+        close(in[0]);
+        std::string s;
+        bool shown = l.line(s, 3000) && s == "shown";
+        close(in[1]);
+        check(shown && !l.line(s, 1500) && l.eof(3000),
+              "pause loop: stdin closed acts as SIGTERM: no line, the child exits");
+        l.end();
+    }
+    {
+        int pp[2];
+        if (pipe(pp) != 0) {
+            check(false, "line fifo: a pipe");
+            return;
+        }
+        LineFifo lf;
+        lf.adopt(pp[0]);
+        std::string big(5000, 'x');
+        send(pp[1], big.c_str());
+        send(pp[1], "\nback\npow");
+        std::vector<std::string> got;
+        lf.read(got);
+        bool mid = got.size() == 1 && got[0] == "back" && !lf.ended();
+        send(pp[1], "er");
+        close(pp[1]);
+        got.clear();
+        lf.read(got);
+        check(mid && got.size() == 1 && got[0] == "power" && lf.ended() && lf.fd() < 0,
+              "line fifo: an over long line is dropped, a last line with no newline is read at EOF, then ended");
+    }
+    {
+        int pp[2];
+        if (pipe(pp) != 0) {
+            check(false, "line fifo: a pipe");
+            return;
+        }
+        LineFifo lf;
+        lf.adopt(pp[0]);
+        std::string big(5000, 'x');
+        send(pp[1], big.c_str());
+        std::vector<std::string> got;
+        lf.read(got);
+        bool none = got.empty();
+        send(pp[1], "back\npower\n");
+        lf.read(got);
+        close(pp[1]);
+        check(none && got.size() == 1 && got[0] == "power",
+              "line fifo: an over long line that spans reads is skipped up to its newline, its tail is no word");
+    }
+    unlink(fifo.c_str());
+}
+
 }
 
 struct TempDir {
@@ -1905,6 +2932,7 @@ int main(int argc, char** argv)
     load_cases();
     idle_cases();
     term_cases();
+    pause_cases();
     grab_cases();
     spawn_cases();
     Fonts f;
@@ -1914,8 +2942,10 @@ int main(int argc, char** argv)
     }
     f.begin_frame(-1);
     alpha_cases(f);
+    cross_cases(f);
     region_cap_cases(f);
     loop_cases(f, dir.path);
+    pause_loop_cases(f, dir.path);
     rest_cases(f, dir.path);
     std::printf("%d/%d passed\n", g_total - g_fail, g_total);
     return g_fail ? 1 : 0;

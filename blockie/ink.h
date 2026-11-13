@@ -8,6 +8,7 @@ namespace fd {
 
 void ink_clear(const Surface& layer, Rect area);
 void ink_compose(const Surface& layer, const Surface& dst, uint32_t ink, Rect area);
+void ink_add(const Surface& layer, const Surface& more, int keep256, int more256, Rect area);
 
 class InkLayer {
 public:

@@ -1,5 +1,7 @@
 #include "ink.h"
 
+#include <algorithm>
+
 namespace fd {
 
 void ink_clear(const Surface& layer, Rect area)
@@ -30,6 +32,18 @@ void ink_compose(const Surface& layer, const Surface& dst, uint32_t ink, Rect ar
             dg = (dg * (255 - a) + ig * a + 127) / 255;
             db = (db * (255 - a) + ib * a + 127) / 255;
             dst.at(x, y) = LiveF::pack(((uint32_t)dr << 16) | ((uint32_t)dg << 8) | (uint32_t)db);
+        }
+}
+
+void ink_add(const Surface& layer, const Surface& more, int keep256, int more256, Rect area)
+{
+    Rect r = area.intersect(layer.rect()).intersect(more.rect());
+    for (int y = r.y0; y < r.y1; y++)
+        for (int x = r.x0; x < r.x1; x++) {
+            int a = (int)((LiveF::unpack(layer.at(x, y)) >> 8) & 0xFF);
+            int b = (int)((LiveF::unpack(more.at(x, y)) >> 8) & 0xFF);
+            uint32_t v = (uint32_t)std::min(255, (a * keep256 + b * more256 + 128) >> 8);
+            layer.at(x, y) = LiveF::pack(v << 16 | v << 8 | v);
         }
 }
 

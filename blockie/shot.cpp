@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -263,7 +264,7 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         st.key = tok.substr(0, a);
         PadAction pa;
         if (st.key != "ret" && st.key != "cover" && st.key != "theme" && st.key != "fail" && st.key != "missing" &&
-            st.key != "term" && !action_of(st.key, pa))
+            st.key != "term" && st.key != "power" && !action_of(st.key, pa))
             return false;
         std::string ud = tok.substr(a + 1, b - a - 1);
         if (ud != "d" && ud != "u")
@@ -1775,6 +1776,7 @@ const char* pm_surface_name(PmSurface s)
     case PmSurface::Sheet: return "sheet";
     case PmSurface::Confirm: return "confirm";
     case PmSurface::Toast: return "toast";
+    case PmSurface::Pause: return "pause";
     case PmSurface::None: break;
     }
     return "none";
@@ -1887,6 +1889,17 @@ bool read_calls(const std::string& path, std::vector<MsgEvent>& events)
     return true;
 }
 
+bool load_plate(const std::string& path, Buffer& plate)
+{
+    DecodedImage d;
+    if (!load_png(path, d) || !d.ok() || d.w != kPortraitW || d.h != kPortraitH)
+        return false;
+    for (int y = 0; y < d.h; y++)
+        for (int x = 0; x < d.w; x++)
+            plate.surface().at(x, y) = LiveF::pack(d.rgb[(size_t)y * d.w + x]);
+    return true;
+}
+
 int run_portmsg_shot(Fonts& fonts, const std::string& calls, const std::string& plate_arg, const DriveOpts& o,
                      const std::string& frames_dir, const std::string& out)
 {
@@ -1897,15 +1910,9 @@ int run_portmsg_shot(Fonts& fonts, const std::string& calls, const std::string& 
     if (plate_arg == "black") {
         Canvas pc(plate.surface());
         pc.fill(kScreen, launch_ground());
-    } else {
-        DecodedImage d;
-        if (!load_png(plate_arg, d) || !d.ok() || d.w != kPortraitW || d.h != kPortraitH) {
-            fprintf(stderr, "blockie-shot: --plate takes black or a %dx%d png\n", kPortraitW, kPortraitH);
-            return 2;
-        }
-        for (int y = 0; y < d.h; y++)
-            for (int x = 0; x < d.w; x++)
-                plate.surface().at(x, y) = LiveF::pack(d.rgb[(size_t)y * d.w + x]);
+    } else if (!load_plate(plate_arg, plate)) {
+        fprintf(stderr, "blockie-shot: --plate takes black or a %dx%d png\n", kPortraitW, kPortraitH);
+        return 2;
     }
     int64_t clock = 0, progress = 0;
     std::set<int64_t> pending;
@@ -2133,8 +2140,8 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
             tap(a0 - 2000, "down");
         }
         tap(a0, "accept");
-    } else if (po.surface != "power") {
-        fprintf(stderr, "blockie-shot: --powermenu takes power, reboot or confirm\n");
+    } else if (po.surface != "power" && po.surface != "pause") {
+        fprintf(stderr, "blockie-shot: --powermenu takes power, reboot, confirm or pause\n");
         return 2;
     }
     for (const Step& st : steps) {
@@ -2165,6 +2172,9 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
         } else if (key == "term") {
             if (down)
                 m.term(t);
+        } else if (key == "power") {
+            if (down)
+                m.power(t);
         } else if (action_of(key, a)) {
             if (down) {
                 m.action(a, false, t);
@@ -2186,7 +2196,10 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
             if (opened)
                 m.tick(t);
             if (t == to) {
-                m.open(g, false, t);
+                if (po.surface == "pause")
+                    m.open_pause(g, t);
+                else
+                    m.open(g, false, t);
                 if (po.idle > 0)
                     m.set_idle_ms(po.idle);
                 opened = true;
@@ -2204,22 +2217,29 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
             std::string ln;
             while (m.take_line(ln))
                 fprintf(stderr, "blockie-shot: %lld ms line %s\n", (long long)t, ln.c_str());
+            while (m.take_note(ln))
+                fprintf(stderr, "blockie-shot: %lld ms note %s\n", (long long)t, ln.c_str());
         }
         if (opened)
             m.tick(tf);
         std::string ln;
         while (m.take_line(ln))
             fprintf(stderr, "blockie-shot: %lld ms line %s\n", (long long)tf, ln.c_str());
+        while (m.take_note(ln))
+            fprintf(stderr, "blockie-shot: %lld ms note %s\n", (long long)tf, ln.c_str());
     };
     InkLayer ink;
     Buffer layer, comp;
     std::vector<uint32_t> argb((size_t)kPortraitW * kPortraitH);
     std::vector<AlphaRegion> regions;
+    int64_t draw_us = 0;
     auto render = [&](int64_t tf) {
         regions.clear();
         Canvas c(layer.surface());
+        auto t0 = std::chrono::steady_clock::now();
         if (opened && !m.done())
             draw_powermenu(c, fonts, ink, m.view(tf), theme(), regions);
+        draw_us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         write_argb(layer.surface(), regions, argb.data(), kPortraitW);
         composite_argb(argb.data(), kPortraitW, plate, comp.surface());
     };
@@ -2241,10 +2261,11 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
                 line += " " + std::to_string(r.r.x0) + "," + std::to_string(r.r.y0) + "," + std::to_string(r.r.x1) +
                         "," + std::to_string(r.r.y1) + ":" + std::to_string(region_a8(r.a256));
             PmView pv = m.view(tf);
-            int focus = pv.surface == PmSurface::Sheet                                       ? pv.sheet.focus
-                        : pv.surface == PmSurface::Power || pv.surface == PmSurface::Confirm ? pv.focus
-                                                                                              : -1;
+            bool dlg =
+                pv.surface == PmSurface::Power || pv.surface == PmSurface::Confirm || pv.surface == PmSurface::Pause;
+            int focus = pv.surface == PmSurface::Sheet ? pv.sheet.focus : dlg ? pv.focus : -1;
             line += " focus=" + std::to_string(focus);
+            fprintf(stderr, "blockie-shot: frame %d draw_us %lld\n", written, (long long)draw_us);
             if (!keys.empty())
                 line += " keys=" + keys;
             if (fprintf(side, "%s\n", line.c_str()) < 0) {
@@ -2264,7 +2285,8 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
         }
         keys.clear();
         PmSurface ps = m.surface();
-        bool menu_up = ps == PmSurface::Power || ps == PmSurface::Sheet || ps == PmSurface::Confirm;
+        bool menu_up =
+            ps == PmSurface::Power || ps == PmSurface::Sheet || ps == PmSurface::Confirm || ps == PmSurface::Pause;
         bool pending = !m.done() && ((ps == PmSurface::Toast && !m.probing()) || (po.idle > 0 && menu_up));
         if (opened && next >= plan.size() && !rep.active() && !m.animating(tf) && !pending) {
             if (tail-- > 0)
@@ -2565,8 +2587,9 @@ int main(int argc, char** argv)
                 "         AT line -- LINE... feeds the open --progress, AT eof ends its stdin, AT key:K[:d|:u]"
                 " with K up down left right accept back context prev next start, AT end stops the scope\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
-                "       blockie-shot --powermenu power|reboot|confirm [OUT.png] [--frames DIR] [--gates FILE]"
-                " [--pickgates FILE] [--plate home|plain] [--idle MS] [--script KEY|fail|term:d|u:MS,...] [--arrive MS]"
+                "       blockie-shot --powermenu power|reboot|confirm|pause [OUT.png] [--frames DIR] [--gates FILE]"
+                " [--pickgates FILE] [--plate home|plain|FILE.png] [--idle MS]"
+                " [--script KEY|fail|term|power:d|u:MS,...] [--arrive MS]"
                 " [--at MS]"
                 " [--from MS] [--tail N] [same options]\n");
         return 2;
@@ -2621,16 +2644,16 @@ int main(int argc, char** argv)
     if (msg_shot)
         return run_portmsg_shot(fonts, msg_calls, pm.plate == "home" ? "black" : pm.plate, drive, frames_dir, out);
     if (pm_shot) {
-        if (pm.plate != "home" && pm.plate != "plain") {
-            fprintf(stderr, "blockie-shot: --plate takes home or plain\n");
-            return 2;
-        }
         Buffer plate;
         Canvas pc(plate.surface());
-        if (pm.plate == "plain")
+        if (pm.plate == "plain") {
             pc.fill(kScreen, kPlainPlate);
-        else
+        } else if (pm.plate == "home") {
             draw_selector(pc, fonts, model, focus, scatter, detail);
+        } else if (!load_plate(pm.plate, plate)) {
+            fprintf(stderr, "blockie-shot: --plate takes home, plain or a %dx%d png\n", kPortraitW, kPortraitH);
+            return 2;
+        }
         return run_pm_shot(fonts, pm, drive, plate.surface(), frames_dir, out);
     }
 

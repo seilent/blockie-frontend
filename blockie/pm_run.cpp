@@ -50,6 +50,11 @@ bool say(int fd, const std::string& line)
     return true;
 }
 
+struct Sent {
+    uint32_t seq = 0;
+    bool visible = false, power = false;
+};
+
 struct Probe {
     Spawned s;
     std::string buf;
@@ -164,18 +169,22 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
     signal(SIGCHLD, SIG_DFL);
     fcntl(o.out, F_SETFD, fcntl(o.out, F_GETFD) | FD_CLOEXEC);
 
-    LineFifo fifo;
+    LineFifo fifo, cmd;
     if (!o.fifo.empty() && !fifo.open(o.fifo))
         std::fprintf(stderr, "blockie-powermenu: cannot open %s: %s\n", o.fifo.c_str(), std::strerror(errno));
+    if (o.pause)
+        cmd.adopt(o.in);
 
-    bool alive = true, spoke = false;
+    bool alive = true, spoke = false, boot_said = false;
     int rc = 0;
     auto result = [&](const std::string& line) {
         if (spoke) {
             std::fprintf(stderr, "blockie-powermenu: %s after a result, not sent\n", line.c_str());
             return;
         }
-        spoke = true;
+        bool boot = line.rfind("boot ", 0) == 0;
+        boot_said = boot_said || boot;
+        spoke = !(o.pause && boot);
         if (line.rfind("failed ", 0) == 0)
             rc = 1;
         alive = say(o.out, line) && alive;
@@ -191,7 +200,10 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
     }
     int64_t now = clock();
     if (live) {
-        m.open(read_gates(o.gates), o.dark, now);
+        if (o.pause)
+            m.open_pause(read_gates(o.gates), now);
+        else
+            m.open(read_gates(o.gates), o.dark, now);
         if (o.idle_ms > 0)
             m.set_idle_ms(o.idle_ms);
         if (o.toast_in_ms > 0 || o.toast_out_ms > 0)
@@ -202,13 +214,15 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
     Repeat repeat;
     InkLayer ink;
     std::vector<AlphaRegion> regions;
-    std::deque<std::pair<uint32_t, bool>> sent;
+    std::deque<Sent> sent;
     Probe probe;
     int64_t probe_at = -1;
-    bool shown = false, seen = false, dirty = true, committed = false, noted = false, framed = false;
+    bool shown = false, seen = false, dirty = true, committed = false, noted = false, framed = false, powered = false;
     uint32_t close_seq = 0;
     bool fresh = true;
     std::vector<PadEdge> edges;
+    std::vector<bool> modes;
+    bool mode_down = false, stdin_gone = false;
     std::vector<std::string> words;
     std::vector<PresentNote> notes;
     std::vector<pollfd> fds;
@@ -223,7 +237,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         bool ok = draw_powermenu(c, fonts, ink, m.view(t), theme(), regions);
         uint32_t seq = p.present(regions);
         bool visible = regions_visible(regions);
-        sent.push_back({seq, visible});
+        sent.push_back({seq, visible, visible && m.power_drawn(t)});
         dirty = !ok || m.animating(t);
         if (m.done() && !committed) {
             committed = true;
@@ -243,6 +257,15 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         m.take_line(ln);
         result(ln);
     };
+    auto told = [&]() {
+        std::string n;
+        if (!m.take_note(n) || spoke)
+            return;
+        powered = false;
+        for (Sent& x : sent)
+            x.power = false;
+        alive = say(o.out, n) && alive;
+    };
     auto closed = [&]() {
         std::string ln;
         int64_t at = 0;
@@ -258,6 +281,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         if (repeat.due(now, ra))
             act(ra, true, now);
         m.tick(now);
+        told();
         if (!grab.tick(now)) {
             if (!spoke)
                 m.abort("failed grab", now);
@@ -268,7 +292,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         if (!alive || closed())
             break;
 
-        if (m.probing() && spoke && probe.s.pid < 0 && now >= probe_at) {
+        if (m.probing() && boot_said && probe.s.pid < 0 && now >= probe_at) {
             probe = Probe{};
             probe.s = spawn_capture(with(o.systemctl, {"--user", "show", "-p", "LoadState", "-p", "ActiveState", "-p",
                                                        "Result", "-p", "StateChangeTimestampMonotonic",
@@ -290,7 +314,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         take(m.deadline(now));
         take(grab.deadline());
         take(repeat.deadline());
-        if (m.probing() && spoke && probe.s.pid < 0)
+        if (m.probing() && boot_said && probe.s.pid < 0)
             take(probe_at);
         {
             std::string ln;
@@ -302,12 +326,15 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
         if (m.animating(now) || dirty || (m.done() && !committed))
             take(now + kFrameMs);
         int timeout = wake < 0 ? -1 : (int)std::max<int64_t>(0, wake - clock());
+        if (o.on_wake)
+            o.on_wake(now, wake, m.probing() && boot_said && probe.s.pid < 0 ? probe_at : -1);
 
         fds.clear();
         fds.push_back({sfd, POLLIN, 0});
         fds.push_back({p.fd(), POLLIN, 0});
         fds.push_back({fifo.fd(), POLLIN, 0});
         fds.push_back({probe.s.fd, POLLIN, 0});
+        fds.push_back({cmd.fd(), POLLIN, 0});
         std::vector<int> gfds;
         grab.fds(gfds);
         for (int g : gfds)
@@ -336,10 +363,12 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
             break;
         }
         for (const PresentNote& n : notes) {
-            bool visible = false;
-            while (!sent.empty() && sent.front().first <= n.seq) {
-                if (sent.front().first == n.seq)
-                    visible = sent.front().second;
+            bool visible = false, power = false;
+            while (!sent.empty() && sent.front().seq <= n.seq) {
+                if (sent.front().seq == n.seq) {
+                    visible = sent.front().visible;
+                    power = sent.front().power;
+                }
                 sent.pop_front();
             }
             if (committed && n.seq >= close_seq)
@@ -348,6 +377,11 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
             if (n.presented && visible && !shown && !spoke) {
                 shown = true;
                 if (!say(o.out, "shown"))
+                    alive = false;
+            }
+            if (n.presented && power && !powered && !spoke) {
+                powered = true;
+                if (!say(o.out, "shown power"))
                     alive = false;
             }
         }
@@ -361,12 +395,40 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
             else
                 std::fprintf(stderr, "blockie-powermenu: input %s ignored\n", w.c_str());
         }
+        words.clear();
+        cmd.read(words);
+        for (const std::string& w : words) {
+            if (w == "back") {
+                act(PadAction::Back, false, now);
+            } else if (w == "power") {
+                repeat.release_all();
+                m.power(now);
+                dirty = true;
+            } else {
+                std::fprintf(stderr, "blockie-powermenu: stdin %s ignored\n", w.c_str());
+            }
+        }
+        if (o.pause && cmd.ended() && !stdin_gone) {
+            stdin_gone = true;
+            std::fprintf(stderr, "blockie-powermenu: stdin closed\n");
+            m.term(now);
+            dirty = true;
+        }
 
         edges.clear();
-        if (grab.read(edges))
+        modes.clear();
+        if (grab.read(edges, o.pause ? &modes : nullptr))
             repeat.release_all();
-        if (!acts)
+        if (!acts) {
             edges.clear();
+            modes.clear();
+        }
+        for (bool d : modes) {
+            if (spoke || d == mode_down)
+                continue;
+            mode_down = d;
+            alive = say(o.out, d ? "key extra1 1" : "key extra1 0") && alive;
+        }
         for (const PadEdge& e : edges) {
             bool vertical = e.action == PadAction::Up || e.action == PadAction::Down;
             if (e.down)
@@ -376,6 +438,7 @@ int run_powermenu(LayerPresenter& p, Fonts& fonts, MenuGrab& grab, const PmRunOp
             else if (vertical)
                 repeat.release(e.action, kFromPad, now);
         }
+        told();
 
         if (probe.s.fd >= 0 && drain_probe(probe)) {
             if (!probe.verdict.failed) {

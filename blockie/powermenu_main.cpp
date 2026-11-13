@@ -5,7 +5,9 @@
 #include <memory>
 #include <string>
 
+#include <fcntl.h>
 #include <poll.h>
+#include <unistd.h>
 
 #include "bus.h"
 #include "layer_present.h"
@@ -60,7 +62,15 @@ void read_theme()
 int main()
 {
     using namespace fd;
-    MenuGrab grab(real_evdev());
+    if (fcntl(0, F_GETFD) < 0) {
+        int nul = open("/dev/null", O_RDONLY);
+        if (nul > 0) {
+            dup2(nul, 0);
+            close(nul);
+        }
+    }
+    bool pause = env_or("BLOCKIE_POWERMENU_MODE", "power") == "pause";
+    MenuGrab grab(real_evdev(), pause);
     grab.start(now_ms());
     read_theme();
     std::fprintf(stderr, "blockie-powermenu: theme %s\n", theme().light ? "light" : "dark");
@@ -72,6 +82,8 @@ int main()
     o.gates = env_or("BLOCKIE_BOOT_STATE", "/run/blockie/boot/state");
     o.fifo = env_or("BLOCKIE_POWERMENU_INPUT", "");
     o.dark = env_or("BLOCKIE_POWERMENU_FROM", "awake") == "dark";
+    o.pause = pause;
+    o.in = pause ? 0 : -1;
     std::unique_ptr<LayerPresenter> p = make_layer_presenter();
     return run_powermenu(*p, fonts, grab, o);
 }

@@ -25,8 +25,10 @@ for a in "$@"; do
     case $a in
         DESTDIR=*) destdir=${a#DESTDIR=} ;;
         PREFIX=*) prefix=${a#PREFIX=} ;;
-        all | generic | app | scan | test | test-dbus | test-tsan | scraper | install | shot) target=$a ;;
-        *) echo "build.sh: arg $a, want a target (all generic app scan test test-dbus test-tsan scraper install shot) or DESTDIR=/PREFIX=" >&2
+        all | generic | app | scan | test | test-dbus | test-tsan | test-input | test-pad | test-portmsg | \
+            test-powermenu | scraper | install | shot) target=$a ;;
+        *) echo "build.sh: arg $a, want a target (all generic app scan test test-dbus test-tsan test-input test-pad" \
+            "test-portmsg test-powermenu scraper install shot) or DESTDIR=/PREFIX=" >&2
             exit 2 ;;
     esac
 done
@@ -1108,7 +1110,7 @@ case $target in
         build_deps_obj
         ((fail)) && { echo "build.sh: dependency objects failed" >&2; exit 1; }
         ;;
-    test)
+    test | test-input | test-pad | test-portmsg | test-powermenu)
         gen_tokens
         wl_gen
         ;;
@@ -1119,6 +1121,10 @@ esac
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
 [[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test && build_portmsg_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
+[[ $target == test-input ]] && { build_input_test || { echo "build.sh: test-input failed" >&2; exit 1; }; }
+[[ $target == test-pad ]] && { build_pad_test || { echo "build.sh: test-pad failed" >&2; exit 1; }; }
+[[ $target == test-portmsg ]] && { build_portmsg_test || { echo "build.sh: test-portmsg failed" >&2; exit 1; }; }
+[[ $target == test-powermenu ]] && { build_powermenu_test || { echo "build.sh: test-powermenu failed" >&2; exit 1; }; }
 [[ $target == test-tsan ]] && { build_tsan_test || { echo "build.sh: test-tsan failed" >&2; exit 1; }; }
 [[ $target == install ]] && { build_install || { echo "build.sh: install failed" >&2; exit 1; }; }
 [[ $target == shot ]] && { build_shot || { echo "build.sh: shot failed" >&2; exit 1; }; }

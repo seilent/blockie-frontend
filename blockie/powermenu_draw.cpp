@@ -1,5 +1,7 @@
 #include "powermenu.h"
 
+#include <algorithm>
+
 #include "../ui/roles.h"
 
 namespace fd {
@@ -8,6 +10,34 @@ namespace {
 
 int index_px(fx at, int pitch) { return (int)(((int64_t)at * pitch + kHalf) >> kFxBits); }
 
+bool draw_body(Canvas& k, Fonts& f, const PmBody& b, Rect sr, Zoom z)
+{
+    int edge = px(tok::edge), pitch = px(tok::settingsPitch), top = px(tok::contentTop);
+    Rect keep = k.clip();
+    TextStyle ts = role::dialogTitle.style(), is = role::dialogItem.style();
+    k.set_clip(z.rect(Rect{sr.x0, sr.y0, sr.x1 - edge, top}).intersect(keep));
+    bool ok = f.draw(k, ts, b.title, edge * 64, px(tok::pivotBaseline), kWhite, alpha256(role::dialogTitle.alpha), z);
+    int asc = f.ascent(is.px), desc = f.descent(is.px);
+    for (size_t i = 0; i < b.items.size(); i++) {
+        int rt = top + (int)i * pitch;
+        k.set_clip(z.rect(Rect{sr.x0, rt, sr.x1 - edge, rt + pitch}).intersect(keep));
+        ok = f.draw(k, is, b.items[i], edge * 64, rt + (pitch - asc - desc) / 2 + asc, kWhite, alpha256(b.alpha[i]),
+                    z) && ok;
+    }
+    k.set_clip(keep);
+    if (!b.items.empty()) {
+        int bx = edge - px(tok::focus_barOffset), by = top + index_px(b.bar, pitch);
+        k.fill_aa(Rect64::of({bx, by, bx + px(tok::focus_barWidth), by + pitch}, z), kWhite, 256);
+    }
+    return ok;
+}
+
+InkLayer& cross_ink()
+{
+    static InkLayer layer;
+    return layer;
+}
+
 bool draw_dialog(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
                  std::vector<AlphaRegion>& regions)
 {
@@ -15,23 +45,12 @@ bool draw_dialog(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Them
     c.fill(sr, th.scrim_dialog);
     regions.push_back({sr, th.scrim_dialog_a256 * alpha256(v.o) >> 8});
     Zoom z{v.s, sr.x1 * 32, sr.y1 * 32};
-    int edge = px(tok::edge), pitch = px(tok::settingsPitch), top = px(tok::contentTop);
-    Canvas& k = ink.begin(sr);
-    Rect keep = k.clip();
-    TextStyle ts = role::dialogTitle.style(), is = role::dialogItem.style();
-    k.set_clip(z.rect(Rect{sr.x0, sr.y0, sr.x1 - edge, top}).intersect(keep));
-    bool ok = f.draw(k, ts, v.title, edge * 64, px(tok::pivotBaseline), kWhite, alpha256(role::dialogTitle.alpha), z);
-    int asc = f.ascent(is.px), desc = f.descent(is.px);
-    for (size_t i = 0; i < v.items.size(); i++) {
-        int rt = top + (int)i * pitch;
-        k.set_clip(z.rect(Rect{sr.x0, rt, sr.x1 - edge, rt + pitch}).intersect(keep));
-        ok = f.draw(k, is, v.items[i], edge * 64, rt + (pitch - asc - desc) / 2 + asc, kWhite, alpha256(v.alpha[i]),
-                    z) && ok;
-    }
-    k.set_clip(keep);
-    if (!v.items.empty()) {
-        int bx = edge - px(tok::focus_barOffset), by = top + index_px(v.bar, pitch);
-        k.fill_aa(Rect64::of({bx, by, bx + px(tok::focus_barWidth), by + pitch}, z), kWhite, 256);
+    bool ok = draw_body(ink.begin(sr), f, PmBody{v.title, v.items, v.alpha, v.bar}, sr, z);
+    if (!v.under && !v.other.items.empty()) {
+        InkLayer& o = cross_ink();
+        ok = draw_body(o.begin(sr), f, v.other, sr, z) && ok;
+        int m = alpha256(v.mix);
+        ink_add(ink.surface(), o.surface(), 256 - m, m, sr);
     }
     ink.compose(c.surface(), th.ink);
     return ok;
@@ -59,16 +78,13 @@ bool draw_pm_toast(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Th
     return ok;
 }
 
-}
-
-bool draw_powermenu(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
-                    std::vector<AlphaRegion>& regions)
+bool draw_top(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
+              std::vector<AlphaRegion>& regions)
 {
-    regions.clear();
-    c.fill(c.surface().rect(), 0);
     switch (v.surface) {
     case PmSurface::Power:
     case PmSurface::Confirm:
+    case PmSurface::Pause:
         return draw_dialog(c, f, ink, v, th, regions);
     case PmSurface::Sheet:
         draw_sheet(c, f, v, th, regions);
@@ -79,6 +95,72 @@ bool draw_powermenu(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const T
         break;
     }
     return true;
+}
+
+bool draw_under(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
+                std::vector<AlphaRegion>& regions)
+{
+    static Buffer under, top;
+    PmView u;
+    u.surface = PmSurface::Pause;
+    u.title = v.other.title;
+    u.items = v.other.items;
+    u.alpha = v.other.alpha;
+    u.bar = v.other.bar;
+    u.o = kOne;
+    Canvas uc(under.surface());
+    bool ok = draw_dialog(uc, f, ink, u, th, regions);
+    int p = regions.back().a256;
+    Canvas tc(top.surface());
+    tc.fill(tc.surface().rect(), 0);
+    std::vector<AlphaRegion> tr;
+    ok = draw_top(tc, f, ink, v, th, tr) && ok;
+    Surface us = under.surface(), ts = top.surface(), cs = c.surface();
+    Rect sr = cs.rect().intersect(ts.rect()).intersect(us.rect());
+    for (int y = sr.y0; y < sr.y1; y++)
+        for (int x = sr.x0; x < sr.x1; x++)
+            cs.at(x, y) = us.at(x, y);
+    for (const AlphaRegion& g : tr) {
+        int a = std::clamp(g.a256, 0, 256);
+        int all = 256 - ((256 - p) * (256 - a) >> 8);
+        regions.push_back({g.r, all});
+        Rect r = g.r.intersect(sr);
+        if (a == 0) {
+            for (int y = r.y0; y < r.y1; y++)
+                for (int x = r.x0; x < r.x1; x++)
+                    cs.at(x, y) = us.at(x, y);
+            continue;
+        }
+        if (a == 256) {
+            for (int y = r.y0; y < r.y1; y++)
+                for (int x = r.x0; x < r.x1; x++)
+                    cs.at(x, y) = ts.at(x, y);
+            continue;
+        }
+        uint32_t ku = (uint32_t)((int64_t)p * (256 - a) * 256 / all), kt = (uint32_t)((int64_t)a * 65536 / all);
+        for (int y = r.y0; y < r.y1; y++)
+            for (int x = r.x0; x < r.x1; x++) {
+                uint32_t pu = LiveF::unpack(us.at(x, y)), po = LiveF::unpack(ts.at(x, y)), out = 0;
+                for (int sh = 0; sh <= 16; sh += 8) {
+                    uint32_t ch = (((pu >> sh) & 0xFF) * ku + ((po >> sh) & 0xFF) * kt + 32768) >> 16;
+                    out |= std::min<uint32_t>(ch, 255) << sh;
+                }
+                cs.at(x, y) = LiveF::pack(out);
+            }
+    }
+    return ok;
+}
+
+}
+
+bool draw_powermenu(Canvas& c, Fonts& f, InkLayer& ink, const PmView& v, const Theme& th,
+                    std::vector<AlphaRegion>& regions)
+{
+    regions.clear();
+    c.fill(c.surface().rect(), 0);
+    if (v.under)
+        return draw_under(c, f, ink, v, th, regions);
+    return draw_top(c, f, ink, v, th, regions);
 }
 
 }

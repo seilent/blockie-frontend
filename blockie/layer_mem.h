@@ -33,6 +33,7 @@ public:
         pause_ms_ = ms;
     }
     void hold_notes() { hold_ = true; }
+    void hold_while(const std::string& path) { hold_path_ = path; }
     void stall_while(const std::string& path) { stall_ = path; }
     void log_to(int fd) { log_ = fd; }
     void close() { closed_ = true; }
@@ -45,7 +46,8 @@ private:
     std::string stall_;
     Buffer frame_;
     std::vector<uint32_t> argb_ = std::vector<uint32_t>((size_t)kPortraitW * kPortraitH);
-    std::deque<PresentNote> notes_;
+    std::deque<PresentNote> notes_, held_;
+    std::string hold_path_;
     uint32_t seq_ = 0, limit_ = UINT32_MAX, pause_after_ = UINT32_MAX;
     int pause_ms_ = 0;
     int64_t paused_at_ = -1;

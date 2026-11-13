@@ -75,7 +75,14 @@ uint32_t MemPresenter::present(const std::vector<AlphaRegion>& regions)
     char buf[80];
     snprintf(buf, sizeof buf, "present %u %zu %d %d", seq_, regions.size(), regions_visible(regions) ? 1 : 0, most);
     note(buf);
-    if (!hold_) {
+    bool holding = !hold_path_.empty() && access(hold_path_.c_str(), F_OK) == 0;
+    if (!holding && !held_.empty()) {
+        notes_.insert(notes_.end(), held_.begin(), held_.end());
+        held_.clear();
+    }
+    if (!hold_ && holding) {
+        held_.push_back({seq_, shown});
+    } else if (!hold_) {
         notes_.push_back({seq_, shown});
         uint64_t one = 1;
         if (efd_ >= 0 && write(efd_, &one, sizeof one) < 0)
@@ -89,6 +96,10 @@ bool MemPresenter::pump(std::vector<PresentNote>& out)
     uint64_t v = 0;
     if (efd_ >= 0 && read(efd_, &v, sizeof v) < 0)
         v = 0;
+    if (!held_.empty() && access(hold_path_.c_str(), F_OK) != 0) {
+        notes_.insert(notes_.end(), held_.begin(), held_.end());
+        held_.clear();
+    }
     while (!notes_.empty()) {
         char buf[48];
         snprintf(buf, sizeof buf, "note %u %d", notes_.front().seq, notes_.front().presented ? 1 : 0);

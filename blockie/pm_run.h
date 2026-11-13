@@ -16,11 +16,14 @@ struct PmRunOpts {
     std::string fifo;
     std::vector<std::string> systemctl = {"systemctl"};
     bool dark = false;
+    bool pause = false;
+    int in = -1;
     int idle_ms = 0;
     int toast_in_ms = 0;
     int toast_out_ms = 0;
     int out = 1;
     std::function<int64_t()> clock;
+    std::function<void(int64_t now, int64_t wake, int64_t probe_at)> on_wake;
 };
 
 struct Spawned {

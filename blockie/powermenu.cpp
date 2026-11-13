@@ -20,6 +20,11 @@ constexpr const char* kConfirmTitle = "switch to android";
 constexpr const char* kBootAndroid = "boot android";
 constexpr const char* kCancel = "cancel";
 constexpr const char* kRestarting = "restarting";
+constexpr const char* kPauseTitle = "paused";
+constexpr const char* kResume = "resume";
+constexpr const char* kQuit = "quit";
+constexpr const char* kFailedGate = "failed gate";
+constexpr const char* kFailedBoot = "failed boot";
 constexpr int kConfirmCancel = 1;
 
 int ms(fx t) { return fx_round(t); }
@@ -134,17 +139,32 @@ void PowerMenu::open(const BootGates& g, bool dark, int64_t now)
     if (g.recovery == "yes")
         sheet_.push_back(kRecovery);
     confirm_ = {kBootAndroid, kCancel};
+    pause_items_ = {kResume, kQuit};
     idle_ms_ = dark ? kIdleDarkMs : kIdleAwakeMs;
     last_input_ = now;
     done_ = false;
     has_line_ = false;
     term_ = false;
+    pause_ = false;
+    note_.clear();
+    cross_.set(0);
     open_dialog(PmSurface::Power, 0, now);
+}
+
+void PowerMenu::open_pause(const BootGates& g, int64_t now)
+{
+    open(g, false, now);
+    pause_ = true;
+    pause_focus_ = 0;
+    open_dialog(PmSurface::Pause, 0, now);
 }
 
 const std::vector<const char*>& PowerMenu::items() const
 {
-    return surf_ == PmSurface::Sheet ? sheet_ : surf_ == PmSurface::Confirm ? confirm_ : power_;
+    return surf_ == PmSurface::Sheet     ? sheet_
+           : surf_ == PmSurface::Confirm ? confirm_
+           : surf_ == PmSurface::Pause   ? pause_items_
+                                         : power_;
 }
 
 void PowerMenu::say(const std::string& s, bool closing, int64_t at)
@@ -180,6 +200,15 @@ bool PowerMenu::take_line(std::string& out)
         return false;
     out = line_;
     has_line_ = false;
+    return true;
+}
+
+bool PowerMenu::take_note(std::string& out)
+{
+    if (note_.empty())
+        return false;
+    out = note_;
+    note_.clear();
     return true;
 }
 
@@ -234,18 +263,76 @@ void PowerMenu::settle(int64_t at)
     fade_.set(fade_.at(end_at_));
     scale_.set(scale_.at(end_at_));
     prog_.set(prog_.at(end_at_));
+    cross_.set(cross_.at(end_at_));
     if (r == Run::Reverse) {
-        finish(kCancel, at);
+        cancel(at);
         return;
     }
     if (r != Run::Close)
         return;
     if (next_ == Next::Cancel)
-        finish(kCancel, at);
+        cancel(at);
     else if (next_ == Next::Confirm)
         open_dialog(PmSurface::Confirm, kConfirmCancel, at);
     else
         start_pick(at);
+}
+
+void PowerMenu::cancel(int64_t at)
+{
+    if (!pause_)
+        finish(kCancel, at);
+    else if (surf_ == PmSurface::Pause)
+        finish(kResume, at);
+    else
+        to_pause(at);
+}
+
+void PowerMenu::to_pause(int64_t at)
+{
+    surf_ = PmSurface::Pause;
+    focus_ = pause_focus_;
+    prev_ = -1;
+    bar_.set(fx_int(focus_));
+    alpha_in_.set(kOne);
+    alpha_out_.set(0);
+    fade_.set(kOne);
+    scale_.set(kOne);
+    cross_.set(0);
+    run_ = Run::Still;
+    end_at_ = at;
+    note_ = kCancel;
+}
+
+void PowerMenu::uncross(int64_t now)
+{
+    fx from = cross_.at(now);
+    power_focus_ = focus_;
+    to_pause(now);
+    int d = (int)((int64_t)ms(tok::motion_focusAlpha) * from / kOne);
+    cross_.run(now, from, 0, d, Curve::Linear);
+    run_ = Run::Cross;
+    end_at_ = now + d;
+}
+
+void PowerMenu::power(int64_t now)
+{
+    if (!pause_ || done_ || surf_ != PmSurface::Pause)
+        return;
+    last_input_ = now;
+    land(now);
+    if (done_ || surf_ != PmSurface::Pause)
+        return;
+    pause_focus_ = focus_;
+    surf_ = PmSurface::Power;
+    focus_ = 0;
+    prev_ = -1;
+    bar_.set(0);
+    alpha_in_.set(kOne);
+    alpha_out_.set(0);
+    cross_.run(now, 0, kOne, ms(tok::motion_focusAlpha), Curve::Linear);
+    run_ = Run::Cross;
+    end_at_ = now + ms(tok::motion_focusAlpha);
 }
 
 void PowerMenu::land(int64_t now)
@@ -336,12 +423,16 @@ void PowerMenu::start_pick(int64_t at)
         return;
     }
     toast_.show(at, failed_words(pick_), pick_reason_, false);
-    fail_line_ = "failed gate";
+    fail_line_ = kFailedGate;
 }
 
 void PowerMenu::accept(int64_t now)
 {
     const char* it = items()[(size_t)focus_];
+    if (surf_ == PmSurface::Pause) {
+        finish(it == kResume ? kResume : kQuit, now);
+        return;
+    }
     if (surf_ == PmSurface::Power) {
         if (it == kPowerOff)
             finish("poweroff", now);
@@ -359,7 +450,7 @@ void PowerMenu::accept(int64_t now)
         return;
     }
     if (focus_ == kConfirmCancel) {
-        finish(kCancel, now);
+        cancel(now);
         return;
     }
     pick(kAndroid, now);
@@ -375,12 +466,17 @@ void PowerMenu::action(PadAction a, bool repeat, int64_t now)
     last_input_ = now;
     if (a == PadAction::Left || a == PadAction::Right || a == PadAction::Context)
         return;
+    if (run_ == Run::Cross && surf_ == PmSurface::Power && a == PadAction::Back && !repeat) {
+        uncross(now);
+        return;
+    }
     if (run_ == Run::Open && a == PadAction::Back && !repeat) {
         reverse(now);
         return;
     }
+    bool closing = (run_ == Run::Close && next_ == Next::Cancel) || (pause_ && run_ == Run::Reverse);
     land(now);
-    if (done_ || !menu())
+    if (done_ || !menu() || closing)
         return;
     if (a == PadAction::Up || a == PadAction::Down) {
         move(a == PadAction::Down, repeat, now);
@@ -390,6 +486,8 @@ void PowerMenu::action(PadAction a, bool repeat, int64_t now)
         return;
     if (a == PadAction::Accept)
         accept(now);
+    else if (a == PadAction::Back && pause_ && surf_ == PmSurface::Power)
+        uncross(now);
     else if (a == PadAction::Back)
         close(Next::Cancel, now);
 }
@@ -421,7 +519,10 @@ void PowerMenu::fail(const std::string& reason, int64_t now)
         return;
     probing_ = false;
     toast_.show(now, failed_words(pick_), lower(reason), false);
-    fail_line_.clear();
+    if (pause_)
+        fail_line_ = kFailedBoot;
+    else
+        fail_line_.clear();
 }
 
 void PowerMenu::tick(int64_t now)
@@ -436,8 +537,14 @@ void PowerMenu::tick(int64_t now)
         finish("screen-off", now);
         return;
     }
-    if (toast_.on() && !toast_.forever() && now >= toast_.end())
+    if (surf_ != PmSurface::Toast || !toast_.on() || toast_.forever() || now < toast_.end())
+        return;
+    if (pause_ && !fail_line_.empty()) {
+        to_pause(now);
+        note_ = fail_line_;
+    } else {
         finish(fail_line_, now);
+    }
 }
 
 bool PowerMenu::animating(int64_t now) const
@@ -466,10 +573,34 @@ int64_t PowerMenu::deadline(int64_t now) const
     return d;
 }
 
+bool PowerMenu::power_drawn(int64_t now) const
+{
+    if (done_ || !pause_)
+        return false;
+    if (run_ == Run::Cross)
+        return surf_ == PmSurface::Power && cross_.at(now) > 0;
+    return surf_ == PmSurface::Power || surf_ == PmSurface::Sheet || surf_ == PmSurface::Confirm;
+}
+
+PmBody PowerMenu::body(const std::vector<const char*>& items, int focus, const char* title) const
+{
+    PmBody b;
+    b.title = title;
+    b.items = items;
+    b.bar = fx_int(focus);
+    for (int i = 0; i < (int)items.size(); i++)
+        b.alpha.push_back(i == focus ? tok::type_dialogItem_alpha : tok::type_dialogItem_alphaDim);
+    return b;
+}
+
 PmView PowerMenu::view(int64_t now) const
 {
     PmView v;
     v.surface = done_ ? PmSurface::None : surf_;
+    if (pause_ && (v.surface == PmSurface::Sheet || v.surface == PmSurface::Confirm || v.surface == PmSurface::Toast)) {
+        v.under = true;
+        v.other = body(pause_items_, pause_focus_, kPauseTitle);
+    }
     if (v.surface == PmSurface::Toast) {
         v.line1 = toast_.line1(now);
         v.line2 = toast_.line2(now);
@@ -491,8 +622,17 @@ PmView PowerMenu::view(int64_t now) const
     }
     if (v.surface == PmSurface::None)
         return v;
-    v.title = v.surface == PmSurface::Confirm ? kConfirmTitle : kPowerTitle;
+    v.title = v.surface == PmSurface::Confirm ? kConfirmTitle
+              : v.surface == PmSurface::Pause ? kPauseTitle
+                                              : kPowerTitle;
     v.items = items();
+    if (run_ == Run::Cross && v.surface == PmSurface::Power) {
+        v.other = body(pause_items_, pause_focus_, kPauseTitle);
+        v.mix = kOne - cross_.at(now);
+    } else if (run_ == Run::Cross) {
+        v.other = body(power_, power_focus_, kPowerTitle);
+        v.mix = cross_.at(now);
+    }
     v.focus = focus_;
     v.bar = bar_.at(now);
     v.o = fade_.at(now);

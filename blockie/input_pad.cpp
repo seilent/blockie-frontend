@@ -125,7 +125,7 @@ std::vector<PadAction> PadReader::poll()
     return out;
 }
 
-std::vector<PadEdge> PadReader::poll_edges()
+std::vector<PadEdge> PadReader::poll_edges(std::vector<bool>* mode)
 {
     std::vector<PadEdge> out;
     if (fd_ < 0)
@@ -148,7 +148,7 @@ std::vector<PadEdge> PadReader::poll_edges()
         if (dropping_) {
             if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
                 dropping_ = false;
-                resync(out);
+                resync(out, mode);
             }
             continue;
         }
@@ -178,6 +178,11 @@ std::vector<PadEdge> PadReader::poll_edges()
             case BTN_START:
                 if (down)
                     out.push_back({PadAction::Start, true});
+                break;
+            case BTN_MODE:
+                mode_ = down;
+                if (mode)
+                    mode->push_back(down);
                 break;
             default:
                 for (int i = 0; i < 4; i++)
@@ -216,8 +221,17 @@ Held PadReader::held(PadAction dir) const
     return key || hat ? Held::Yes : Held::No;
 }
 
-void PadReader::resync(std::vector<PadEdge>& out)
+void PadReader::resync(std::vector<PadEdge>& out, std::vector<bool>* mode)
 {
+    constexpr int kBits = 8 * (int)sizeof(unsigned long);
+    unsigned long keys[(KEY_MAX + kBits) / kBits] = {0};
+    if (mode && ioctl(fd_, EVIOCGKEY(sizeof keys), keys) >= 0) {
+        bool down = (keys[BTN_MODE / kBits] >> (BTN_MODE % kBits)) & 1UL;
+        if (down != mode_) {
+            mode_ = down;
+            mode->push_back(down);
+        }
+    }
     for (int i = 0; i < 4; i++) {
         PadAction d = kDirs[i];
         bool negative = d == PadAction::Up || d == PadAction::Left;

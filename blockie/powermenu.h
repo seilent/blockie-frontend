@@ -36,7 +36,14 @@ struct UnitVerdict {
     std::string why, reason;
 };
 
-enum class PmSurface { None, Power, Sheet, Confirm, Toast };
+enum class PmSurface { None, Power, Sheet, Confirm, Toast, Pause };
+
+struct PmBody {
+    const char* title = "";
+    std::vector<const char*> items;
+    std::vector<fx> alpha;
+    fx bar = 0;
+};
 
 struct PmView {
     PmSurface surface = PmSurface::None;
@@ -52,6 +59,9 @@ struct PmView {
     fx e = 0;
     fx text = kOne;
     int strip_h = 0;
+    PmBody other;
+    fx mix = 0;
+    bool under = false;
 };
 
 class PowerMenu {
@@ -65,7 +75,9 @@ public:
     std::function<BootGates()> reread;
 
     void open(const BootGates& g, bool dark, int64_t now);
+    void open_pause(const BootGates& g, int64_t now);
     void action(PadAction a, bool repeat, int64_t now);
+    void power(int64_t now);
     UnitVerdict check(const UnitProbe& u) const;
     void fail(const std::string& reason, int64_t now);
     void tick(int64_t now);
@@ -75,6 +87,8 @@ public:
     void set_toast_ms(int in, int out) { toast_.set_ms(in, out); }
     bool peek_line(std::string& out, int64_t& at, bool& closing) const;
     bool take_line(std::string& out);
+    bool take_note(std::string& out);
+    bool power_drawn(int64_t now) const;
     bool done() const { return done_; }
     bool animating(int64_t now) const;
     int64_t deadline(int64_t now) const;
@@ -85,11 +99,18 @@ public:
     PmView view(int64_t now) const;
 
 private:
-    enum class Run { Still, Open, Close, Reverse };
+    enum class Run { Still, Open, Close, Reverse, Cross };
     enum class Next { Cancel, Confirm, Pick };
 
-    bool menu() const { return surf_ == PmSurface::Power || surf_ == PmSurface::Sheet || surf_ == PmSurface::Confirm; }
-    bool dialog() const { return surf_ == PmSurface::Power || surf_ == PmSurface::Confirm; }
+    bool menu() const
+    {
+        return surf_ == PmSurface::Power || surf_ == PmSurface::Sheet || surf_ == PmSurface::Confirm ||
+               surf_ == PmSurface::Pause;
+    }
+    bool dialog() const
+    {
+        return surf_ == PmSurface::Power || surf_ == PmSurface::Confirm || surf_ == PmSurface::Pause;
+    }
     const std::vector<const char*>& items() const;
     void say(const std::string& s, bool closing, int64_t at);
     void finish(const std::string& s, int64_t at);
@@ -103,15 +124,22 @@ private:
     void accept(int64_t now);
     void pick(const std::string& t, int64_t now);
     void start_pick(int64_t at);
+    void cancel(int64_t at);
+    void to_pause(int64_t at);
+    void uncross(int64_t now);
+    PmBody body(const std::vector<const char*>& items, int focus, const char* title) const;
 
     BootGates gates_;
-    std::vector<const char*> power_, sheet_, confirm_;
+    std::vector<const char*> power_, sheet_, confirm_, pause_items_;
     PmSurface surf_ = PmSurface::None;
     Run run_ = Run::Still;
     Next next_ = Next::Cancel;
     int64_t end_at_ = 0;
     int focus_ = 0, prev_ = -1;
-    Tween fade_, scale_, prog_, bar_, alpha_in_, alpha_out_;
+    Tween fade_, scale_, prog_, bar_, alpha_in_, alpha_out_, cross_;
+    bool pause_ = false;
+    std::string note_;
+    int pause_focus_ = 0, power_focus_ = 0;
     int idle_ms_ = kIdleAwakeMs;
     int64_t last_input_ = 0;
     std::string pick_, pick_reason_;

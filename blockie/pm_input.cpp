@@ -19,9 +19,37 @@ namespace {
 
 constexpr const char* kKeyNodes[] = {"mtk-pmic-keys", "odm:gpio_keys", "mtk-kpd"};
 constexpr int kBits = 8 * (int)sizeof(unsigned long);
+constexpr size_t kLineMax = 4096;
 
 bool bit(const unsigned long* v, int i) { return (v[i / kBits] >> (i % kBits)) & 1UL; }
 
+bool discard(int fd)
+{
+    input_event ev[16];
+    for (;;) {
+        ssize_t r = ::read(fd, ev, sizeof ev);
+        if (r > 0 || (r < 0 && errno == EINTR))
+            continue;
+        return r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+    }
+}
+
+}
+
+bool input_held(const std::function<bool(unsigned long* bits, size_t bytes)>& keys,
+                const std::function<bool(int code, int& value)>& abs)
+{
+    unsigned long bits[(KEY_MAX + kBits) / kBits] = {0};
+    if (keys(bits, sizeof bits))
+        for (unsigned long w : bits)
+            if (w)
+                return true;
+    for (int code : {ABS_HAT0X, ABS_HAT0Y, ABS_GAS, ABS_BRAKE}) {
+        int v = 0;
+        if (abs(code, v) && v != 0)
+            return true;
+    }
+    return false;
 }
 
 DevKind dev_kind(const DevInfo& d)
@@ -70,13 +98,14 @@ EvdevOps real_evdev()
         return realpath(node.c_str(), buf) ? std::string(buf) : std::string();
     };
     o.keys_down = [](int fd) {
-        unsigned long keys[(KEY_MAX + kBits) / kBits] = {0};
-        if (ioctl(fd, EVIOCGKEY(sizeof keys), keys) < 0)
-            return false;
-        for (unsigned long w : keys)
-            if (w)
-                return true;
-        return false;
+        return input_held([fd](unsigned long* bits, size_t bytes) { return ioctl(fd, EVIOCGKEY(bytes), bits) >= 0; },
+                          [fd](int code, int& value) {
+                              input_absinfo ai = {};
+                              if (ioctl(fd, EVIOCGABS(code), &ai) < 0)
+                                  return false;
+                              value = ai.value;
+                              return true;
+                          });
     };
     return o;
 }
@@ -86,6 +115,8 @@ MenuGrab::~MenuGrab()
     for (Node& n : nodes_)
         drop(n);
     for (Busy& b : busy_)
+        ::close(b.fd);
+    for (Busy& b : waiting_)
         ::close(b.fd);
 }
 
@@ -126,6 +157,26 @@ void MenuGrab::take(const std::string& path, int fd, DevKind kind)
     nodes_.push_back(std::move(n));
 }
 
+void MenuGrab::try_grab(const Busy& b, int64_t now)
+{
+    if (!discard(b.fd)) {
+        ::close(b.fd);
+        return;
+    }
+    int rc = ops_.grab(b.fd);
+    if (rc == 0) {
+        take(b.path, b.fd, b.kind);
+    } else if (rc == EBUSY && b.first) {
+        busy_.push_back({b.path, b.kind, b.fd, now});
+        if (retry_at_ < 0)
+            retry_at_ = now + kRetryMs;
+    } else {
+        if (rc == EBUSY)
+            std::fprintf(stderr, "blockie-powermenu: %s is busy at a rescan, skipped\n", b.path.c_str());
+        ::close(b.fd);
+    }
+}
+
 void MenuGrab::scan(int64_t now, bool first)
 {
     std::vector<std::string> paths = ops_.list();
@@ -153,6 +204,10 @@ void MenuGrab::scan(int64_t now, bool first)
             ignored_.emplace_back(path, real);
             continue;
         }
+        if (wait_up_ && ops_.keys_down(fd)) {
+            waiting_.push_back({path, kind, fd, now, first});
+            continue;
+        }
         int rc = ops_.grab(fd);
         if (rc == 0) {
             take(path, fd, kind);
@@ -175,6 +230,15 @@ bool MenuGrab::tick(int64_t now)
 {
     if (release_at_ >= 0)
         return true;
+    for (size_t i = 0; i < waiting_.size();) {
+        Busy b = waiting_[i];
+        if (now - b.since < kReleaseMs && ops_.keys_down(b.fd)) {
+            i++;
+            continue;
+        }
+        waiting_.erase(waiting_.begin() + (long)i);
+        try_grab(b, now);
+    }
     if (retry_at_ >= 0 && now >= retry_at_) {
         retry_at_ = -1;
         for (size_t i = 0; i < busy_.size();) {
@@ -208,7 +272,10 @@ int64_t MenuGrab::deadline() const
 {
     if (release_at_ >= 0)
         return release_at_ + kReleaseMs;
-    return retry_at_ < 0 ? rescan_at_ : std::min(retry_at_, rescan_at_);
+    int64_t d = retry_at_ < 0 ? rescan_at_ : std::min(retry_at_, rescan_at_);
+    for (const Busy& b : waiting_)
+        d = std::min(d, b.since + kReleaseMs);
+    return d;
 }
 
 void MenuGrab::fds(std::vector<int>& out) const
@@ -216,12 +283,14 @@ void MenuGrab::fds(std::vector<int>& out) const
     for (const Node& n : nodes_)
         if (n.fd >= 0)
             out.push_back(n.fd);
+    for (const Busy& b : waiting_)
+        out.push_back(b.fd);
 }
 
-void MenuGrab::drain(Node& n, std::vector<PadEdge>* out)
+void MenuGrab::drain(Node& n, std::vector<PadEdge>* out, std::vector<bool>* mode)
 {
     if (n.pad) {
-        std::vector<PadEdge> e = n.pad->poll_edges();
+        std::vector<PadEdge> e = n.pad->poll_edges(mode);
         if (out)
             out->insert(out->end(), e.begin(), e.end());
         if (!n.pad->is_open())
@@ -243,11 +312,19 @@ void MenuGrab::drain(Node& n, std::vector<PadEdge>* out)
     }
 }
 
-bool MenuGrab::read(std::vector<PadEdge>& out)
+bool MenuGrab::read(std::vector<PadEdge>& out, std::vector<bool>* mode)
 {
     bool dropped = false;
+    for (size_t i = 0; i < waiting_.size();) {
+        if (discard(waiting_[i].fd)) {
+            i++;
+            continue;
+        }
+        ::close(waiting_[i].fd);
+        waiting_.erase(waiting_.begin() + (long)i);
+    }
     for (Node& n : nodes_) {
-        drain(n, &out);
+        drain(n, &out, mode);
         dropped = dropped || (n.fd < 0 && n.kind == DevKind::Pad);
     }
     nodes_.erase(std::remove_if(nodes_.begin(), nodes_.end(), [](const Node& n) { return n.fd < 0; }), nodes_.end());
@@ -262,6 +339,9 @@ void MenuGrab::begin_release(int64_t now)
     for (Busy& b : busy_)
         ::close(b.fd);
     busy_.clear();
+    for (Busy& b : waiting_)
+        ::close(b.fd);
+    waiting_.clear();
 }
 
 bool MenuGrab::releasing(int64_t now)
@@ -288,11 +368,19 @@ bool LineFifo::open(const std::string& path)
     return fd_ >= 0;
 }
 
+void LineFifo::adopt(int fd)
+{
+    fd_ = fd;
+    if (fd_ >= 0)
+        fcntl(fd_, F_SETFL, fcntl(fd_, F_GETFL) | O_NONBLOCK);
+}
+
 void LineFifo::read(std::vector<std::string>& out)
 {
     if (fd_ < 0)
         return;
     char buf[256];
+    bool end = false;
     for (;;) {
         ssize_t r = ::read(fd_, buf, sizeof buf);
         if (r > 0) {
@@ -301,16 +389,34 @@ void LineFifo::read(std::vector<std::string>& out)
         }
         if (r < 0 && errno == EINTR)
             continue;
+        end = r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK);
         break;
     }
+    if (end)
+        buf_ += '\n';
     size_t at;
     while ((at = buf_.find('\n')) != std::string::npos) {
         std::string ln = buf_.substr(0, at);
         buf_.erase(0, at + 1);
+        if (skip_) {
+            skip_ = false;
+            continue;
+        }
+        if (ln.size() > kLineMax)
+            continue;
         if (!ln.empty() && ln.back() == '\r')
             ln.pop_back();
         if (!ln.empty())
             out.push_back(ln);
+    }
+    if (buf_.size() > kLineMax) {
+        buf_.clear();
+        skip_ = true;
+    }
+    if (end) {
+        ::close(fd_);
+        fd_ = -1;
+        ended_ = true;
     }
 }
 

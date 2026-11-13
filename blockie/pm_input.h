@@ -30,6 +30,8 @@ struct EvdevOps {
 };
 
 EvdevOps real_evdev();
+bool input_held(const std::function<bool(unsigned long* bits, size_t bytes)>& keys,
+                const std::function<bool(int code, int& value)>& abs);
 
 class MenuGrab {
 public:
@@ -38,7 +40,7 @@ public:
     static constexpr int kRescanMs = 2000;
     static constexpr int kReleaseMs = 1000;
 
-    explicit MenuGrab(EvdevOps ops) : ops_(std::move(ops)) {}
+    explicit MenuGrab(EvdevOps ops, bool wait_up = false) : ops_(std::move(ops)), wait_up_(wait_up) {}
     ~MenuGrab();
     MenuGrab(const MenuGrab&) = delete;
     MenuGrab& operator=(const MenuGrab&) = delete;
@@ -47,11 +49,12 @@ public:
     bool tick(int64_t now);
     int64_t deadline() const;
     void fds(std::vector<int>& out) const;
-    bool read(std::vector<PadEdge>& out);
+    bool read(std::vector<PadEdge>& out, std::vector<bool>* mode = nullptr);
     void begin_release(int64_t now);
     bool releasing(int64_t now);
     int held() const { return (int)nodes_.size(); }
     int busy() const { return (int)busy_.size(); }
+    int waiting() const { return (int)waiting_.size(); }
 
 private:
     struct Node {
@@ -65,19 +68,22 @@ private:
         DevKind kind = DevKind::None;
         int fd = -1;
         int64_t since = 0;
+        bool first = false;
     };
 
     void scan(int64_t now, bool first);
     bool known(const std::string& path, const std::string& real) const;
     void take(const std::string& path, int fd, DevKind kind);
-    void drain(Node& n, std::vector<PadEdge>* out);
+    void try_grab(const Busy& b, int64_t now);
+    void drain(Node& n, std::vector<PadEdge>* out, std::vector<bool>* mode = nullptr);
     static void drop(Node& n);
 
     EvdevOps ops_;
     std::vector<Node> nodes_;
-    std::vector<Busy> busy_;
+    std::vector<Busy> busy_, waiting_;
     std::vector<std::pair<std::string, std::string>> ignored_;
     int64_t retry_at_ = -1, rescan_at_ = -1, release_at_ = -1;
+    bool wait_up_ = false;
 };
 
 class LineFifo {
@@ -88,11 +94,14 @@ public:
     LineFifo& operator=(const LineFifo&) = delete;
 
     bool open(const std::string& path);
+    void adopt(int fd);
     int fd() const { return fd_; }
+    bool ended() const { return ended_; }
     void read(std::vector<std::string>& out);
 
 private:
     int fd_ = -1;
+    bool ended_ = false, skip_ = false;
     std::string buf_;
 };
 
