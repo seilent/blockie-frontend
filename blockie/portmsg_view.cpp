@@ -5,6 +5,7 @@
 #include "../gfx/wrap.h"
 #include "../ui/busydots.h"
 #include "../ui/roles.h"
+#include "ring_spin.h"
 
 namespace fd {
 
@@ -19,10 +20,6 @@ constexpr fx kRingTitleClip = fx_int(432);
 constexpr int kChooseRows = 6;
 constexpr int64_t kFallEndMs = 583;
 constexpr int64_t kFallSpanMs = 333;
-constexpr fx kDotsX0 = fx_int(20);
-constexpr fx kDotsX1 = fx_int(460);
-constexpr fx kDotsY = fx_int(98);
-constexpr fx kDotSide = fx_int(2);
 
 constexpr int kRows = 6;
 constexpr fx kBaselineEm = (fx)(0.9897 * kOne);
@@ -389,13 +386,10 @@ void MsgView::draw_layer(Layer& l, Canvas& k, Fonts& f, GlyphCache& g, const The
         if (rg) {
             int d = px(tok::rowRing), stroke = px(tok::ringStrokeIdle);
             int cx = dx + px(kRingRight) - d / 2, cy = px(kRingCy);
-            int start = tok::ringArcStart >> kFxBits, sweep = 0;
             int64_t done = cur ? ring_done_ : l.c.done, total = cur ? ring_total_ : l.c.total;
-            if (total > 0)
-                sweep = (int)std::min<double>(360.0 * (double)std::max<int64_t>(done, 0) / (double)total,
-                                              360 * 99 / 100);
-            if (sweep > 0)
-                draw_centered(k, g.arc(d, stroke, start, sweep), cx, cy, kWhite, alpha256(glow));
+            RingArc ra = ring_arc(done, total, tok::ringArcStart >> kFxBits);
+            if (ra.sweep > 0)
+                draw_centered(k, g.arc(d, stroke, ra.start, ra.sweep), cx, cy, kWhite, alpha256(glow));
         } else if (l.c.mode == MsgMode::Progress) {
             int y = px(kDotsY);
             busy_dots(k, Rect{dx + px(kDotsX0), y, dx + px(kDotsX1), y + px(kDotSide)}, kWhite, now - spin0_);

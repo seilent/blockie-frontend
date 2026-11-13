@@ -27,6 +27,11 @@ Art HomeState::cover(const HomeGame& g)
     auto it = cache.find(g.id);
     if (it != cache.end())
         return it->second;
+    for (size_t k = 0; k < recent.size() && k < recent_hold.size(); k++)
+        if (recent[k].id == g.id && recent_hold[k] && recent_hold[k]->w > 0) {
+            cache[g.id] = recent_hold[k];
+            return recent_hold[k];
+        }
     Art img = load ? load(g) : nullptr;
     if (img && img->w > 0)
         cache[g.id] = img;

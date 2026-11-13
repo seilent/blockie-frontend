@@ -24,6 +24,10 @@ struct LeftPlan {
     std::vector<Rect> bands;
     GrowClock grow = GrowClock::None;
     int grow_q = 0;
+    bool from_set = false;
+    GridSpec from_grid = grid_spec(TileMode::Standard);
+    int from_y = 0;
+    Rect from_focus;
 };
 
 struct SwapLeg {

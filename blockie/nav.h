@@ -7,7 +7,7 @@
 
 namespace fd {
 
-enum class Screen { Home, Settings, Bluetooth };
+enum class Screen { Home, Settings, Bluetooth, Port };
 enum class MenuKind { System, Settings };
 
 class NavHost {
@@ -26,6 +26,11 @@ public:
     virtual bool page_action(Screen s, PadAction a, bool repeat) = 0;
     virtual void pane_moved(Pane) {}
     virtual void recent_moved() {}
+    virtual void menu_moved() {}
+    virtual bool menu_context(int) { return false; }
+    virtual bool menu_empty(int) { return false; }
+    virtual bool game_context(int) { return false; }
+    virtual bool close_store() { return false; }
 };
 
 struct Nav {
@@ -40,6 +45,7 @@ struct Nav {
     int menu_top = 0;
     int tile_focus = 0;
     bool system_view = false;
+    bool store = false;
     int sys_focus = 0;
     int sys_scroll = 0;
     int sys_total = 0;

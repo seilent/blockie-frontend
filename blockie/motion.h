@@ -7,7 +7,7 @@
 
 namespace fd {
 
-enum class FoldKind { Expand, Collapse, Push, Pop, Startup, Launch, Return };
+enum class FoldKind { Expand, Collapse, Push, Pop, Startup, Launch, Return, Swap };
 
 struct FoldPlay {
     int64_t duration = 0;

@@ -50,6 +50,12 @@ public:
     std::function<void()> system_left;
     std::function<void(int64_t now)> rearm;
     std::function<void(const Surface&)> last_frame;
+    std::function<bool(int sys)> store_entry;
+    std::function<bool(int sys)> store_empty;
+    std::function<bool(int i)> port_context;
+    std::function<void(const HomeGame&)> open_port;
+    std::function<void()> store_moved;
+    std::function<void()> store_closed;
 
     void setup();
     void startup(int64_t now);
@@ -63,6 +69,11 @@ public:
     std::vector<HomeGame> recent_changed(const std::vector<HomeGame>& list);
     void redraw();
     void theme_changed();
+    void enter_store(const SelectorModel& m);
+    void swap_tiles(int64_t now, const std::function<void()>& change);
+    void reset_menu(std::vector<SelectorItem> systems, int focus);
+    void launch_page(const HomeGame& g) { launch(g); }
+    SelectorModel& home_model() { return store_ ? store_->model : model; }
     void want_mode(TileMode m) { mode_wanted_ = m; }
     TileMode wanted_mode() const { return mode_wanted_; }
     bool animating(int64_t now) const { return ctl.animating(now); }
@@ -97,9 +108,21 @@ public:
     bool page_action(Screen s, PadAction a, bool repeat) override;
     void pane_moved(Pane p) override;
     void recent_moved() override;
+    void menu_moved() override;
+    bool menu_context(int i) override;
+    bool menu_empty(int i) override;
+    bool game_context(int i) override;
+    bool close_store() override;
 
 private:
-    enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop, Leave };
+    enum class Want { None, Enter, Exit, RecentIn, RecentOut, Push, Pop, Leave, StoreIn, StoreOut, Swap };
+
+    struct HomeKept {
+        SelectorModel model;
+        Nav nav;
+        HomeState home;
+        std::vector<MenuKind> kinds;
+    };
 
     Pane fold_focus(const Nav& n) const { return ctl.details() ? Pane::Details : n.pane; }
     SelectorModel posed(const SelectorModel& base, const Nav& n, bool at_target, Pane focus) const;
@@ -111,6 +134,7 @@ private:
     FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open);
     FoldPlay page_play(Screen base);
     FoldPlay launch_play();
+    FoldPlay swap_play();
     void start_wanted();
     void launch(const HomeGame& g);
     void sync(bool instant);
@@ -137,6 +161,8 @@ private:
     int drawn_first_ = 0;
     int drawn_focus_ = -1;
     std::shared_ptr<SlidePlan> plan_;
+    std::unique_ptr<HomeKept> store_;
+    int store_slot_ = 0;
 };
 
 }

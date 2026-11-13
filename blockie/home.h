@@ -15,6 +15,7 @@ struct HomeGame {
     int64_t id = 0;
     std::string name;
     std::string system;
+    std::string next;
 };
 
 std::vector<HomeGame> played_first(const std::vector<HomeGame>& recent, const HomeGame& g, int cap);

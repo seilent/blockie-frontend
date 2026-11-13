@@ -111,6 +111,42 @@ int recent_move(int total, SlotMap map, int start, PadAction a, bool rep = true)
     return nav_apply(n, h, a, rep) && n.pane == Pane::Details && h.pane_moves == 1 ? n.tile_focus : -1;
 }
 
+class StoreHost : public FakeHost {
+public:
+    int ports = 10;
+    bool refuse = false;
+    int opened = -1, empty_asks = 0, closes = 0, ctx_game = -1, menu_moves = 0;
+
+    bool menu_context(int i) override
+    {
+        if (i != ports)
+            return false;
+        opened = i;
+        return true;
+    }
+    bool menu_empty(int i) override
+    {
+        empty_asks++;
+        if (refuse || i != ports)
+            return false;
+        opened = i;
+        return true;
+    }
+    bool game_context(int i) override
+    {
+        if (refuse)
+            return false;
+        ctx_game = i;
+        return true;
+    }
+    bool close_store() override
+    {
+        closes++;
+        return true;
+    }
+    void menu_moved() override { menu_moves++; }
+};
+
 struct Move {
     int total;
     int from;
@@ -527,6 +563,65 @@ int main()
               "accept on the ports entry opens its grid");
         check(!nav_apply(n, h, PadAction::Context, false) && n.system_view && h.launched_game == -1 && h.exits == 0,
               "the left face button in the ports grid does nothing");
+    }
+
+    {
+        StoreHost h;
+        h.n_systems = 11;
+        Nav n;
+        n.focus = 3;
+        check(!nav_apply(n, h, PadAction::Context, false) && h.opened == -1 && !n.system_view,
+              "f2: the left face button on another entry does nothing");
+        n.focus = 10;
+        check(!nav_apply(n, h, PadAction::Context, true) && h.opened == -1,
+              "f2: a held left face button on the ports entry does nothing");
+        check(nav_apply(n, h, PadAction::Context, false) && h.opened == 10 && !n.system_view && h.entered == -1,
+              "f2: the left face button on the ports entry opens the store");
+        h.opened = -1;
+        h.games = 0;
+        h.refuse = true;
+        check(!nav_apply(n, h, PadAction::Accept, false) && h.opened == -1 && h.empty_asks == 1 && !n.system_view,
+              "f2: accept on an empty entry the host refuses does nothing");
+        h.refuse = false;
+        check(nav_apply(n, h, PadAction::Accept, false) && h.opened == 10,
+              "f2: accept on a ports entry with 0 ports opens the store");
+        h.games = 9;
+        h.opened = -1;
+        check(nav_apply(n, h, PadAction::Accept, false) && n.system_view,
+              "f2: accept on the ports entry with ports opens its grid");
+        h.refuse = true;
+        check(!nav_apply(n, h, PadAction::Context, false) && h.ctx_game == -1,
+              "f2: the left face button in a grid the host refuses does nothing");
+        h.refuse = false;
+        n.sys_focus = 2;
+        check(nav_apply(n, h, PadAction::Context, false) && h.ctx_game == 2,
+              "f2: the left face button in the ports grid opens the focused port");
+    }
+
+    {
+        StoreHost h;
+        h.n_systems = 5;
+        h.ports = 1;
+        Nav n;
+        n.store = true;
+        n.focus = 0;
+        check(nav_apply(n, h, PadAction::Down, false) && h.menu_moves == 1 && n.focus == 1,
+              "f2 store: down on the genre list moves and reports it");
+        check(!nav_apply(n, h, PadAction::Context, false) && h.opened == -1,
+              "f2 store: the left face button on a genre does nothing");
+        check(nav_apply(n, h, PadAction::Left, false) && h.entered == 1 && n.system_view && n.pane == Pane::Details,
+              "f2 store: left opens the genre's grid");
+        check(!nav_apply(n, h, PadAction::Context, false) && h.ctx_game == -1,
+              "f2 store: the left face button in a genre grid does nothing");
+        check(nav_apply(n, h, PadAction::Back, false) && !n.system_view && h.exits == 1 && h.closes == 0,
+              "f2 store: back in a genre grid returns to the genre list");
+        check(!nav_apply(n, h, PadAction::Back, true) && h.closes == 0, "f2 store: a held back keeps the store");
+        check(nav_apply(n, h, PadAction::Back, false) && h.closes == 1 && h.pane_moves == 0,
+              "f2 store: back on the genre list closes the store, never opens recent");
+        h.games = 0;
+        n.focus = 2;
+        check(!nav_apply(n, h, PadAction::Accept, false) && h.empty_asks == 0 && !n.system_view,
+              "f2 store: accept on a genre with 0 ports does nothing");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

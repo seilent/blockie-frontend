@@ -108,7 +108,7 @@ bool decode_png(spng_ctx* ctx, bool source, DecodedImage& out)
 bool load_png(const std::string& path, DecodedImage& out)
 {
     out = DecodedImage{};
-    FILE* f = std::fopen(path.c_str(), "rb");
+    FILE* f = std::fopen(path.c_str(), "rbe");
     if (!f)
         return false;
     spng_ctx* ctx = png_ctx();

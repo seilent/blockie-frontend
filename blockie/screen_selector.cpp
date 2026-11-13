@@ -88,6 +88,7 @@ constexpr int kTurnEnd = std_px(tok::edge);
 constexpr int kTurnWrap = kTurnStart - kTurnEnd;
 constexpr int kTurnTitleStep = 64;
 constexpr int kTurnTitleLines = 3;
+constexpr int kTurnNextStep = 48;
 constexpr size_t kTurnWrapKeep = 4;
 
 VText& turned_cache()
@@ -150,6 +151,13 @@ void draw_turned_detail(Canvas& c, Fonts& fonts, const SelectorModel& model, int
         turned_line(c, fonts, model, ts, model.game_title, (int)li, lines[li], base - asc,
                     model.turn_shift + model.title_shift, th.ink, ta);
     }
+    if (model.game_next.empty())
+        return;
+    TextStyle ns = role::npNext.style();
+    int last = sys_base + kTurnTitleStep + (int)std::max<size_t>(lines.size(), 1) * pitch - pitch;
+    int na = (alpha256(role::npNext.alpha) * model.title_a256 >> 8) * model.turn_a256 >> 8;
+    turned_line(c, fonts, model, ns, model.game_next, 0, model.game_next, last + kTurnNextStep - fonts.ascent(ns.px),
+                model.turn_shift + model.title_shift, th.ink, na);
 }
 
 void draw_expanded(Canvas& c, Fonts& fonts, const SelectorModel& model, const Theme& th)
@@ -216,6 +224,22 @@ void warm_turned(Fonts& fonts, const SelectorModel& model)
 
 size_t turned_rasters() { return turned_cache().rasters(); }
 
+void draw_section_header(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, const Theme& th)
+{
+    fx pane = focus_pane == Pane::Selector ? tok::motion_quickplayAlpha : tok::alpha_full;
+    fx head_pane = model.header_dim ? tok::motion_quickplayAlpha : pane;
+    const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
+    fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, th.ink,
+               alpha256(fx_mul(role::quickplayHeader.alpha, head_pane)) * model.grid_a256 >> 8);
+}
+
+Rect header_ink_rect(Fonts& fonts, const SelectorModel& model)
+{
+    Rect r = header_rect(fonts, model);
+    r.y1 = kSectionBaseline + fonts.descent(role::quickplayHeader.style().px) + 1;
+    return r;
+}
+
 Rect header_rect(Fonts& fonts, const SelectorModel& model)
 {
     const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
@@ -242,11 +266,8 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         draw_scatter_dots(c, th.ink);
 
     fx pane = on ? tok::motion_quickplayAlpha : tok::alpha_full;
-    fx head_pane = model.header_dim ? tok::motion_quickplayAlpha : pane;
     int tile_alpha = alpha256(pane) * model.grid_a256 >> 8;
-    const char* header = model.section_label.empty() ? kSectionLabel : model.section_label.c_str();
-    fonts.draw(c, role::quickplayHeader.style(), header, x64(kGridX), kSectionBaseline, th.ink,
-               alpha256(fx_mul(role::quickplayHeader.alpha, head_pane)) * model.grid_a256 >> 8);
+    draw_section_header(c, fonts, model, focus_pane, th);
     for (int k = 0; k < kGridTiles && k < (int)model.tiles.size(); k++) {
         const Image* art = model.tiles[k].get();
         if (!art || art->w <= 0 || art->h <= 0)

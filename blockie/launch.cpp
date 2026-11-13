@@ -196,6 +196,7 @@ Launcher::Child Launcher::spawn(const LaunchSpec& spec)
     pid_t pid = fork();
     if (pid == 0) {
         reset_child_signals();
+        close_range(3, ~0U, 0);
         execv(wrapper_.c_str(), argv.data());
         _exit(127);
     }
@@ -259,6 +260,7 @@ LaunchExit Launcher::run(const LaunchSpec& spec, const std::function<void()>& on
     pid_t pid = fork();
     if (pid == 0) {
         reset_child_signals();
+        close_range(3, ~0U, 0);
         execv(wrapper_.c_str(), argv.data());
         _exit(127);
     } else if (pid > 0) {

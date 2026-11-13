@@ -19,6 +19,7 @@ namespace fd {
 
 void draw_page_ground(Canvas& c, const Theme& th);
 void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th);
+void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Theme& th);
 
 struct SheetView {
     const char* title = "";
@@ -34,6 +35,7 @@ struct SheetView {
     bool open = false;
     int level = 0;
     bool opaque = false;
+    bool mixed = false;
 };
 
 struct SheetGeom {
@@ -136,6 +138,7 @@ void settings_rows_switch(const Surface& from, const Surface& to, const Surface&
 std::vector<std::string> row_sheet_wrap(Fonts& f, const TextStyle& st, const std::string& s, int first64, int next64);
 void draw_row_sheet(Canvas& c, Fonts& f, const RowSheetView& s, const Theme& th);
 void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th);
+void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th);
 
 class SettingsPage {
 public:

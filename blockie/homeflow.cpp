@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_set>
+#include <utility>
 
 #include "../core/curves.h"
 #include "../ui/roles.h"
@@ -273,9 +274,16 @@ SelectorModel HomeFlow::posed(const SelectorModel& base, const Nav& n, bool at_t
         const T9Text& shown = t9_.shown(t);
         m.game_title = shown.title;
         m.game_system = shown.system;
+        m.game_next = shown.next;
         T9Pose tp = t9_.pose(t);
         m.title_shift = tp.shift;
         m.title_a256 = tp.a256;
+    }
+    if (n.pane == Pane::Details && at_target && n.store && n.system_view) {
+        T9Text tt = shown_text(home.sysgames, n.sys_focus);
+        m.game_title = tt.title;
+        m.game_system = tt.system;
+        m.game_next = tt.next;
     }
     if (ctl.folding(t) && ctl.kind() == FoldKind::Startup) {
         m.poses.resize(m.systems.size());
@@ -321,7 +329,7 @@ T9Text HomeFlow::shown_text(const std::vector<HomeGame>& list, int k) const
     if (k < 0 || k >= (int)list.size())
         return {};
     const HomeGame& g = list[k];
-    return {g.id, g.name, home.system_view ? home.sys_name : g.system};
+    return {g.id, g.name, home.system_view && !nav.store ? home.sys_name : g.system, g.next};
 }
 
 void HomeFlow::show_recent(int k)
@@ -384,7 +392,7 @@ Screen page_under(const Nav& n, bool push)
 FoldPlay HomeFlow::page_play(Screen base)
 {
     plan_.reset();
-    page_seed_ = base != Screen::Home && page_seed_y ? page_seed_y(base) : -1;
+    page_seed_ = (base != Screen::Home || nav.system_view) && page_seed_y ? page_seed_y(base) : -1;
     FoldPlan plan = page_seed_ >= 0 ? fold_page_row(page_seed_) : fold_page(nav.focus - nav.menu_top);
     FoldPlay p;
     p.duration = fold_duration(plan);
@@ -407,6 +415,89 @@ FoldPlay HomeFlow::launch_play()
         return dst.rect();
     };
     return p;
+}
+
+FoldPlay HomeFlow::swap_play()
+{
+    plan_.reset();
+    bool wide = nav.system_view;
+    int x_end = wide ? kPaneSplitWide : kPaneLeftEdge;
+    auto plan = std::make_shared<LeftPlan>();
+    plan->grid = wide ? spec() : grid_spec(TileMode::Standard);
+    plan->band = Rect{0, kBandTop, x_end, kBandBottom};
+    if (wide) {
+        SelectorModel w = posed(model, nav, true, Pane::Details);
+        plan->grid_y = w.grid_y_px;
+        plan->focus_to = tile_slot_rect(w, w.tile_focus, true);
+        SelectorModel k = posed(kept_, kept_nav_, true, Pane::Details);
+        plan->from_set = true;
+        plan->from_grid = spec();
+        plan->from_y = k.grid_y_px;
+        plan->from_focus = tile_slot_rect(k, k.tile_focus, true);
+    }
+    auto hm = std::make_shared<SelectorModel>(posed(model, nav, true, nav.pane));
+    Rect ink = wide ? Rect{} : header_ink_rect(fonts_, *hm);
+    ink.y0 = std::max(ink.y0, kBandTop);
+    auto word = std::make_shared<Buffer>();
+    Fonts* f = &fonts_;
+    Pane focus = nav.pane;
+    FoldPlay p;
+    p.duration = swap_ms();
+    p.prepare = [plan, hm, ink, word, f, focus](const Surface& a, const Surface& b) {
+        swap_prepare(*plan, a, b);
+        if (!ink.empty()) {
+            Canvas wc(word->surface());
+            wc.fill(ink, theme().bg);
+            wc.set_clip(ink);
+            draw_section_header(wc, *f, *hm, focus, theme());
+        }
+        return swap_ms();
+    };
+    p.forward = [plan, x_end, ink, word](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
+        uint32_t ground = LiveF::pack(theme().bg);
+        swap_compose(a, b, dst, *plan, t, x_end, ground);
+        for (int y = 0; y < dst.h; y++) {
+            int x0 = y < kBandTop ? 0 : x_end;
+            copy_px(dst.row(y) + x0, b.row(y) + x0, dst.w - x0);
+        }
+        Surface ws = word->surface();
+        for (int y = ink.y0; y < ink.y1 && y < dst.h; y++)
+            for (int x = ink.x0; x < ink.x1 && x < x_end; x++)
+                if (ws.at(x, y) != ground && dst.at(x, y) == ground)
+                    dst.at(x, y) = ws.at(x, y);
+        return dst.rect();
+    };
+    return p;
+}
+
+void HomeFlow::swap_tiles(int64_t now, const std::function<void()>& change)
+{
+    now_ = now;
+    want_ = Want::None;
+    ctl.input(now, [&]() {
+        change();
+        kept_.section_label = model.section_label;
+        redraw_ = true;
+        want_ = Want::Swap;
+        start_wanted();
+        InputResult r;
+        r.changed = true;
+        return r;
+    });
+    sync(ctl.started());
+}
+
+void HomeFlow::reset_menu(std::vector<SelectorItem> systems, int focus)
+{
+    int was_focus = nav.focus, was_top = nav.menu_top;
+    size_t was_rows = model.systems.size();
+    model.systems = std::move(systems);
+    kinds.assign(model.systems.size(), MenuKind::System);
+    nav.focus = std::clamp(focus, 0, std::max(0, (int)model.systems.size() - 1));
+    nav.menu_top = std::clamp(nav.menu_top, std::max(0, nav.focus - (kMenuVisibleRows - 1)), nav.focus);
+    if (nav.focus != was_focus || nav.menu_top != was_top || model.systems.size() != was_rows)
+        sync(true);
+    redraw();
 }
 
 void HomeFlow::start_wanted()
@@ -436,6 +527,23 @@ void HomeFlow::start_wanted()
     case Want::Leave:
         ctl.start(FoldKind::Launch, launch_play(), now_);
         break;
+    case Want::Swap:
+        ctl.start(FoldKind::Swap, swap_play(), now_);
+        break;
+    case Want::StoreIn:
+    case Want::StoreOut: {
+        plan_.reset();
+        page_seed_ = -1;
+        auto shared = std::make_shared<const FoldPlan>(fold_page(store_slot_));
+        FoldPlay p;
+        p.duration = fold_duration(*shared);
+        p.forward = [shared](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
+            fold_compose(a, b, dst, *shared, t);
+            return dst.rect();
+        };
+        ctl.start(w == Want::StoreIn ? FoldKind::Push : FoldKind::Pop, p, now_);
+        break;
+    }
     case Want::None:
         break;
     }
@@ -496,7 +604,10 @@ int HomeFlow::enter_system(int sys)
 
 void HomeFlow::exit_system()
 {
+    std::string genre = home.sys_name;
     home.leave(model);
+    if (nav.store)
+        model.section_label = genre;
     t9_.set(T9Text{});
     if (system_left)
         system_left();
@@ -522,8 +633,75 @@ void HomeFlow::launch_recent(int i)
 
 void HomeFlow::launch_system_game(int i)
 {
-    if (i >= 0 && i < (int)home.sysgames.size())
+    if (i < 0 || i >= (int)home.sysgames.size())
+        return;
+    if (!nav.store) {
         launch(home.sysgames[i]);
+        return;
+    }
+    if (open_port)
+        open_port(home.sysgames[i]);
+}
+
+void HomeFlow::enter_store(const SelectorModel& m)
+{
+    store_ = std::make_unique<HomeKept>(HomeKept{model, nav, home, kinds});
+    store_slot_ = nav.focus - nav.menu_top;
+    HomeState fresh;
+    fresh.cols = home.cols;
+    fresh.rows = home.rows;
+    fresh.pad_rows = home.pad_rows;
+    fresh.recent_cap = home.recent_cap;
+    fresh.load = home.load;
+    home = std::move(fresh);
+    model = m;
+    kinds.assign(model.systems.size(), MenuKind::System);
+    Nav sn;
+    sn.cols = nav.cols;
+    sn.recent_map = nav.recent_map;
+    sn.partial_rows = nav.partial_rows;
+    sn.store = true;
+    nav = sn;
+    t9_.set(T9Text{});
+    if (rearm)
+        rearm(now_);
+    want_ = Want::StoreIn;
+}
+
+bool HomeFlow::menu_context(int i) { return store_entry && store_entry(i); }
+
+bool HomeFlow::menu_empty(int i) { return store_empty && store_empty(i); }
+
+bool HomeFlow::game_context(int i)
+{
+    return !nav.store && i >= 0 && i < (int)home.sysgames.size() && port_context && port_context(i);
+}
+
+void HomeFlow::menu_moved()
+{
+    if (nav.store && store_moved)
+        store_moved();
+}
+
+bool HomeFlow::close_store()
+{
+    if (!store_)
+        return false;
+    model = std::move(store_->model);
+    nav = std::move(store_->nav);
+    home = std::move(store_->home);
+    kinds = std::move(store_->kinds);
+    store_.reset();
+    store_slot_ = nav.focus - nav.menu_top;
+    t9_.set(T9Text{});
+    if (system_left)
+        system_left();
+    if (rearm)
+        rearm(now_);
+    want_ = Want::StoreOut;
+    if (store_closed)
+        store_closed();
+    return true;
 }
 
 void HomeFlow::push(Screen s)

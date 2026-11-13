@@ -32,15 +32,24 @@ bool apply_menu(Nav& n, NavHost& h, PadAction a, bool repeat)
             return false;
         n.focus--;
         keep_visible(n);
+        h.menu_moved();
         return true;
     case PadAction::Down:
         if (n.focus >= count - 1)
             return false;
         n.focus++;
         keep_visible(n);
+        h.menu_moved();
         return true;
-    case PadAction::Left:
+    case PadAction::Context:
+        return !repeat && !n.store && n.focus >= 0 && n.focus < count && h.menu_context(n.focus);
     case PadAction::Back:
+        if (n.store)
+            return !repeat && h.close_store();
+        [[fallthrough]];
+    case PadAction::Left:
+        if (n.store)
+            return apply_menu(n, h, PadAction::Accept, repeat);
         if (repeat || h.recent_count() <= 0)
             return false;
         n.pane = Pane::Details;
@@ -55,7 +64,7 @@ bool apply_menu(Nav& n, NavHost& h, PadAction a, bool repeat)
         if (h.menu_kind(n.focus) == MenuKind::System) {
             int games = h.enter_system(n.focus);
             if (games <= 0)
-                return false;
+                return !n.store && h.menu_empty(n.focus);
             n.system_view = true;
             n.sys_focus = 0;
             n.sys_scroll = 0;
@@ -116,6 +125,8 @@ bool apply_system(Nav& n, NavHost& h, PadAction a, bool repeat)
             return false;
         h.launch_system_game(n.sys_focus);
         return false;
+    case PadAction::Context:
+        return !repeat && !n.store && n.sys_focus >= 0 && n.sys_focus < total && h.game_context(n.sys_focus);
     default:
         return false;
     }

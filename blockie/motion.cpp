@@ -9,7 +9,8 @@ namespace {
 
 bool opens(FoldKind k)
 {
-    return k == FoldKind::Expand || k == FoldKind::Push || k == FoldKind::Launch || k == FoldKind::Return;
+    return k == FoldKind::Expand || k == FoldKind::Push || k == FoldKind::Launch || k == FoldKind::Return ||
+           k == FoldKind::Swap;
 }
 
 bool inverse(FoldKind a, FoldKind b)
@@ -30,6 +31,7 @@ const char* fold_kind_name(FoldKind k)
     case FoldKind::Startup: return "startup";
     case FoldKind::Launch: return "launch";
     case FoldKind::Return: return "return";
+    case FoldKind::Swap: return "swap";
     }
     return "?";
 }

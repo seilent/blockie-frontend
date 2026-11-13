@@ -261,6 +261,52 @@ int main()
         check(h.enter(m, "Synth", {}).empty() && !h.system_view, "entering an empty system changes nothing");
     }
 
+    {
+        HomeState rh;
+        rh.cols = 3;
+        rh.rows = 4;
+        rh.pad_rows = 2;
+        rh.load = [](const HomeGame& g) -> Art { return solid((uint32_t)g.id); };
+        SelectorModel rm;
+        rh.deal_recent(rm, synth(100, 8, "Synth"));
+        rh.enter(rm, "Synth", synth(100, 40, "Synth"));
+        rh.window(rm, 0, 0, true);
+        rh.load = [](const HomeGame&) -> Art { return nullptr; };
+        rh.window(rm, 5, 15, true);
+        std::unordered_set<int64_t> keep5 = rh.keep_set(5);
+        bool held = true;
+        for (const auto& e : rh.cache)
+            held = held && keep5.count(e.first);
+        std::vector<HomeGame> want = rh.window(rm, 0, 0, true);
+        bool back = rm.tiles.size() >= 8;
+        for (int k = 0; back && k < 8; k++)
+            back = px(rm.tiles[(size_t)k]) == (uint32_t)(100 + k);
+        for (const HomeGame& g : want)
+            back = back && (g.id < 100 || g.id >= 108);
+        check(held, "after a scroll the cover cache holds no id outside the keep set");
+        check(back, "scrolling back draws the recent tiles and asks for none of them");
+    }
+
+    {
+        HomeState ph;
+        ph.cols = 3;
+        ph.rows = 4;
+        ph.pad_rows = 2;
+        ph.load = [](const HomeGame&) -> Art { return nullptr; };
+        SelectorModel pm;
+        std::vector<HomeGame> preview = synth(100, 8, "Synth");
+        std::vector<HomeGame> asked = ph.deal_recent(pm, preview);
+        for (const HomeGame& g : preview)
+            ph.drop(pm, g.id, kTileSide, ph.epoch, solid((uint32_t)g.id));
+        bool drawn = asked.size() == 8 && ph.cache.empty() && pm.tiles.size() == 8 && px(pm.tiles[7]) == 107;
+        std::vector<HomeGame> first = ph.enter(pm, "Synth", preview);
+        bool lit = pm.tiles.size() == 8;
+        for (int k = 0; lit && k < 8; k++)
+            lit = px(pm.tiles[(size_t)k]) == (uint32_t)(100 + k);
+        check(drawn && lit && first.empty(),
+              "entering after a drawn preview fills the first window from the held tiles and asks for none");
+    }
+
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

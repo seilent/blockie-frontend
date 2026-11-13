@@ -29,6 +29,7 @@ pid_t Children::spawn(const std::vector<std::string>& argv, Done done, int* out)
         sigprocmask(SIG_SETMASK, &empty, nullptr);
         if (out && dup2(p[1], STDOUT_FILENO) < 0)
             _exit(127);
+        close_range(3, ~0U, 0);
         execv(args[0], args.data());
         _exit(127);
     }

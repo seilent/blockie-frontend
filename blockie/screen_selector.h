@@ -43,6 +43,7 @@ struct SelectorModel {
     int tile_focus = -1;
     std::string game_system;
     std::string game_title;
+    std::string game_next;
     bool big = false;
     bool t9_edge = false;
     SlotMap slots = SlotMap::RowMajor;
@@ -66,6 +67,8 @@ void draw_turned(Canvas& c, Fonts& fonts, const SelectorModel& model, const Them
 void warm_turned(Fonts& fonts, const SelectorModel& model);
 size_t turned_rasters();
 Rect header_rect(Fonts& fonts, const SelectorModel& model);
+Rect header_ink_rect(Fonts& fonts, const SelectorModel& model);
+void draw_section_header(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane focus_pane, const Theme& th);
 
 inline Rect tile_slot_rect(const SelectorModel& model, int k, bool expanded)
 {

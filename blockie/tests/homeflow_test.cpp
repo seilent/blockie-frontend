@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../homeflow.h"
+#include "../theme.h"
 
 using namespace fd;
 
@@ -443,6 +444,185 @@ int main(int argc, char** argv)
                   rf.nav.pane == Pane::Details,
               "a ports rescan keeps the Recent focus on the same game");
     }
+
+    {
+        HomeFlow sa(fonts, o);
+        sa.model.systems = {{"ports", 0, ""}, {"GB", 3, ""}};
+        sa.kinds = {MenuKind::System, MenuKind::System};
+        sa.games = [&sa](int sys) {
+            std::vector<HomeGame> list;
+            if (sa.nav.store)
+                for (int i = 0; i < 3; i++)
+                    list.push_back({(int64_t(1) << 40) + 10 * sys + i, "blockie test " + std::to_string(i), "porter"});
+            return list;
+        };
+        Buffer so;
+        sa.last_frame = [&so](const Surface& s) { copy(so.surface(), s); };
+        sa.ctl.can_animate = []() { return true; };
+        int entries = 0;
+        sa.store_entry = [&](int sys) {
+            if (sys != 0)
+                return false;
+            entries++;
+            SelectorModel m;
+            m.systems = {{"all", 3, "3 ports"}, {"puzzle", 3, "3 ports"}};
+            m.section_label = "all";
+            sa.enter_store(m);
+            return true;
+        };
+        sa.setup();
+        int64_t t = 0;
+        sa.frame(t, so.surface());
+        sa.input(PadAction::Accept, false, t);
+        check(entries == 0 && !sa.nav.store, "f2: accept on an empty ports entry asks store_empty, not store_entry");
+        sa.input(PadAction::Context, false, t);
+        check(sa.nav.store && sa.ctl.active() && sa.ctl.kind() == FoldKind::Push && sa.model.systems.size() == 2,
+              "f2: the left face button opens the store with the page push");
+        t = settle(sa, so, t);
+        sa.swap_tiles(t, [&sa]() { sa.model.section_label = "puzzle"; });
+        bool forward = sa.ctl.active() && sa.ctl.kind() == FoldKind::Swap && sa.ctl.forward_time(t + 50) == 50;
+        sa.frame(t + swap_ms() / 2, so.surface());
+        check(forward && sa.ctl.forward_time(t + swap_ms() / 2) == swap_ms() / 2 && sa.model.section_label == "puzzle",
+              "f2: the preview swap plays T5 forward, mid swap at half its time");
+        t = settle(sa, so, t + swap_ms() / 2);
+        sa.nav.focus = 1;
+        sa.input(PadAction::Back, false, t);
+        check(!sa.nav.store && sa.model.systems.size() == 2 && sa.model.systems[0].name == "ports" &&
+                  sa.nav.focus == 0 && sa.ctl.kind() == FoldKind::Pop,
+              "f2: back on the genre list restores the home with ports focused");
+    }
+
+    for (int big = 0; big < 2; big++) {
+        FlowOpts bo;
+        bo.big = big == 1;
+        HomeFlow ex(fonts, bo);
+        ex.model.systems = {{"ports", 20, ""}};
+        ex.kinds = {MenuKind::System};
+        std::vector<HomeGame> first, second;
+        for (int i = 0; i < 20; i++)
+            first.push_back({(int64_t(1) << 40) + i, "blockie test " + std::to_string(i), "porter"});
+        std::vector<uint32_t> px((size_t)kTileSide * kTileSide, 0xE0C040);
+        Art art = std::make_shared<const Image>(Image::from_portrait(px.data(), kTileSide, kTileSide));
+        ex.games = [&first](int) { return first; };
+        ex.covers_wanted = [&](const std::vector<HomeGame>& want, int) {
+            for (const HomeGame& g : want)
+                ex.art(g.id, kTileSide, ex.home.epoch, art);
+        };
+        Buffer eo;
+        ex.last_frame = [&eo](const Surface& s) { copy(eo.surface(), s); };
+        ex.ctl.can_animate = []() { return true; };
+        ex.setup();
+        int64_t t = 0;
+        ex.frame(t, eo.surface());
+        ex.input(PadAction::Accept, false, t);
+        t = settle(ex, eo, t);
+        for (int i = 0; i < 6; i++) {
+            ex.input(PadAction::Down, false, t);
+            t = settle(ex, eo, t);
+        }
+        second = first;
+        second.erase(second.begin() + ex.nav.sys_focus);
+        second.push_back({(int64_t(1) << 40) + 99, "blockie test 99", "porter"});
+        Buffer before;
+        copy(eo.surface(), before.surface());
+        ex.swap_tiles(t, [&]() { ex.regame(0, second); });
+        bool started = ex.ctl.active() && ex.ctl.kind() == FoldKind::Swap;
+        Buffer early, mid;
+        ex.frame(t + 25, early.surface());
+        int dx = swap_leave(25, 1).dx;
+        int cols = 0, seen = 0;
+        Surface bs = before.surface(), es = early.surface();
+        GridSpec g = grid_spec(big ? TileMode::Large : TileMode::Standard);
+        for (int c = 0; c < g.cols; c++) {
+            int x = kGridX + c * (g.side + g.gutter) + g.side / 2;
+            for (int y = kBandTop; y < kBandBottom; y += 8)
+                if (bs.at(x, y) != bs.at(2, kBandBottom - 2)) {
+                    cols++;
+                    seen += es.at(x + dx, y) != bs.at(2, kBandBottom - 2) ? 1 : 0;
+                    break;
+                }
+        }
+        check(started && ex.nav.sys_scroll > 0 && cols == g.cols && seen == g.cols,
+              big ? "f2 large: each old column of a scrolled expanded grid shows at t 25, shifted by the leave"
+                  : "f2: each old column of a scrolled expanded grid shows at t 25, shifted by the leave");
+        ex.frame(t + swap_ms() / 2, mid.surface());
+        bool half = ex.ctl.forward_time(t + swap_ms() / 2) == swap_ms() / 2;
+        t = settle(ex, eo, t + swap_ms() / 2);
+        bool right = true;
+        Surface ms = mid.surface(), fs = eo.surface();
+        for (int y = 0; y < ms.h && right; y++)
+            for (int x = kPaneSplitWide; x < ms.w && right; x++)
+                right = ms.at(x, y) == fs.at(x, y);
+        check(started && half && right && ex.home.sysgames.size() == 20,
+              big ? "f2: the expanded grid swaps by T5 in large mode, the right pane the new one mid swap"
+                  : "f2: the expanded grid swaps by T5, the right pane the new one mid swap");
+    }
+
+    for (int light = 0; light < 2; light++)
+        for (int big = 0; big < 2; big++) {
+            set_theme_light(light == 1);
+            FlowOpts dop;
+            dop.big = big == 1;
+            HomeFlow dw(fonts, dop);
+            dw.model.systems = {{"ports", 0, ""}};
+            dw.kinds = {MenuKind::System};
+            Buffer dout;
+            dw.last_frame = [&dout](const Surface& s) { copy(dout.surface(), s); };
+            dw.ctl.can_animate = []() { return true; };
+            auto tiles = [](uint32_t rgb) {
+                std::vector<uint32_t> px((size_t)kTileSide * kTileSide, rgb);
+                std::vector<Art> v;
+                for (int k = 0; k < kGridTiles; k++)
+                    v.push_back(std::make_shared<const Image>(Image::from_portrait(px.data(), kTileSide, kTileSide)));
+                return v;
+            };
+            dw.store_entry = [&](int) {
+                SelectorModel m;
+                m.systems = {{"action", 8, "8 ports"}, {"puzzle", 8, "8 ports"}, {"rpg", 8, "8 ports"}};
+                m.section_label = "action";
+                m.tiles = tiles(0x506070);
+                dw.enter_store(m);
+                return true;
+            };
+            dw.setup();
+            int64_t t = 0;
+            dw.frame(t, dout.surface());
+            dw.input(PadAction::Context, false, t);
+            t = settle(dw, dout, t);
+            bool whole = true;
+            uint32_t shade = 0x607050;
+            for (const char* word : {"puzzle", "rpg", "jump"}) {
+                shade ^= 0x101010;
+                dw.swap_tiles(t, [&]() {
+                    dw.model.section_label = word;
+                    dw.model.tiles = tiles(shade);
+                });
+                Buffer mid;
+                dw.frame(t + 125, mid.surface());
+                t = settle(dw, dout, t + 125);
+                Rect ink = header_ink_rect(fonts, dw.model);
+                Surface ms = mid.surface(), ls = dout.surface();
+                int found = 0;
+                for (int y = kBandTop; y < ink.y1; y++)
+                    for (int x = std::max(0, ink.x0 - 24); x < ink.x1; x++) {
+                        bool in_tile = false;
+                        for (int k = 0; k < kGridTiles; k++) {
+                            Rect r = grid_tile_rect(k, kGridCols);
+                            in_tile = in_tile || (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1);
+                        }
+                        if (in_tile || ls.at(x, y) == theme().bg)
+                            continue;
+                        found++;
+                        whole = whole && x >= ink.x0 && ms.at(x, y) == ls.at(x, y);
+                    }
+                whole = whole && found > 0;
+            }
+            std::string mode = light ? (big ? "light large" : "light") : (big ? "dark large" : "dark");
+            std::string name = "f2 " + mode + ": the new word's gutter ink below y 76 shows at t 125" +
+                               " (accepted misfire: a moving row pixel equal to ground)";
+            check(whole, name.c_str());
+        }
+    set_theme_light(false);
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

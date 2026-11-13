@@ -107,7 +107,7 @@ std::set<std::string> m3u_discs(const std::string& m3u_path)
 }
 
 struct PortRow {
-    std::string base, title, cover;
+    std::string base, title, dir, cover;
 };
 
 std::vector<std::string> split_tabs(const std::string& s)
@@ -140,6 +140,7 @@ bool parse_port_row(const std::string& line, PortRow& out)
         return false;
     out.base = f[0];
     out.title = f[1].empty() ? f[0] : f[1];
+    out.dir = f[2] == "-" ? std::string() : f[2];
     out.cover = f[3] == "-" ? std::string() : f[3];
     return true;
 }
@@ -364,6 +365,7 @@ int Library::scan_ports(const SystemCfg& sys)
         seen.insert(r.base);
         seed_meta(id, r.base, sys.id);
         put_meta(id, "title", r.title);
+        put_meta(id, "port", r.dir);
         if (!r.cover.empty() && inside_dir(dir, r.cover)) {
             set_media(id, "covers", r.cover, "index");
             continue;
@@ -495,7 +497,7 @@ int Library::rescan(const std::string& system_id)
     return 0;
 }
 
-std::vector<std::pair<SystemCfg, int>> Library::systems_with_games()
+std::vector<std::pair<SystemCfg, int>> Library::systems_with_games(const char* always)
 {
     std::vector<std::pair<SystemCfg, int>> out;
     sqlite3_stmt* st = nullptr;
@@ -506,7 +508,7 @@ std::vector<std::pair<SystemCfg, int>> Library::systems_with_games()
         int n = 0;
         if (sqlite3_step(st) == SQLITE_ROW)
             n = sqlite3_column_int(st, 0);
-        if (n > 0)
+        if (n > 0 || (always && sys.id == always))
             out.emplace_back(sys, n);
     }
     sqlite3_finalize(st);

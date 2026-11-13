@@ -21,6 +21,7 @@
 #include "../../gfx/wayland.h"
 #include "../../ui/busydots.h"
 #include "../portmsg.h"
+#include "../ring_spin.h"
 
 using namespace fd;
 
@@ -406,6 +407,23 @@ int main(int argc, char** argv)
         shoot(v, mid, 1125);
         check(same_rows(before, mid, 0, 196), "a swap keeps an unchanged title in place");
         check(same_rows(before, mid, 252, 288), "a swap keeps an unchanged row in place");
+        {
+            MsgContent dots_msg;
+            dots_msg.mode = MsgMode::Progress;
+            dots_msg.title = "blockie test";
+            dots_msg.done = 3;
+            dots_msg.total = -1;
+            MsgView dots_view;
+            Buffer dots_buf;
+            dots_view.show(dots_msg, 0);
+            shoot(dots_view, dots_buf, 1500);
+            uint32_t dots_ground = dots_buf.surface().at(kPortraitW - 2, kPortraitH - 2);
+            int dots_inked = 0;
+            for (int y = px(kDotsY); y < px(kDotsY) + px(kDotSide); y++)
+                for (int x = px(kDotsX0); x < px(kDotsX1); x++)
+                    dots_inked += dots_buf.surface().at(x, y) != dots_ground ? 1 : 0;
+            check(dots_inked > 0, "a progress with no total inks the busy dots band");
+        }
 
         MsgContent renamed = one;
         renamed.title = "blockie test renamed";

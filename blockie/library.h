@@ -40,7 +40,7 @@ public:
     bool open(const std::string& data_root);
     int scan();
     int rescan(const std::string& system_id);
-    std::vector<std::pair<SystemCfg, int>> systems_with_games();
+    std::vector<std::pair<SystemCfg, int>> systems_with_games(const char* always = nullptr);
     std::vector<Game> games(const std::string& system_id);
     std::vector<Game> recent_games(int limit);
     void mark_played(int64_t game_id, int64_t when);

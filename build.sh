@@ -438,6 +438,9 @@ build_app() {
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$appobj/jpeg.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/jpeg.cpp"
     pool "$appobj/ports.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/ports.cpp"
+    pool "$appobj/store.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/store.cpp"
+    pool "$appobj/screen_store.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_store.cpp"
+    pool "$appobj/store_flow.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/store_flow.cpp"
     pool "$appobj/input_pad.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/input_pad.cpp"
     pool "$appobj/repeat.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/repeat.cpp"
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
@@ -465,6 +468,7 @@ build_app() {
         "$appobj/setd_key.o" "$appobj/zones.o" "$appobj/bt.o" "$appobj/bt_model.o" "$appobj/screen_bt.o" \
         "$appobj/children.o" "$appobj/volume.o" "$appobj/ready.o" "$appobj/backlight.o" "$appobj/wifi_model.o" \
         "$appobj/wifi.o" "$appobj/sysinfo.o" "$appobj/library.o" "$appobj/image.o" "$appobj/jpeg.o" "$appobj/ports.o" \
+        "$appobj/store.o" "$appobj/screen_store.o" "$appobj/store_flow.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
         "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
         "$appobj/leftmove.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
@@ -556,15 +560,35 @@ build_launch_test() {
     toolver=$("$cxx" --version | head -n 1)
     pool "$launchobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
     pool "$launchobj/ports.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/ports.cpp"
+    pool "$launchobj/children.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/children.cpp"
     pool "$testobj/launch_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/launch_test.cpp"
     drain
     ((fail)) && return 1
     mkdir -p "$out/launch"
-    "$cxx" "$launchobj/launch.o" "$launchobj/ports.o" "$testobj/launch_test.o" $appldflags \
+    "$cxx" "$launchobj/launch.o" "$launchobj/ports.o" "$launchobj/children.o" "$testobj/launch_test.o" $appldflags \
         -o "$out/launch/blockie-launch-test.tmp" || return 1
     mv "$out/launch/blockie-launch-test.tmp" "$out/launch/blockie-launch-test"
     echo "build.sh: $out/launch/blockie-launch-test"
     "$out/launch/blockie-launch-test"
+}
+
+build_store_test() {
+    build_sqlite_obj || return 1
+    toolver=$("$cxx" --version | head -n 1)
+    pool "$testobj/store.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/store.cpp"
+    pool "$testobj/store_library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$testobj/store_ports.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/ports.cpp"
+    pool "$testobj/store_children.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/children.cpp"
+    pool "$testobj/store_test.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/tests/store_test.cpp"
+    drain
+    ((fail)) && return 1
+    mkdir -p "$out/store"
+    "$cxx" "$testobj/store.o" "$testobj/store_library.o" "$testobj/store_ports.o" "$testobj/store_children.o" \
+        "$testobj/store_test.o" "$depobj/sqlite3.o" $appldflags -lpthread -lm -o "$out/store/blockie-store-test.tmp" ||
+        return 1
+    mv "$out/store/blockie-store-test.tmp" "$out/store/blockie-store-test"
+    echo "build.sh: $out/store/blockie-store-test"
+    "$out/store/blockie-store-test"
 }
 
 build_pad_test() {
@@ -888,6 +912,7 @@ build_decodeq_test() {
 build_vtext_test() {
     deps
     build_deps_obj
+    build_sqlite_obj || return 1
     ((fail)) && return 1
     deps_fonts
     toolver=$("$cxx" --version | head -n 1)
@@ -955,6 +980,24 @@ build_vtext_test() {
         "$testobj/launchmove_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
         -o "$out/vtext/blockie-launchmove-test.tmp" || return 1
     mv "$out/vtext/blockie-launchmove-test.tmp" "$out/vtext/blockie-launchmove-test"
+    for s in store_flow screen_store ports children; do
+        pool "$testobj/sf_$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    pool "$testobj/sf_store.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/store.cpp"
+    pool "$testobj/sf_library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
+    pool "$testobj/storeflow_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/storeflow_test.cpp"
+    drain
+    ((fail)) && return 1
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+        "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
+        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
+        "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
+        "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/zones_g.o" "$testobj/bt_model.o" \
+        "$testobj/pm_toast_clock.o" "$testobj/sf_store_flow.o" "$testobj/sf_screen_store.o" "$testobj/sf_ports.o" \
+        "$testobj/sf_children.o" "$testobj/sf_store.o" "$testobj/sf_library.o" "$testobj/storeflow_test.o" \
+        "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
+        -o "$out/vtext/blockie-storeflow-test.tmp" || return 1
+    mv "$out/vtext/blockie-storeflow-test.tmp" "$out/vtext/blockie-storeflow-test"
     echo "build.sh: $out/vtext/blockie-vtext-test $out/vtext/blockie-t9-test $out/vtext/blockie-selector-test" \
         "$out/vtext/blockie-settings-test $out/vtext/blockie-homeflow-test $out/vtext/blockie-launchmove-test"
     local cjk
@@ -963,7 +1006,8 @@ build_vtext_test() {
     echo "build.sh: vtext CJK fallback ${cjk:-none}"
     "$out/vtext/blockie-vtext-test" "$fonts_dir" "$cjk" && "$out/vtext/blockie-t9-test" "$fonts_dir" &&
         "$out/vtext/blockie-selector-test" "$fonts_dir" && "$out/vtext/blockie-settings-test" "$fonts_dir" &&
-        "$out/vtext/blockie-homeflow-test" "$fonts_dir" && "$out/vtext/blockie-launchmove-test" "$fonts_dir"
+        "$out/vtext/blockie-homeflow-test" "$fonts_dir" && "$out/vtext/blockie-launchmove-test" "$fonts_dir" &&
+        "$out/vtext/blockie-storeflow-test" "$fonts_dir"
 }
 
 build_powermenu_test() {
@@ -1059,6 +1103,10 @@ build_shot() {
         layer_mem launchflow toast_strip toast_clock launch sysinfo decodeq portmsg portmsg_view input_pad; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
+    for s in screen_store store_flow ports children; do
+        pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
+    done
+    pool "$shotobj/store.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/store.cpp"
     pool "$shotobj/shot.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/shot.cpp"
     drain
     ((fail)) && return 1
@@ -1074,7 +1122,9 @@ build_shot() {
         "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/launchflow.o" \
         "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/sysinfo.o" "$shotobj/shot.o" \
         "$shotobj/jpeg.o" "$shotobj/library.o" "$shotobj/decodeq.o" "$shotobj/portmsg.o" "$shotobj/portmsg_view.o" \
-        "$shotobj/input_pad.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $jpeg_libs -lpthread -lm \
+        "$shotobj/input_pad.o" "$shotobj/screen_store.o" "$shotobj/store_flow.o" "$shotobj/ports.o" \
+        "$shotobj/children.o" "$shotobj/store.o" \
+        "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $jpeg_libs -lpthread -lm \
         -o "$out/shot/blockie-shot.tmp" || return 1
     mv "$out/shot/blockie-shot.tmp" "$out/shot/blockie-shot"
     echo "build.sh: $out/shot/blockie-shot"
@@ -1119,7 +1169,7 @@ esac
 [[ $target == app || $target == all ]] && { build_app || { echo "build.sh: app failed" >&2; exit 1; }; }
 [[ $target == scan ]] && { build_scan || { echo "build.sh: scan failed" >&2; exit 1; }; }
 [[ $target == scraper ]] && { build_scraper_test || { echo "build.sh: scraper failed" >&2; exit 1; }; }
-[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test && build_portmsg_test || { echo "build.sh: test failed" >&2; exit 1; }; }
+[[ $target == test ]] && { build_test && build_scraper_test && build_launch_test && build_image_test && build_pad_test && build_wrap_test && build_zones_test && build_decodeq_test && build_input_test && build_gate_test && build_motion_test && build_bt_model_test && build_sysinfo_test && build_wifi_model_test && build_vtext_test && build_powermenu_test && build_portmsg_test && build_store_test || { echo "build.sh: test failed" >&2; exit 1; }; }
 [[ $target == test-dbus ]] && { build_test_dbus || { echo "build.sh: test-dbus failed" >&2; exit 1; }; }
 [[ $target == test-input ]] && { build_input_test || { echo "build.sh: test-input failed" >&2; exit 1; }; }
 [[ $target == test-pad ]] && { build_pad_test || { echo "build.sh: test-pad failed" >&2; exit 1; }; }

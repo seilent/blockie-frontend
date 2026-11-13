@@ -6,12 +6,15 @@
 #include <utility>
 #include <vector>
 
+#include <dirent.h>
+#include <fcntl.h>
 #include <ftw.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "../launch.h"
+#include "../ports.h"
 
 namespace {
 
@@ -81,8 +84,33 @@ using Ov = std::vector<std::pair<std::string, std::string>>;
 
 }
 
+std::string fd_list()
+{
+    std::vector<int> v;
+    DIR* d = opendir("/proc/self/fd");
+    if (!d)
+        return "none";
+    while (dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.')
+            continue;
+        int n = std::atoi(e->d_name);
+        if (n != dirfd(d))
+            v.push_back(n);
+    }
+    closedir(d);
+    std::sort(v.begin(), v.end());
+    std::string out;
+    for (int n : v)
+        out += (out.empty() ? "" : " ") + std::to_string(n);
+    return out;
+}
+
 int main()
 {
+    if (const char* fdout = std::getenv("BLOCKIE_TEST_FDS")) {
+        write_file(fdout, fd_list(), 0644);
+        return 0;
+    }
     char tmpl[] = "/tmp/blockie-launch-test.XXXXXX";
     char* root_c = mkdtemp(tmpl);
     if (!root_c) {
@@ -365,14 +393,39 @@ int main()
 
     {
         fd::PortsHelper h;
-        std::vector<std::string> done;
-        h.on_done = [&](const std::string& n) { done.push_back(n); };
+        std::vector<fd::HelperResult> done;
+        h.on_result = [&](const fd::HelperResult& r) { done.push_back(r); };
         h.line("progress\tblockie-test-port\t1\t-");
         h.line("fail\tblockie-test-port\tnetwork");
         h.line("done");
-        check(done.empty(), "progress, fail and a bare done start no rescan");
+        check(done.empty(), "progress, fail and a bare done report no result");
         h.line("done\tblockie-test-port");
-        check(done.size() == 1 && done[0] == "blockie-test-port", "a helper done line starts the ports rescan");
+        check(done.empty(), "a done line read before the helper is reaped reports no result");
+    }
+
+    {
+        std::string fdf = root + "/game-fds";
+        int leak = open("/dev/null", O_RDONLY);
+        setenv("BLOCKIE_TEST_FDS", fdf.c_str(), 1);
+        fd::Launcher lf(data_root, libretro, "/proc/self/exe");
+        fd::LaunchSpec spec;
+        spec.system = "ports";
+        spec.rompath_abs = data_root + "/roms/ports/blockie-test-port.sh";
+        fd::Launcher::Child ch = lf.spawn(spec);
+        unsetenv("BLOCKIE_TEST_FDS");
+        int status = 0;
+        while (ch.pid > 0 && waitpid(ch.pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        if (leak >= 0)
+            close(leak);
+        std::string got;
+        if (FILE* f = std::fopen(fdf.c_str(), "rb")) {
+            char b[256] = {};
+            size_t n = std::fread(b, 1, sizeof b - 1, f);
+            got.assign(b, n);
+            std::fclose(f);
+        }
+        check(leak >= 3 && got == "0 1 2", "a launched game holds fds 0 to 2 only");
     }
 
     rm_rf(root);

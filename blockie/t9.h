@@ -13,8 +13,12 @@ struct T9Text {
     int64_t id = 0;
     std::string title;
     std::string system;
+    std::string next;
 
-    bool operator==(const T9Text& o) const { return id == o.id && title == o.title && system == o.system; }
+    bool operator==(const T9Text& o) const
+    {
+        return id == o.id && title == o.title && system == o.system && next == o.next;
+    }
     bool operator!=(const T9Text& o) const { return !(*this == o); }
 };
 

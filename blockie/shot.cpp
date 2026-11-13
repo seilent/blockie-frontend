@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <climits>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +29,8 @@
 #include "../gfx/pixel.h"
 #include "../gfx/png.h"
 #include "../gfx/wayland.h"
+#include "../ui/roles.h"
+#include "../ui/size.h"
 #include "bt_model.h"
 #include "fold.h"
 #include "home.h"
@@ -48,7 +52,10 @@
 #include "screen_bt.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
+#include "screen_store.h"
 #include "sysinfo.h"
+#include "store.h"
+#include "store_flow.h"
 #include "theme.h"
 #include "tile_grid.h"
 #include "toast_strip.h"
@@ -264,7 +271,7 @@ bool parse_script(const std::string& s, std::vector<Step>& out)
         st.key = tok.substr(0, a);
         PadAction pa;
         if (st.key != "ret" && st.key != "cover" && st.key != "theme" && st.key != "fail" && st.key != "missing" &&
-            st.key != "term" && st.key != "power" && !action_of(st.key, pa))
+            st.key != "term" && st.key != "power" && st.key != "net" && !action_of(st.key, pa))
             return false;
         std::string ud = tok.substr(a + 1, b - a - 1);
         if (ud != "d" && ud != "u")
@@ -475,6 +482,7 @@ bool page_pose(SettingsPage& sp, const PageOpts& o, const Zones& z)
 struct DriveOpts {
     bool on = false;
     int recent_n = 0;
+    int recent_in = -1;
     int sys_games = 12;
     bool noart = false;
     std::string title0;
@@ -708,7 +716,7 @@ public:
             }
         };
         flow.home.load = [this](const HomeGame& g) -> Art {
-            if (late_.count(g.id) && !arrived_)
+            if (late_.count(g.id) && (!arrived_ || (o_.recent_in >= 0 && g.id == kRecentIds + o_.recent_in)))
                 return nullptr;
             auto it = art.find(g.id);
             return it == art.end() ? nullptr : it->second;
@@ -1182,8 +1190,7 @@ private:
     Buffer rest_det_;
 };
 
-bool ports_fixture(const std::string& dir, int side, std::vector<HomeGame>& out, SelectorItem& row,
-                   std::unordered_map<int64_t, Art>& art)
+bool ports_library(const std::string& dir, Library& lib)
 {
     const std::string tail = "/roms/ports";
     std::string d = dir;
@@ -1193,12 +1200,20 @@ bool ports_fixture(const std::string& dir, int side, std::vector<HomeGame>& out,
         fprintf(stderr, "blockie-shot: --portsdir takes a DATA/roms/ports dir\n");
         return false;
     }
-    Library lib;
     if (!lib.open(d.substr(0, d.size() - tail.size()))) {
         fprintf(stderr, "blockie-shot: cannot open the library under %s\n", d.c_str());
         return false;
     }
     lib.rescan(kPortsSystem);
+    return true;
+}
+
+bool ports_fixture(const std::string& dir, int side, std::vector<HomeGame>& out, SelectorItem& row,
+                   std::unordered_map<int64_t, Art>& art)
+{
+    Library lib;
+    if (!ports_library(dir, lib))
+        return false;
     for (const SystemCfg& sc : lib.config())
         if (sc.id == kPortsSystem)
             row.name = sc.name;
@@ -1307,6 +1322,17 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         if (!d->recent_covers.empty())
             d->art[g.id] = d->recent_covers[(size_t)k % d->recent_covers.size()];
         d->recent_games.push_back(g);
+    }
+    if (o.recent_in >= 0) {
+        if (o.arrive < 0 || focus >= systems || o.recent_in >= std::min(o.recent_n, (int)d->recent_games.size()) ||
+            o.recent_in >= (int)d->games[(size_t)focus].size()) {
+            fprintf(stderr, "blockie-shot: --recentin K needs --arrive MS, K under --recentn and the focused"
+                            " system's game count, and a game system in focus\n");
+            return 2;
+        }
+        HomeGame& g = d->recent_games[(size_t)o.recent_in];
+        g.system = kNames[focus];
+        d->games[(size_t)focus][(size_t)o.recent_in] = g;
     }
     d->flow.nav.focus = focus;
     if (!d->setup())
@@ -2306,6 +2332,636 @@ int run_pm_shot(Fonts& fonts, const PmShotOpts& po, const DriveOpts& o, const Su
     return 0;
 }
 
+constexpr int kMenuStripPx = 37;
+
+struct StoreShotOpts {
+    bool on = false;
+    std::string port, helper;
+    bool offline = false;
+    int64_t cap = -1;
+    int64_t art_delay = 0;
+};
+
+struct HelperLine {
+    std::string cmd;
+    int64_t ms = 0;
+    std::string line;
+};
+
+constexpr size_t kHelperLinesMax = 256;
+
+std::string real_path(const std::string& p)
+{
+    char buf[PATH_MAX];
+    return realpath(p.c_str(), buf) ? std::string(buf) : std::string();
+}
+
+std::string port_stem(const std::string& name)
+{
+    size_t n = name.size();
+    return n > 4 && name.compare(n - 4, 4, ".zip") == 0 ? name.substr(0, n - 4) : name;
+}
+
+std::vector<std::string> store_rows(const HomeFlow& flow, const PortPage& pp, Screen top, int64_t tf, std::string& kind,
+                                    bool landed = false)
+{
+    std::vector<std::string> out;
+    auto row = [&out](const std::string& name, Rect r, bool art) {
+        out.push_back(name + " " + std::to_string(r.x0) + " " + std::to_string(r.y0) + " " + std::to_string(r.x1) +
+                      " " + std::to_string(r.y1) + (art ? " art" : " text"));
+    };
+    kind = top == Screen::Port ? "port" : flow.nav.store ? "s-a" : "home";
+    if (top == Screen::Port) {
+        row("port-art", Rect{kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide}, true);
+        int pitch = px(sz().rowHeight);
+        for (int k = 0; k < pp.action_count(tf); k++) {
+            int y0 = kPortRowsTop + k * pitch;
+            row("port-row" + std::to_string(k), Rect{0, y0, kPaneSplit, y0 + pitch}, false);
+        }
+        std::vector<Rect> lines = pp.line_rects(tf);
+        for (size_t k = 0; k < lines.size(); k++)
+            row("port-line" + std::to_string(k), lines[k], false);
+    } else {
+        bool wide = flow.nav.pane == Pane::Details && top == Screen::Home;
+        int split = (landed ? (wide ? kPaneSplitWide : kPaneSplit) : flow.boundary(tf)) + kTileFocusBorder;
+        bool big = flow.nav.system_view && flow.nav.cols == kBigCols;
+        int pitch = big ? kBigPitch : kGridRowPitch, count = big ? kBigRows : kGridRows;
+        row("home-head", Rect{0, 0, split, kBandTop}, false);
+        for (int k = 0; k < count; k++) {
+            int y0 = kBandTop + k * pitch;
+            row("home-tile" + std::to_string(k), Rect{0, y0, split, k + 1 < count ? y0 + pitch : kPortraitH}, true);
+        }
+        if (flow.nav.pane == Pane::Details) {
+            row("home-detail", Rect{split, 0, kPortraitW, kPortraitH}, false);
+        } else {
+            row("home-strip", Rect{split, 0, kPortraitW, kMenuStripPx}, false);
+            int shown = std::min(kMenuVisibleRows, (int)flow.model.systems.size() - flow.nav.menu_top);
+            for (int k = 0; k < shown; k++) {
+                int y0 = kMenuStripPx + k * kMenuPitchPx;
+                row("home-menu" + std::to_string(k), Rect{split, y0, kPortraitW, y0 + kMenuPitchPx}, false);
+            }
+            int wm = kMenuStripPx + kMenuVisibleRows * kMenuPitchPx;
+            row("home-watermark", Rect{split, wm, kPortraitW, kPortraitH}, false);
+        }
+    }
+    return out;
+}
+
+int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, const std::string& frames_dir,
+                   const std::string& out)
+{
+    std::vector<Step> steps;
+    if (!parse_script(o.script, steps)) {
+        fprintf(stderr, "blockie-shot: bad --script %s\n", o.script.c_str());
+        return 2;
+    }
+    Library lib;
+    if (!ports_library(o.ports_dir, lib))
+        return 1;
+    std::string ports = o.ports_dir;
+    while (ports.size() > 1 && ports.back() == '/')
+        ports.pop_back();
+    std::string catalog_path = ports + kCatalogDb;
+    std::vector<HelperLine> hlines;
+    if (!so.helper.empty()) {
+        std::vector<std::string> raw;
+        if (!read_lines(so.helper, raw))
+            return 1;
+        if (raw.size() > kHelperLinesMax) {
+            fprintf(stderr, "blockie-shot: --helperlines takes at most %zu lines\n", kHelperLinesMax);
+            return 2;
+        }
+        std::string root = real_path(ports);
+        for (const std::string& l : raw) {
+            size_t a = l.find(' '), b = a == std::string::npos ? a : l.find(' ', a + 1);
+            std::string cmd = l.substr(0, a), ms = a == std::string::npos ? std::string() : l.substr(a + 1, b - a - 1);
+            std::string rest = b == std::string::npos ? std::string() : l.substr(b + 1);
+            bool known = cmd == "refresh" || cmd == "install" || cmd == "update" || cmd == "uninstall";
+            bool digits = !ms.empty() && ms.size() <= 7 && ms.find_first_not_of("0123456789") == std::string::npos;
+            bool shape = rest == "ignore-term" || rest.compare(0, 9, "progress\t") == 0 ||
+                         rest.compare(0, 5, "done\t") == 0 ||
+                         rest.compare(0, 5, "fail\t") == 0 || (cmd == "refresh" && rest.compare(0, 8, "catalog ") == 0);
+            if (rest.compare(0, 8, "catalog ") == 0) {
+                std::string path = real_path(rest.substr(8));
+                shape = shape && !root.empty() && path.compare(0, root.size() + 1, root + "/") == 0;
+                rest = "catalog " + path;
+            }
+            if (!known || !digits || !shape || l.size() > kHelperLineCap) {
+                fprintf(stderr, "blockie-shot: --helperlines takes CMD MS LINE, not %s\n", l.c_str());
+                return 2;
+            }
+            hlines.push_back({cmd, std::atoll(ms.c_str()), rest});
+        }
+        std::stable_sort(hlines.begin(), hlines.end(),
+                         [](const HelperLine& x, const HelperLine& y) { return x.ms < y.ms; });
+    }
+    int64_t now = 0;
+    bool online = !so.offline;
+    GlyphCache glyphs;
+    PortPage portp(fonts, glyphs);
+    HomeFlow flow(fonts, flow_opts(o));
+    Nav& nav = flow.nav;
+    Children kids;
+    PortsHelper helper;
+    StoreFlow sf(flow, portp, helper, kids);
+    ToastStrip toast;
+    Repeat rep;
+    std::unordered_map<int64_t, Art> arts;
+    JpegDecoder jpeg;
+    auto art_at = [&](int64_t key, const std::string& path, int side) {
+        auto f = arts.find(key);
+        if (f != arts.end())
+            return f->second;
+        DecodedImage dec;
+        Art img;
+        if (!path.empty() && load_cover(jpeg, path, side, dec) && dec.ok())
+            img = std::make_shared<const Image>(cover_tile(dec, side));
+        arts[key] = img;
+        return img;
+    };
+    auto art_of = [&](const StoreItem& it, bool shot) {
+        const std::string& a = shot ? it.shot : it.cover;
+        const std::string& b = shot ? it.cover : it.shot;
+        return art_at(shot ? it.id + kStoreIdBase : it.id, !a.empty() ? a : b, shot ? kStoreShotSide : kTileSide);
+    };
+    std::vector<std::pair<int64_t, std::function<void()>>> later;
+    int64_t shot_want = -1;
+    Art shot_art;
+    auto deliver = [&](int64_t id, Art a) {
+        if (!a)
+            return;
+        if (so.art_delay <= 0) {
+            flow.art(id, kTileSide, flow.home.epoch, a);
+            return;
+        }
+        later.push_back({now + so.art_delay, [&, id, a]() {
+                             bool keep = flow.nav.system_view && flow.home.keep_set(flow.nav.sys_scroll).count(id);
+                             for (const HomeGame& g : flow.home.recent)
+                                 keep = keep || g.id == id;
+                             if (keep)
+                                 flow.art(id, kTileSide, flow.home.epoch, a);
+                         }});
+    };
+    std::vector<IndexPort> added;
+    std::unordered_set<std::string> gone;
+    int64_t fake_id = int64_t(1) << 30;
+    auto index = [&]() {
+        std::vector<IndexPort> idx;
+        for (IndexPort& ip : index_ports(lib))
+            if (!gone.count(ip.dir.empty() ? ip.base : ip.dir))
+                idx.push_back(ip);
+        idx.insert(idx.end(), added.begin(), added.end());
+        return idx;
+    };
+    std::string run_cmd, run_name;
+    int64_t run_at = -1;
+    size_t hnext = 0;
+    bool run_cancel = false, run_killed = false, run_ignore = false, playing = false, returning = false;
+    bool kept = false;
+    PadAction kept_key = PadAction::Up;
+    helper.spawn = [&](const std::vector<std::string>& argv, int* fd_out) {
+        *fd_out = -1;
+        run_cmd = argv.size() > 1 ? argv[1] : std::string();
+        run_name = argv.size() > 2 ? argv[2] : run_cmd;
+        run_at = now;
+        hnext = 0;
+        run_cancel = run_killed = run_ignore = false;
+        for (const HelperLine& h : hlines)
+            run_ignore = run_ignore || (h.cmd == run_cmd && h.line == "ignore-term");
+        fprintf(stderr, "blockie-shot: %lld ms helper %s %s\n", (long long)now, run_cmd.c_str(), run_name.c_str());
+        return (pid_t)1;
+    };
+    helper.signal_child = [&](pid_t, int sig) {
+        if (sig == SIGKILL)
+            run_killed = true;
+        else if (!run_ignore)
+            run_cancel = true;
+    };
+    sf.host.result = [&](const HelperResult& r) {
+        if (!r.done)
+            return;
+        std::string dir = port_stem(r.name);
+        if (r.cmd == HelperCmd::Remove) {
+            gone.insert(dir);
+            added.erase(std::remove_if(added.begin(), added.end(), [&](const IndexPort& ip) { return ip.dir == dir; }),
+                        added.end());
+            return;
+        }
+        if (r.cmd != HelperCmd::Install)
+            return;
+        gone.erase(dir);
+        bool listed = false;
+        for (const IndexPort& ip : index_ports(lib))
+            listed = listed || ip.dir == dir;
+        for (const IndexPort& ip : added)
+            listed = listed || ip.dir == dir;
+        for (const StoreItem& it : sf.items)
+            if (!listed && it.name == r.name)
+                added.push_back({fake_id++, dir, it.title, dir, it.cover});
+    };
+    sf.host.now = [&]() { return now; };
+    sf.host.is_ports = [](int sys) { return sys == 0; };
+    sf.host.online = [&]() { return online; };
+    sf.host.stale = [&]() {
+        for (const HelperLine& h : hlines)
+            if (h.cmd == "refresh")
+                return true;
+        return false;
+    };
+    sf.host.index = index;
+    sf.host.rescan = [&]() {
+        flow.home_model().systems[0].games = (int)index().size();
+        if (!nav.store && nav.system_view && nav.focus == 0 && nav.stack.empty())
+            flow.regame(0, flow.games(0));
+    };
+    sf.host.reread = [&]() {
+        Catalog c;
+        bool ok = read_catalog(catalog_path, ports, c);
+        sf.set_catalog(ok, std::move(c), now);
+    };
+    sf.host.preview_art = [&](const std::vector<HomeGame>&, const std::vector<HomeGame>& want) {
+        for (const HomeGame& g : want)
+            if (const StoreItem* it = sf.item(g.id))
+                deliver(g.id, art_of(*it, false));
+    };
+    sf.host.shot = [&](const StoreItem* it) {
+        Art a = it ? art_of(*it, true) : nullptr;
+        if (so.art_delay > 0) {
+            int64_t key = it ? it->id + kStoreIdBase : -1;
+            auto show = [&](const Art& art) {
+                if (nav.top() == Screen::Port)
+                    portp.set_art(art);
+            };
+            if (key == shot_want) {
+                if (shot_art)
+                    show(shot_art);
+                return;
+            }
+            shot_want = key;
+            shot_art.reset();
+            show(nullptr);
+            later.push_back({now + so.art_delay, [&, a, key, show]() {
+                                 if (shot_want != key)
+                                     return;
+                                 shot_art = a;
+                                 show(a);
+                             }});
+            return;
+        }
+        portp.set_art(a);
+    };
+    sf.host.toast = [&](const std::string& l1, const std::string& l2) { toast.show(now, l1, l2, true); };
+    sf.host.closed = []() {};
+    sf.host.redraw = []() {};
+    sf.attach();
+    {
+        Catalog c;
+        bool ok = read_catalog(catalog_path, ports, c);
+        sf.set_catalog(ok, std::move(c), now);
+    }
+    std::string entry = kPortsSystem;
+    for (const SystemCfg& sc : lib.config())
+        if (sc.id == kPortsSystem)
+            entry = sc.name;
+    flow.model.systems.push_back({entry, (int)index().size(), ""});
+    flow.kinds.push_back(MenuKind::System);
+    auto cover_of = [&](int64_t id) {
+        for (const IndexPort& ip : index())
+            if (ip.game_id == id)
+                return ip.cover;
+        return std::string();
+    };
+    flow.home.load = [&](const HomeGame& g) -> Art {
+        if (so.art_delay > 0)
+            return nullptr;
+        if (const StoreItem* it = sf.item(g.id))
+            return art_of(*it, false);
+        return art_at(g.id, cover_of(g.id), kTileSide);
+    };
+    Buffer frame;
+    InkLayer ink;
+    flow.last_frame = [&](const Surface& s) {
+        copy_surface(frame.surface(), s);
+        toast.under(s);
+    };
+    flow.ctl.can_animate = []() { return true; };
+    flow.ctl.clock_us = [&]() { return now * 1000; };
+    flow.rearm = [&](int64_t t) { rep.rearm(t); };
+    flow.games = [&](int sys) {
+        if (nav.store)
+            return sf.games(sys);
+        std::vector<HomeGame> list;
+        if (sys == 0)
+            for (const IndexPort& ip : index())
+                list.push_back({ip.game_id, ip.title, entry});
+        return list;
+    };
+    flow.covers_wanted = [&](const std::vector<HomeGame>& want, int) {
+        for (const HomeGame& g : want) {
+            const StoreItem* it = sf.item(g.id);
+            deliver(g.id, it ? art_of(*it, false) : art_at(g.id, cover_of(g.id), kTileSide));
+        }
+    };
+    flow.launch_game = [&](const HomeGame& g) {
+        if (helper.op != HelperOp::None) {
+            LaunchOutcome lo = launch_helper_busy(helper.op);
+            toast.show(now, lo.line1, lo.line2, nav.top() == Screen::Home);
+            return LaunchStart::Refused;
+        }
+        fprintf(stderr, "blockie-shot: %lld ms launch %lld\n", (long long)now, (long long)g.id);
+        rep.release_all();
+        playing = true;
+        return LaunchStart::Leave;
+    };
+    flow.draw_page = [&](Canvas& c, Screen s, int64_t t) {
+        if (s == Screen::Port)
+            portp.draw(c, ink, t);
+    };
+    flow.page_input = [&](Screen s, PadAction a, bool r) { return sf.page_input(s, a, r, now); };
+    flow.page_seed_y = [&](Screen s) { return sf.seed_y(s); };
+    flow.setup();
+    nav.focus = 0;
+    if (!so.port.empty()) {
+        const StoreItem* found = nullptr;
+        for (const StoreItem& it : sf.items)
+            if (it.name == so.port)
+                found = &it;
+        if (!found) {
+            fprintf(stderr, "blockie-shot: --storeport %s is not in the store\n", so.port.c_str());
+            return 2;
+        }
+        StoreItem it = *found;
+        flow.input(PadAction::Context, false, now);
+        flow.ctl.land_all(now, "scene");
+        if (nav.store) {
+            flow.input(PadAction::Accept, false, now);
+            flow.ctl.land_all(now, "scene");
+        }
+        flow.open_port(store_game(it));
+        flow.ctl.land_all(now, "scene");
+    }
+    FILE* side = nullptr;
+    FILE* rows = nullptr;
+    if (!frames_dir.empty()) {
+        side = fopen((frames_dir + "/frames.txt").c_str(), "w");
+        rows = side ? fopen((frames_dir + "/rows.txt").c_str(), "w") : nullptr;
+        if (!side || !rows) {
+            fprintf(stderr, "blockie-shot: cannot write in %s\n", frames_dir.c_str());
+            if (side)
+                fclose(side);
+            return 1;
+        }
+    }
+    bool wrote = true;
+    int sid = 0;
+    std::vector<std::string> logged;
+    std::string kind;
+    auto put_surface = [&](const std::vector<std::string>& set) {
+        ++sid;
+        wrote = fprintf(rows, "surface %d page step 0 0 %d %d\n", sid, kPortraitW, kPortraitH) > 0 && wrote;
+        for (const std::string& r : set)
+            wrote = fprintf(rows, "row %d %s\n", sid, r.c_str()) > 0 && wrote;
+        logged = set;
+    };
+    int64_t fold_t0 = -1;
+    const char* fold_kind = "";
+    int fold_rev = -1;
+    std::vector<std::string> before;
+    Screen before_top = Screen::Home;
+    auto mark = [&]() {
+        before_top = nav.top();
+        before = store_rows(flow, portp, before_top, now, kind);
+    };
+    auto folded = [&]() {
+        if (!rows || !flow.ctl.active())
+            return;
+        const char* fk = fold_kind_name(flow.ctl.kind());
+        int rev = flow.ctl.reversed() ? 1 : 0;
+        if (flow.ctl.t0() == fold_t0 && fk == fold_kind && rev == fold_rev)
+            return;
+        fold_t0 = flow.ctl.t0();
+        fold_kind = fk;
+        fold_rev = rev;
+        put_surface(before);
+        wrote = fprintf(rows, "fold %lld step %s %d 0 0 0 0 %d from\n", (long long)fold_t0, fk, rev, sid) > 0 && wrote;
+        put_surface(store_rows(flow, portp, nav.top(), now, kind, true));
+        wrote = fprintf(rows, "fold %lld step %s %d 0 0 0 0 %d to\n", (long long)fold_t0, fk, rev, sid) > 0 && wrote;
+    };
+    enum class Gate { Drop, Keep, Act };
+    auto input = [&](PadAction a, bool r) {
+        if (playing)
+            return Gate::Drop;
+        if (returning && flow.ctl.active() && flow.ctl.kind() == FoldKind::Return) {
+            kept = true;
+            kept_key = a;
+            return Gate::Keep;
+        }
+        returning = false;
+        mark();
+        flow.input(a, r, now);
+        folded();
+        return Gate::Act;
+    };
+    auto next_line = [&]() -> int64_t {
+        if (!helper.running())
+            return kNever;
+        if (run_cancel || run_killed)
+            return now;
+        size_t k = 0;
+        bool any = false;
+        for (const HelperLine& h : hlines) {
+            if (h.cmd != run_cmd)
+                continue;
+            any = true;
+            if (k++ == hnext)
+                return run_at + h.ms;
+        }
+        return any ? kNever : now;
+    };
+    auto feed_one = [&]() {
+        if (run_killed) {
+            mark();
+            helper.finish();
+            folded();
+            return;
+        }
+        if (run_cancel) {
+            helper.line("fail\t" + run_name + "\tcancel");
+            helper.finish();
+            return;
+        }
+        size_t k = 0;
+        for (const HelperLine& h : hlines) {
+            if (h.cmd != run_cmd || k++ != hnext)
+                continue;
+            hnext++;
+            if (h.line.compare(0, 8, "catalog ") == 0) {
+                catalog_path = h.line.substr(8);
+                return;
+            }
+            if (h.line == "ignore-term")
+                return;
+            std::string l = h.line;
+            size_t p = l.find("%s");
+            if (p != std::string::npos)
+                l.replace(p, 2, run_name);
+            helper.line(l);
+            if (l.compare(0, 5, "done\t") == 0 || l.compare(0, 5, "fail\t") == 0) {
+                mark();
+                helper.finish();
+                folded();
+            }
+            return;
+        }
+        helper.line("done\t" + run_name);
+        mark();
+        helper.finish();
+        folded();
+    };
+    size_t next = 0;
+    int written = 0, tail = o.tail, rc = 0;
+    int64_t cap = so.cap > 0 ? so.cap : kDriveCapMs;
+    std::string keys;
+    auto log_key = [&keys](const std::string& k) { keys += (keys.empty() ? "" : ",") + k; };
+    for (int n = 0;; n++) {
+        int64_t tf = o.at >= 0 && frames_dir.empty() ? o.at : frame_ms(n);
+        for (;;) {
+            int64_t te = next < steps.size() ? steps[next].ms : kNever;
+            int64_t tr = rep.active() ? rep.deadline() : kNever;
+            int64_t th = next_line();
+            int64_t ts = sf.deadline() >= 0 ? sf.deadline() : kNever;
+            int64_t tk = helper.deadline() >= 0 ? helper.deadline() : kNever;
+            int64_t ta = kNever;
+            for (const auto& l : later)
+                ta = std::min(ta, l.first);
+            int64_t t = std::min({te, tr, th, ts, tk, ta});
+            if (t > tf || t == kNever)
+                break;
+            now = std::max(now, t);
+            if (t == th) {
+                feed_one();
+            } else if (t == ta) {
+                std::vector<std::function<void()>> due;
+                for (size_t i = 0; i < later.size();)
+                    if (later[i].first <= now) {
+                        due.push_back(std::move(later[i].second));
+                        later.erase(later.begin() + (long)i);
+                    } else {
+                        i++;
+                    }
+                for (auto& fn : due)
+                    fn();
+            } else if (t == tk) {
+                helper.tick(now);
+            } else if (t == te) {
+                const Step& st = steps[next++];
+                PadAction a = PadAction::Up;
+                log_key(st.key + (st.down ? ".d" : ".u"));
+                if (st.key == "ret") {
+                    if (st.down && playing) {
+                        playing = false;
+                        returning = true;
+                        mark();
+                        flow.come_back(now);
+                        folded();
+                    }
+                } else if (st.key == "net") {
+                    online = !st.down;
+                    mark();
+                    sf.online_changed(now);
+                    folded();
+                } else if (action_of(st.key, a)) {
+                    Gate g = st.down ? input(a, false) : Gate::Drop;
+                    if (is_direction(a)) {
+                        if (st.down && g != Gate::Drop)
+                            rep.press(a, kFromKeys, now);
+                        else if (!st.down)
+                            rep.release(a, kFromKeys, now);
+                    }
+                } else {
+                    fprintf(stderr, "blockie-shot: --store ignores script key %s\n", st.key.c_str());
+                }
+            } else if (t == tr) {
+                PadAction a = PadAction::Up;
+                if (returning || kept) {
+                    rep.rearm(now);
+                } else if (rep.due(now, a)) {
+                    log_key(std::string(key_name(a)) + ".r");
+                    input(a, true);
+                }
+            } else {
+                mark();
+                sf.tick(now);
+                folded();
+            }
+        }
+        now = std::max(now, tf);
+        helper.tick(now);
+        mark();
+        sf.tick(now);
+        folded();
+        toast.under(frame.surface());
+        flow.frame(tf, frame.surface());
+        if (returning && !(flow.ctl.active() && flow.ctl.kind() == FoldKind::Return)) {
+            returning = false;
+            if (kept) {
+                kept = false;
+                input(kept_key, false);
+                rep.rearm(now);
+            }
+        }
+        toast.draw(fonts, ink, frame.surface(), tf);
+        if (side && tf >= o.from) {
+            if (!write_png(frame_path(frames_dir, written), frame.surface())) {
+                fprintf(stderr, "blockie-shot: cannot write %s\n", frame_path(frames_dir, written).c_str());
+                rc = 1;
+                break;
+            }
+            Screen top = nav.top();
+            std::vector<std::string> set = store_rows(flow, portp, top, tf, kind);
+            if (set != logged)
+                put_surface(set);
+            bool moving = flow.animating(tf) || (top == Screen::Port && portp.animating(tf)) || toast.animating(tf);
+            std::string focus = top == Screen::Port ? std::to_string(portp.focus())
+                                : nav.system_view   ? std::to_string(nav.sys_focus)
+                                                    : std::to_string(nav.focus);
+            bool toasting = toast.visible(tf) || (top == Screen::Port && portp.toasting(tf));
+            bool dialog = top == Screen::Port && portp.dialog_shown();
+            wrote = fprintf(side, "%d %lld %d %d 0 1 0 0 0 0 kind=%s rows=%d focus=%s pivot=- working=%s dialog=%d "
+                                  "toast=%d online=%d%s%s\n",
+                            written, (long long)tf, flow.boundary(tf), moving ? 1 : 0, kind.c_str(), sid,
+                            focus.c_str(), helper.running() ? run_cmd.c_str() : "none", dialog ? 1 : 0,
+                            toasting ? 1 : 0, online ? 1 : 0, keys.empty() ? "" : " keys=", keys.c_str()) > 0 &&
+                    wrote;
+            written++;
+        }
+        keys.clear();
+        if (o.at >= 0 && tf >= o.at)
+            break;
+        if (tf > cap) {
+            fprintf(stderr, "blockie-shot: the store frames passed the %lld ms cap\n", (long long)cap);
+            rc = 1;
+            break;
+        }
+        bool page_moving = nav.top() == Screen::Port && (portp.animating(tf) || portp.deadline(tf) >= 0);
+        bool pending = helper.running() || sf.deadline() >= 0 || toast.animating(tf) || toast.visible(tf) ||
+                       !later.empty();
+        if (next >= steps.size() && !rep.active() && !pending && !flow.animating(tf) && !page_moving && tail-- <= 0)
+            break;
+    }
+    bool ok = wrote && rc == 0;
+    if (side && fclose(side) != 0)
+        ok = false;
+    if (rows && fclose(rows) != 0)
+        ok = false;
+    if (!out.empty() && !write_png(out, frame.surface()))
+        ok = false;
+    if (!ok)
+        fprintf(stderr, "blockie-shot: store frames incomplete in %s\n", frames_dir.c_str());
+    fprintf(stderr, "blockie-shot: store s-a, %d frames\n", written);
+    return ok ? 0 : (rc ? rc : 1);
+}
+
 }
 
 int main(int argc, char** argv)
@@ -2341,6 +2997,7 @@ int main(int argc, char** argv)
     std::string pop_case;
     bool menu_top_set = false;
     PmShotOpts pm;
+    StoreShotOpts store_shot;
     if (const char* env = getenv("BLOCKIE_FONTS"))
         font_dir = env;
     for (int i = 1; i < argc; i++) {
@@ -2429,6 +3086,8 @@ int main(int argc, char** argv)
             drive.on = true;
         else if (a == "--recentn" && i + 1 < argc)
             drive.recent_n = atoi(argv[++i]);
+        else if (a == "--recentin" && i + 1 < argc)
+            drive.recent_in = atoi(argv[++i]);
         else if (a == "--sysgames" && i + 1 < argc)
             drive.sys_games = atoi(argv[++i]);
         else if (a == "--noart")
@@ -2539,6 +3198,18 @@ int main(int argc, char** argv)
             detail = true;
             focus = Pane::Details;
         }
+        else if (a == "--store")
+            store_shot.on = true;
+        else if (a == "--cap" && i + 1 < argc)
+            store_shot.cap = atoll(argv[++i]);
+        else if (a == "--art-delay" && i + 1 < argc)
+            store_shot.art_delay = std::max<int64_t>(0, atoll(argv[++i]));
+        else if (a == "--storeport" && i + 1 < argc)
+            store_shot.port = argv[++i];
+        else if (a == "--helperlines" && i + 1 < argc)
+            store_shot.helper = argv[++i];
+        else if (a == "--offline")
+            store_shot.offline = true;
         else if (out.empty())
             out = a;
         else {
@@ -2574,8 +3245,8 @@ int main(int argc, char** argv)
                 " [same options]\n"
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY|ret|cover|theme:d|u:MS|PCT%%,...]"
                 " [--at MS] [--from MS]"
-                " [--recentn N] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE] [--recenttitles FILE]"
-                " [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
+                " [--recentn N] [--recentin K] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE]"
+                " [--recenttitles FILE] [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
                 " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band|full] [--startup] [--arrive MS]"
                 " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT]"
                 " [--exit quit|crash|oom|busy|config|exec|core|audio|spawn] [--quitstamp] [--port]"
@@ -2586,6 +3257,9 @@ int main(int argc, char** argv)
                 " its stdin lines;\n"
                 "         AT line -- LINE... feeds the open --progress, AT eof ends its stdin, AT key:K[:d|:u]"
                 " with K up down left right accept back context prev next start, AT end stops the scope\n"
+                "       blockie-shot --drive --store [OUT.png] [--frames DIR] --portsdir DATA/roms/ports"
+                " [--storeport NAME] [--helperlines FILE] [--offline] [--script KEY:d|u:MS,...] [--at MS] [--from MS]"
+                " [--tail N] [--light] [--cap MS] [--art-delay MS]\n"
                 "       blockie-shot --pops FRAMES_DIR [--no-lead] [--summary FILE] [--case NAME]\n"
                 "       blockie-shot --powermenu power|reboot|confirm|pause [OUT.png] [--frames DIR] [--gates FILE]"
                 " [--pickgates FILE] [--plate home|plain|FILE.png] [--idle MS]"
@@ -2616,6 +3290,12 @@ int main(int argc, char** argv)
         fprintf(stderr, "blockie-shot: --portmsg and --drive do not mix\n");
         return 2;
     }
+    if (store_shot.on && !drive.on) {
+        fprintf(stderr, "blockie-shot: --store needs --drive\n");
+        return 2;
+    }
+    if (drive.on && store_shot.on)
+        return run_store_shot(fonts, store_shot, drive, frames_dir, out);
     if (drive.on)
         return run_drive(fonts, drive, out, frames_dir, systems, items, sys_focus, tiles_dir, recent_dir, zones);
 

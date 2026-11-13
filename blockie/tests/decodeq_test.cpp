@@ -170,6 +170,61 @@ int main()
         check(got.size() == 1 && got[0] == 111, "forget drops the queued jobs of removed ids");
         check(!q.current(110, job(110, kRecentGen).path, 0), "a removed id has no current result");
     }
+    {
+        DecodeQueue q;
+        const int64_t s = (int64_t(2) << 40) + 7, t = s + 1;
+        DecodeJob a = job(s, 3);
+        a.path = "/synthetic/blockie-test-shot-7.jpg";
+        q.set_window(3, {s});
+        q.push(a);
+        q.forget({s});
+        q.set_window(3, {t});
+        q.push(job(t, 3));
+        std::vector<int64_t> got = drain(q);
+        check(got.size() == 1 && got[0] == t, "a screenshot job forgotten while queued never reaches the decoder");
+    }
+    {
+        DecodeQueue q;
+        const int64_t s = (int64_t(2) << 40) + 7, t = s + 1;
+        DecodeJob a = job(s, 3);
+        a.path = "/synthetic/blockie-test-shot-7.jpg";
+        a.index_gen = 1;
+        DecodeJob j;
+        q.set_window(3, {s});
+        q.push(a);
+        q.pop(j);
+        q.forget({s});
+        q.set_window(3, {t});
+        q.push(job(t, 3));
+        q.done(s);
+        bool kept = q.accept(s) && q.current(s, a.path, 1);
+        check(!q.current(s, a.path, 1) && !kept,
+              "a screenshot result forgotten while in flight is not current and is dropped");
+    }
+    {
+        DecodeQueue q;
+        const int64_t s = (int64_t(2) << 40) + 7;
+        DecodeJob a = job(s, 3);
+        a.path = "/synthetic/blockie-test-shot-7.jpg";
+        a.index_gen = 1;
+        DecodeJob j;
+        q.set_window(3, {s});
+        q.push(a);
+        q.pop(j);
+        q.forget({s});
+        q.set_window(3, {});
+        DecodeJob b = a;
+        b.path = "/synthetic/blockie-test-shot-7-new.jpg";
+        b.index_gen = 2;
+        q.set_window(3, {s});
+        q.push(b);
+        q.done(s);
+        bool old_dropped = !q.current(s, a.path, 1) && !q.current(s, a.path, 2) && !q.current(s, b.path, 1);
+        q.pop(j);
+        q.done(s);
+        check(old_dropped && j.game_id == s && q.accept(s) && q.current(s, b.path, 2),
+              "a page opened again for a port drops the older path or index generation and takes the newer one");
+    }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

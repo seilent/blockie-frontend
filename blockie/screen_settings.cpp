@@ -76,12 +76,14 @@ void draw_rows(Canvas& c, Fonts& f, InkLayer& ink, const std::vector<SettingsRow
     ink.compose(c.surface(), th.ink);
 }
 
-void draw_pivots(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th)
+}
+
+void draw_page_pivots(Canvas& c, Fonts& f, InkLayer& ink, const char* word, const SettingsView& v, const Theme& th)
 {
     if (v.pivots.empty())
         return;
     Chrome ch;
-    ch.measure(f, kWord, v.pivots);
+    ch.measure(f, word, v.pivots);
     ch.set_header_part(ChromePart{0, 0, kOne, true});
     int dy = px(tok::pivotBaseline) - px(tok::page_pivotBaseline);
     for (int i = 0; i < ch.pivots(); i++)
@@ -95,17 +97,20 @@ void draw_pivots(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, cons
     ink.compose(c.surface(), th.ink);
 }
 
-}
-
 void draw_page_ground(Canvas& c, const Theme& th) { c.fill(c.surface().rect(), th.bg); }
 
-void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th)
+void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Theme& th)
 {
     Rect keep = c.clip();
-    c.set_clip(Rect{0, 0, kPortraitW, px(kHeaderBand)}.intersect(keep));
+    c.set_clip(Rect{0, 0, kPortraitW, px(band)}.intersect(keep));
     f.draw(c, role::hubHeader.style(), word, u64(tok::hubEdge), px(kHeaderBaseline), th.ink,
            alpha256(role::hubHeader.alpha));
     c.set_clip(keep);
+}
+
+void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th)
+{
+    draw_page_header(c, f, word, kHeaderBand, th);
     if (pivot && *pivot)
         f.draw(c, role::pivotActive.style(), pivot, u64(tok::hubEdge), px(kPivotBaseline), th.ink,
                alpha256(role::pivotActive.alpha));
@@ -154,6 +159,8 @@ void draw_value_sheet(Canvas& c, Fonts& f, const SheetView& s, const Theme& th)
     int shown = g.shown;
     int top = g.top;
     TextStyle ts = role::dialogTitle.style();
+    if (s.mixed)
+        ts.tcase = Case::Mixed;
     Rect panel{sr.x0, top, sr.x1, g.rows_top + shown * pitch + edge};
     c.blend(panel, th.bg_elevated, a);
 
@@ -431,7 +438,7 @@ void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, co
 {
     draw_page_ground(c, th);
     draw_page_chrome(c, f, kWord, nullptr, th);
-    draw_pivots(c, f, ink, v, th);
+    draw_page_pivots(c, f, ink, kWord, v, th);
     int64_t t = v.now - v.switch_at;
     if (v.from_pivot >= 0 && t >= 0 && t < settings_switch_ms()) {
         Rect sr = c.surface().rect();

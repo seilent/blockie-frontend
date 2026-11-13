@@ -312,6 +312,10 @@ int main()
         const fd::Game* a2 = find_game(pg2, "blockie-test-alpha");
         check(a2 && a2->id == alpha_id && a2->title == "Blockie Test Alpha Renamed",
               "a title change keeps the row and its id");
+        bool alpha_dir = false;
+        for (const auto& m : lib.meta(alpha_id))
+            alpha_dir = alpha_dir || (m.field == "port" && m.value == "blockie-test-alpha");
+        check(alpha_dir, "a port keeps its port dir from the index");
         auto rec = lib.recent_games(500);
         check(!rec.empty() && rec[0].id == alpha_id && rec[0].title == "Blockie Test Alpha Renamed",
               "a title change keeps the played mark and Recent shows the new title");
@@ -324,6 +328,15 @@ int main()
         auto ports_sys2 = lib.systems_with_games();
         check(sys_count(ports_sys2, "ports") == 2 && sys_count(ports_sys2, "gba") == 3,
               "a ports rescan leaves the other systems as they were");
+        write_file(index, "");
+        lib.rescan("ports");
+        auto ports_sys3 = lib.systems_with_games("ports");
+        bool listed = false;
+        for (const auto& sw : ports_sys3)
+            listed = listed || (sw.first.id == "ports" && sw.second == 0);
+        auto ports_sys4 = lib.systems_with_games();
+        check(listed && sys_count(ports_sys4, "ports") == 0,
+              "f2: the ports entry stays listed at 0 ports");
     }
 
     rm_rf(root);

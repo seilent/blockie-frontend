@@ -12,6 +12,7 @@
 #include <ctime>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,6 +26,7 @@
 #include <signal.h>
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -57,7 +59,10 @@
 #include "scraper.h"
 #include "screen_selector.h"
 #include "screen_settings.h"
+#include "screen_store.h"
 #include "setd_key.h"
+#include "store.h"
+#include "store_flow.h"
 #include "sysinfo.h"
 #include "theme.h"
 #include "theme_setting.h"
@@ -256,7 +261,7 @@ static int run()
         std::fprintf(stderr, "blockie-frontend: %d games\n", n);
         Scraper local(lib, data_root);
         std::fprintf(stderr, "blockie-frontend: local covers recorded %d\n", local.sweep_local(ArtType::Covers));
-        for (const auto& sw : lib.systems_with_games()) {
+        for (const auto& sw : lib.systems_with_games(kPortsSystem)) {
             model.systems.push_back({sw.first.name, sw.second, ""});
             sys_ids.push_back(sw.first.id);
             kinds.push_back(MenuKind::System);
@@ -300,6 +305,19 @@ static int run()
     Launcher::Child child;
     PortsHelper ports;
     int64_t ports_gen = 0;
+    std::string ports_dir = data_root + "/roms/" + kPortsSystem;
+    PortPage portp(fonts, glyphs);
+    StoreFlow sf(flow, portp, ports, kids);
+    bool was_online = false;
+    std::unique_ptr<Catalog> cat_fresh;
+    bool cat_reading = false, cat_again = false;
+    std::mutex cat_mutex;
+    std::thread cat_thread;
+    int cat_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    bool recent_due = false;
+    int64_t shot_id = -1;
+    std::string shot_path;
+    Art shot_art;
     int64_t child_game_id = -1;
     std::string child_core;
     LaunchFlow launch;
@@ -350,11 +368,12 @@ static int run()
         }
     };
     std::unordered_set<int64_t> failed_covers;
-    auto queue_decode = [&](int64_t id, const std::string& path, int64_t gen, int64_t index_gen) {
+    auto queue_decode = [&](int64_t id, const std::string& path, int64_t gen, int64_t index_gen,
+                            int side = kTileSide) {
         bool added;
         {
             std::lock_guard<std::mutex> lk(dmutex);
-            added = dq.push({id, path, gen, now_ms(), {kTileSide}, index_gen});
+            added = dq.push({id, path, gen, now_ms(), {side}, index_gen});
         }
         if (added)
             dcv.notify_one();
@@ -370,6 +389,14 @@ static int run()
                 return true;
             }
         return false;
+    };
+    auto store_cover = [&](int64_t id, int64_t gen) {
+        const StoreItem* it = sf.item(id);
+        if (!it || failed_covers.count(id))
+            return;
+        const std::string& path = !it->cover.empty() ? it->cover : it->shot;
+        if (!path.empty())
+            queue_decode(id, path, gen, sf.catalog.gen);
     };
     auto system_cfg = [&](const std::string& system_id) -> const SystemCfg* {
         for (const auto& sc : lib.config())
@@ -392,6 +419,10 @@ static int run()
         return it != held.end() ? it->second : Art();
     };
     auto deal_recent = [&](bool first, bool keep = false) {
+        if (flow.nav.store) {
+            recent_due = true;
+            return 0;
+        }
         std::vector<Art>& grid = home.system_view ? home.recent_hold : model.tiles;
         held.clear();
         for (size_t k = 0; k < home.recent.size() && k < grid.size(); k++)
@@ -423,13 +454,17 @@ static int run()
     };
     int recent_jobs = deal_recent(true);
     auto render_page = [&](Canvas& c, Screen sc, int64_t now) {
-        if (sc == Screen::Bluetooth)
+        if (sc == Screen::Port)
+            portp.draw(c, ink, now);
+        else if (sc == Screen::Bluetooth)
             btp.draw(c, ink, now);
         else if (sc == Screen::Settings)
             draw_settings(c, fonts, ink, settings_page.view(now), theme());
     };
     auto page_animating = [&](int64_t now) {
         if (nav.top() == Screen::Settings && settings_page.animating(now))
+            return true;
+        if (nav.top() == Screen::Port && portp.animating(now))
             return true;
         return nav.top() == Screen::Bluetooth && btp.animating(now);
     };
@@ -623,6 +658,15 @@ static int run()
         for (const HomeGame& g : home.recent)
             if (g.id == drp.game_id)
                 in_recent = true;
+        if (drp.decoded && drp.game_id >= kStoreShotBase) {
+            if (drp.game_id != shot_id)
+                return;
+            shot_art = drp.img;
+            if (nav.top() == Screen::Port)
+                portp.set_art(shot_art);
+            need_redraw = true;
+            return;
+        }
         if (drp.decoded) {
             if (drp.img) {
                 if (flow.art(drp.game_id, drp.side, home.epoch, drp.img) && !flow.ctl.active() && child.pid <= 0)
@@ -643,6 +687,8 @@ static int run()
     };
     flow.games = [&](int sys) {
         std::vector<HomeGame> list;
+        if (flow.nav.store)
+            return sf.games(sys);
         if (sys < 0 || sys >= (int)sys_ids.size())
             return list;
         for (const Game& g : lib.games(sys_ids[sys]))
@@ -656,6 +702,10 @@ static int run()
             dq.set_window(++win_gen, home.keep_set(scroll));
         }
         for (const HomeGame& hg : want) {
+            if (hg.id >= kStoreIdBase) {
+                store_cover(hg.id, win_gen);
+                continue;
+            }
             const Game& g = by_id[hg.id];
             if (!request_cover(g, win_gen))
                 enqueue_scrape(g, home.epoch, folder_of(g.system_id));
@@ -693,10 +743,14 @@ static int run()
         if (sys < 0)
             return;
         int count = 0;
-        for (const auto& sw : lib.systems_with_games())
+        for (const auto& sw : lib.systems_with_games(kPortsSystem))
             if (sw.first.id == kPortsSystem)
                 count = sw.second;
-        model.systems[(size_t)sys].games = count;
+        flow.home_model().systems[(size_t)sys].games = count;
+        if (flow.nav.store) {
+            deal_recent(false, true);
+            return;
+        }
         std::vector<int64_t> gone = flow.regame(sys, flow.games(sys));
         {
             std::lock_guard<std::mutex> lk(dmutex);
@@ -710,10 +764,118 @@ static int run()
         deal_recent(false, true);
         need_redraw = true;
     };
-    ports.on_done = [&](const std::string&) { rescan_ports(); };
+    auto online = [&]() { return wifi.state().dev_state == kNmDeviceActivated; };
+    auto want_shot = [&](const StoreItem* it) {
+        int64_t id = it ? it->id + kStoreIdBase : -1;
+        const std::string path = !it ? std::string() : !it->shot.empty() ? it->shot : it->cover;
+        if (id == shot_id && path == shot_path) {
+            if (shot_art && nav.top() == Screen::Port)
+                portp.set_art(shot_art);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            if (shot_id >= 0)
+                dq.forget({shot_id});
+            std::unordered_set<int64_t> keep =
+                nav.system_view ? home.keep_set(nav.sys_scroll) : std::unordered_set<int64_t>();
+            if (id >= 0)
+                keep.insert(id);
+            dq.set_window(win_gen, std::move(keep));
+        }
+        if (id != shot_id || path.empty()) {
+            shot_art.reset();
+            if (nav.top() == Screen::Port)
+                portp.set_art(nullptr);
+        }
+        shot_id = id;
+        shot_path = path;
+        if (id >= 0 && !path.empty())
+            queue_decode(id, path, win_gen, sf.catalog.gen, kStoreShotSide);
+    };
+    auto read_catalog_async = [&]() {
+        if (cat_evfd < 0)
+            return;
+        if (cat_reading) {
+            cat_again = true;
+            return;
+        }
+        cat_reading = true;
+        if (cat_thread.joinable())
+            cat_thread.join();
+        cat_thread = std::thread([&, path = ports_dir + kCatalogDb]() {
+            auto c = std::make_unique<Catalog>();
+            bool ok = read_catalog(path, ports_dir, *c);
+            {
+                std::lock_guard<std::mutex> lk(cat_mutex);
+                cat_fresh = ok ? std::move(c) : nullptr;
+            }
+            uint64_t one = 1;
+            ssize_t w = write(cat_evfd, &one, sizeof one);
+            (void)w;
+        });
+    };
+    auto take_catalog = [&]() {
+        uint64_t cnt;
+        while (read(cat_evfd, &cnt, sizeof cnt) == (ssize_t)sizeof cnt) {
+        }
+        if (!cat_reading)
+            return;
+        if (cat_thread.joinable())
+            cat_thread.join();
+        cat_reading = false;
+        std::unique_ptr<Catalog> fresh;
+        {
+            std::lock_guard<std::mutex> lk(cat_mutex);
+            fresh = std::move(cat_fresh);
+        }
+        for (auto it = failed_covers.begin(); it != failed_covers.end();)
+            it = *it >= kStoreIdBase ? failed_covers.erase(it) : std::next(it);
+        sf.set_catalog(fresh != nullptr, fresh ? std::move(*fresh) : Catalog{}, now_ms());
+        need_redraw = true;
+        if (cat_again) {
+            cat_again = false;
+            read_catalog_async();
+        }
+    };
+    sf.host.now = now_ms;
+    sf.host.is_ports = [&](int sys) {
+        return sys >= 0 && sys < (int)sys_ids.size() && sys_ids[(size_t)sys] == kPortsSystem;
+    };
+    sf.host.online = online;
+    sf.host.stale = [&]() {
+        struct stat sb;
+        std::string path = ports_dir + kCatalogDb;
+        return stat(path.c_str(), &sb) != 0 || time(nullptr) - sb.st_mtime > kCatalogStaleS;
+    };
+    sf.host.index = [&]() { return index_ports(lib); };
+    sf.host.rescan = rescan_ports;
+    sf.host.reread = read_catalog_async;
+    sf.host.preview_art = [&](const std::vector<HomeGame>& shown, const std::vector<HomeGame>& want) {
+        std::unordered_set<int64_t> ids;
+        for (const HomeGame& g : shown)
+            ids.insert(g.id);
+        {
+            std::lock_guard<std::mutex> lk(dmutex);
+            dq.set_recent(std::move(ids));
+        }
+        for (const HomeGame& g : want)
+            store_cover(g.id, kRecentGen);
+    };
+    sf.host.shot = want_shot;
+    sf.host.toast = [&](const std::string& l1, const std::string& l2) { toast.show(now_ms(), l1, l2, true); };
+    sf.host.closed = [&]() { recent_due = true; };
+    sf.host.redraw = [&]() { need_redraw = true; };
+    sf.attach();
+    was_online = online();
     flow.launch_game = [&](const HomeGame& g) {
         auto it = by_id.find(g.id);
-        return it == by_id.end() ? LaunchStart::Refused : try_launch(it->second);
+        if (it != by_id.end())
+            return try_launch(it->second);
+        for (const Game& x : lib.games(kPortsSystem))
+            if (x.id == g.id)
+                return try_launch(x);
+        return LaunchStart::Refused;
     };
     flow.draw_page = [&](Canvas& c, Screen sc, int64_t now) { render_page(c, sc, now); };
     flow.page_open = [&](Screen sc, int64_t now) {
@@ -745,6 +907,10 @@ static int run()
         int64_t now = now_ms();
         if (sc == Screen::Settings)
             return settings_page.action(a, rep, now);
+        if (sc == Screen::Port) {
+            need_redraw = true;
+            return sf.page_input(sc, a, rep, now);
+        }
         if (btp.action(a, rep, now) != BtPage::Act::Pop) {
             need_redraw = true;
             return false;
@@ -754,7 +920,7 @@ static int run()
         return true;
     };
     flow.rearm = [&](int64_t now) { repeat.rearm(now); };
-    flow.page_seed_y = [&](Screen s) { return s == Screen::Settings ? settings_page.focus_y() : -1; };
+    flow.page_seed_y = [&](Screen s) { return s == Screen::Settings ? settings_page.focus_y() : sf.seed_y(s); };
     flow.last_frame = [&](const Surface& s) {
         copy_surface(p.draw_target(), s);
         if (launch.phase() != LaunchPhase::Leaving)
@@ -774,6 +940,10 @@ static int run()
     };
     auto apply = [&](PadAction a, bool rep) {
         bool changed = flow.input(a, rep, now_ms());
+        if (recent_due && !flow.nav.store) {
+            recent_due = false;
+            deal_recent(false, true);
+        }
         bool started = flow.ctl.started() && flow.ctl.active();
         if (changed && !started)
             need_redraw = true;
@@ -1214,6 +1384,7 @@ static int run()
     leave_at = -1;
     volume.get();
 
+    read_catalog_async();
     while (!bench && gate_runs(p.lost(), p.closed())) {
         p.flush();
         bus.pump();
@@ -1239,13 +1410,18 @@ static int run()
                     if (nav.top() == Screen::Settings)
                         settings_page.toast(bnow, ws.note.title, ws.note.text);
                 }
+                if (online() != was_online) {
+                    was_online = online();
+                    sf.online_changed(bnow);
+                    need_redraw = true;
+                }
                 settings_dirty();
             }
             if (nav.top() == Screen::Bluetooth && btp.dirty(bnow))
                 need_redraw = true;
         }
 
-        std::array<struct pollfd, 8> fds;
+        std::array<struct pollfd, 10> fds;
         size_t nfds = 0;
         auto watch = [&](int f, short events) {
             if (nfds == fds.size()) {
@@ -1265,7 +1441,10 @@ static int run()
         int bi = bus.fd() >= 0 ? watch(bus.fd(), POLLIN | (bus.wants_write() ? POLLOUT : 0)) : -1;
         int vi = volume.fd() >= 0 ? watch(volume.fd(), POLLIN) : -1;
         int ei = watch(gf.event.fd, gf.event.events);
+        int hi = ports.fd() >= 0 ? watch(ports.fd(), POLLIN) : -1;
+        int ci = cat_evfd >= 0 ? watch(cat_evfd, POLLIN) : -1;
         int64_t pnow = now_ms();
+        ports.tick(pnow);
         int timeout = -1;
         auto until = [&](int64_t when) {
             if (when < 0)
@@ -1293,6 +1472,10 @@ static int run()
             until(battery.deadline());
         }
         until(toast.deadline(pnow));
+        until(ports.deadline());
+        until(sf.deadline());
+        int64_t port_due = nav.top() == Screen::Port ? portp.deadline(pnow) : -1;
+        until(port_due);
         until(launch.deadline());
         until(ready_report.deadline());
         timeout = gate.timeout(gate_in(pnow, timeout));
@@ -1310,6 +1493,13 @@ static int run()
             drain_event(gf.event.fd);
         if (bi >= 0 && (fds[bi].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR)))
             bus.pump();
+        if (hi >= 0 && (fds[hi].revents & (POLLIN | POLLHUP | POLLERR)))
+            ports.readable();
+        if (ci >= 0 && (fds[ci].revents & POLLIN))
+            take_catalog();
+        if (port_due >= 0 && now_ms() >= port_due)
+            need_redraw = true;
+        sf.tick(now_ms());
 
         launch_edges();
 
@@ -1411,6 +1601,10 @@ static int run()
     dcv.notify_all();
     if (scrape_thread.joinable())
         scrape_thread.join();
+    if (cat_thread.joinable())
+        cat_thread.join();
+    if (cat_evfd >= 0)
+        close(cat_evfd);
     if (decode_thread.joinable())
         decode_thread.join();
     if (work_evfd >= 0)

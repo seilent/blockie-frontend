@@ -119,19 +119,24 @@ void swap_prepare(LeftPlan& p, const Surface& a, const Surface& b)
         return;
     p.prepared = true;
     std::vector<Slot> from, to;
-    for (int k = 0; k < kGridTiles; k++)
-        from.push_back({own_rect(grid_tile_rect(k, kGridCols), p.focus_from), k / kGridCols});
-    const GridSpec& g = p.grid;
-    int top = kTileFirstTop + p.grid_y;
     Rect clip = p.band.intersect({0, kBandTop, kPortraitW, kPortraitH});
-    for (int m = (clip.y0 - top - g.side - kTileFocusBorder) / g.pitch - 1;
-         top + m * g.pitch - kTileFocusBorder < clip.y1; m++)
-        for (int c = 0; c < g.cols; c++) {
-            int x = kGridX + c * (g.side + g.gutter), y = top + m * g.pitch;
-            Rect own = own_rect({x, y, x + g.side, y + g.side}, p.focus_to).intersect(clip);
-            if (!own.empty())
-                to.push_back({own, m});
-        }
+    auto lay = [&clip](std::vector<Slot>& out, const GridSpec& g, int grid_y, Rect focus) {
+        int top = kTileFirstTop + grid_y;
+        for (int m = (clip.y0 - top - g.side - kTileFocusBorder) / g.pitch - 1;
+             top + m * g.pitch - kTileFocusBorder < clip.y1; m++)
+            for (int c = 0; c < g.cols; c++) {
+                int x = kGridX + c * (g.side + g.gutter), y = top + m * g.pitch;
+                Rect own = own_rect({x, y, x + g.side, y + g.side}, focus).intersect(clip);
+                if (!own.empty())
+                    out.push_back({own, m});
+            }
+    };
+    if (p.from_set)
+        lay(from, p.from_grid, p.from_y, p.from_focus);
+    else
+        for (int k = 0; k < kGridTiles; k++)
+            from.push_back({own_rect(grid_tile_rect(k, kGridCols), p.focus_from), k / kGridCols});
+    lay(to, p.grid, p.grid_y, p.focus_to);
     std::vector<uint8_t> kept_from(from.size(), 0), kept_to(to.size(), 0);
     for (size_t i = 0; i < from.size(); i++)
         for (size_t j = 0; j < to.size(); j++)
