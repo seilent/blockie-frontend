@@ -446,11 +446,12 @@ build_app() {
     pool "$appobj/nav.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/nav.cpp"
     pool "$appobj/decodeq.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/decodeq.cpp"
     pool "$appobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
+    pool "$appobj/engine.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/engine.cpp"
     for s in launchflow toast_strip toast_clock powermenu powermenu_draw layer_present layer_mem pm_input pm_run \
         present_layer powermenu_main portmsg portmsg_view portmsg_main; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
-    for s in homeflow home motion slide glide t9 scale bench; do
+    for s in homeflow pageform home motion slide glide t9 scale bench; do
         pool "$appobj/$s.o" "$cxx" "${gflags[@]}" $appcflags $(cpp_extra "blockie/$s.cpp") "$root/blockie/$s.cpp"
     done
     pool "$appobj/launch.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/launch.cpp"
@@ -470,8 +471,9 @@ build_app() {
         "$appobj/wifi.o" "$appobj/sysinfo.o" "$appobj/library.o" "$appobj/image.o" "$appobj/jpeg.o" "$appobj/ports.o" \
         "$appobj/store.o" "$appobj/screen_store.o" "$appobj/store_flow.o" \
         "$appobj/input_pad.o" "$appobj/repeat.o" "$appobj/nav.o" "$appobj/decodeq.o" "$appobj/launch.o" \
-        "$appobj/homeflow.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" "$appobj/glide.o" "$appobj/t9.o" \
-        "$appobj/leftmove.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
+        "$appobj/homeflow.o" "$appobj/pageform.o" "$appobj/home.o" "$appobj/motion.o" "$appobj/slide.o" \
+        "$appobj/glide.o" "$appobj/t9.o" \
+        "$appobj/leftmove.o" "$appobj/engine.o" "$appobj/launchflow.o" "$appobj/toast_strip.o" "$appobj/toast_clock.o" \
         "$appobj/powermenu_draw.o" "$appobj/layer_present.o" "$appobj/layer_mem.o" \
         "$appobj/scale.o" "$appobj/bench.o" "$appobj/scraper.o" "$appobj/wl_keys.o" "$appobj/frame_gate.o" \
         "$appobj/main.o" "$depobj/sqlite3.o" "${dobjs[@]}" $appldflags $wl_libs $xkb_libs $curl_libs $dbus_libs \
@@ -690,9 +692,16 @@ build_motion_test() {
         echo "build.sh: leftmove reads a motion.pivot token" >&2
         return 1
     fi
-    toolver=$("$cxx" --version | head -n 1)
+    deps_img
+    toolver=$("$cc" --version | head -n 1)
     local s
-    for s in core/curves.cpp gfx/canvas.cpp; do
+    for s in "${zlib_c[@]}"; do
+        pool "$depobj/zlib_$s.o" "$cc" "${cflags[@]}" $dep_harden "$zlib_dir/$s.c"
+    done
+    drain
+    ((fail)) && return 1
+    toolver=$("$cxx" --version | head -n 1)
+    for s in core/curves.cpp gfx/canvas.cpp gfx/warp.cpp gfx/kernels.cpp; do
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $appcflags "$root/$s"
     done
     pool "$testobj/fold.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/fold.cpp"
@@ -703,11 +712,12 @@ build_motion_test() {
     pool "$testobj/pagemove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/pagemove_test.cpp"
     pool "$testobj/ink_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/ink_test.cpp"
     pool "$testobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
+    pool "$testobj/engine.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/engine.cpp"
     pool "$testobj/leftmove_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/leftmove_test.cpp"
-    for s in motion glide slide home nav repeat pops t9; do
+    for s in motion glide slide home nav repeat pops t9 dumpz poselog pageform; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
-    for s in motion_test glide_test slide_test pops_test; do
+    for s in motion_test glide_test slide_test pops_test engine_test pageform_test; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/$s.cpp"
     done
     drain
@@ -720,26 +730,34 @@ build_motion_test() {
     "$cxx" "$testobj/ink.o" "$testobj/theme.o" "$testobj/ink_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags \
         -lpthread -lm -o "$out/motion/blockie-ink-test" || return 1
     "$cxx" "$testobj/motion.o" "$testobj/fold.o" "$testobj/slide.o" "$testobj/home.o" "$testobj/nav.o" \
-        "$testobj/leftmove.o" \
+        "$testobj/leftmove.o" "$testobj/engine.o" \
         "$testobj/glide.o" "$testobj/repeat.o" "$testobj/theme.o" "$testobj/t9.o" "$testobj/motion_test.o" \
-        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" "$genobj/gfx_warp.cpp.o" "$genobj/gfx_kernels.cpp.o" \
         $appldflags -lpthread -lm -o "$out/motion/blockie-motion-test" || return 1
     "$cxx" "$testobj/glide.o" "$testobj/glide_test.o" "$genobj/core_curves.cpp.o" $appldflags -lm \
         -o "$out/motion/blockie-glide-test" || return 1
     "$cxx" "$testobj/slide.o" "$testobj/fold.o" "$testobj/motion.o" "$testobj/slide_test.o" \
-        "$testobj/leftmove.o" \
-        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
-        -o "$out/motion/blockie-slide-test" || return 1
-    "$cxx" "$testobj/leftmove.o" "$testobj/slide.o" "$testobj/fold.o" "$testobj/leftmove_test.o" \
-        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
-        -o "$out/motion/blockie-leftmove-test" || return 1
+        "$testobj/leftmove.o" "$testobj/engine.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" "$genobj/gfx_warp.cpp.o" "$genobj/gfx_kernels.cpp.o" \
+        $appldflags -lpthread -lm -o "$out/motion/blockie-slide-test" || return 1
+    "$cxx" "$testobj/leftmove.o" "$testobj/engine.o" "$testobj/slide.o" "$testobj/fold.o" "$testobj/leftmove_test.o" \
+        "$testobj/dumpz.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" "$genobj/gfx_warp.cpp.o" "$genobj/gfx_kernels.cpp.o" \
+        "$depobj"/zlib_*.o $appldflags -lpthread -lm -o "$out/motion/blockie-leftmove-test" || return 1
+    "$cxx" "$testobj/engine.o" "$testobj/poselog.o" "$testobj/dumpz.o" "$testobj/engine_test.o" "$testobj/slide.o" \
+        "$testobj/leftmove.o" "$testobj/fold.o" "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" \
+        "$genobj/gfx_warp.cpp.o" "$genobj/gfx_kernels.cpp.o" "$depobj"/zlib_*.o $appldflags -lpthread -lm \
+        -o "$out/motion/blockie-engine-test" || return 1
     "$cxx" "$testobj/pops.o" "$testobj/pops_test.o" "$genobj/gfx_canvas.cpp.o" $appldflags -lpthread -lm \
         -o "$out/motion/blockie-pops-test" || return 1
+    "$cxx" "$testobj/pageform.o" "$testobj/engine.o" "$testobj/motion.o" "$testobj/theme.o" "$testobj/pageform_test.o" \
+        "$genobj/core_curves.cpp.o" "$genobj/gfx_canvas.cpp.o" "$genobj/gfx_warp.cpp.o" "$genobj/gfx_kernels.cpp.o" \
+        $appldflags -lpthread -lm -o "$out/motion/blockie-pageform-test" || return 1
     echo "build.sh: $out/motion"
     "$out/motion/blockie-fold-test" && "$out/motion/blockie-pagemove-test" && "$out/motion/blockie-ink-test" &&
         "$out/motion/blockie-motion-test" && "$out/motion/blockie-glide-test" && "$out/motion/blockie-slide-test" &&
-        "$out/motion/blockie-leftmove-test" &&
-        "$out/motion/blockie-pops-test"
+        "$out/motion/blockie-leftmove-test" && "$out/motion/blockie-engine-test" &&
+        "$out/motion/blockie-pops-test" && "$out/motion/blockie-pageform-test"
 }
 
 build_gate_test() {
@@ -923,12 +941,13 @@ build_vtext_test() {
         pool "$genobj/${s//\//_}.o" "$cxx" "${gflags[@]}" $extra $appcflags "$root/$s"
         gobjs+=("$genobj/${s//\//_}.o")
     done < <(generic_srcs)
-    for s in vtext theme t9 screen_selector screen_settings ink homeflow home motion nav glide slide pagemove fold \
-        bt_model; do
+    for s in vtext theme t9 screen_selector screen_settings ink homeflow pageform pagelog poselog dumpz home motion \
+        nav glide slide pagemove fold bt_model; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     pool "$testobj/text_wrap_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/text_wrap.cpp"
     pool "$testobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
+    pool "$testobj/engine.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/engine.cpp"
     pool "$testobj/zones_g.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/zones.cpp"
     for s in launchflow toast_strip launch repeat; do
         pool "$testobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
@@ -960,19 +979,23 @@ build_vtext_test() {
         -o "$out/vtext/blockie-selector-test.tmp" || return 1
     mv "$out/vtext/blockie-selector-test.tmp" "$out/vtext/blockie-selector-test"
     "$cxx" "${gobjs[@]}" "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/theme.o" "$testobj/zones_g.o" \
-        "$testobj/leftmove.o" "$testobj/pm_toast_clock.o" "$testobj/bt_model.o" "$testobj/settings_test.o" \
+        "$testobj/leftmove.o" "$testobj/engine.o" "$testobj/pm_toast_clock.o" "$testobj/bt_model.o" \
+        "$testobj/settings_test.o" \
         "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm -o "$out/vtext/blockie-settings-test.tmp" || return 1
     mv "$out/vtext/blockie-settings-test.tmp" "$out/vtext/blockie-settings-test"
-    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/pageform.o" "$testobj/pagelog.o" "$testobj/poselog.o" \
+        "$testobj/dumpz.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
-        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
+        "$testobj/leftmove.o" "$testobj/engine.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
         "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
         "$testobj/homeflow_test.o" "${dobjs[@]}" $appldflags $wl_libs -lpthread -lm \
         -o "$out/vtext/blockie-homeflow-test.tmp" || return 1
     mv "$out/vtext/blockie-homeflow-test.tmp" "$out/vtext/blockie-homeflow-test"
-    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/pageform.o" "$testobj/home.o" "$testobj/motion.o" \
+        "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
-        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" "$testobj/toast_strip.o" \
+        "$testobj/leftmove.o" "$testobj/engine.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
+        "$testobj/toast_strip.o" \
         "$testobj/pm_powermenu_draw.o" "$testobj/pm_layer_present.o" "$testobj/pm_layer_mem.o" \
         "$testobj/pm_toast_clock.o" "$testobj/frame_gate.o" \
         "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/zones_g.o" \
@@ -988,9 +1011,10 @@ build_vtext_test() {
     pool "$testobj/storeflow_test.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/tests/storeflow_test.cpp"
     drain
     ((fail)) && return 1
-    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/home.o" "$testobj/motion.o" "$testobj/nav.o" \
+    "$cxx" "${gobjs[@]}" "$testobj/homeflow.o" "$testobj/pageform.o" "$testobj/home.o" "$testobj/motion.o" \
+        "$testobj/nav.o" \
         "$testobj/glide.o" "$testobj/slide.o" "$testobj/pagemove.o" "$testobj/fold.o" "$testobj/t9.o" \
-        "$testobj/leftmove.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
+        "$testobj/leftmove.o" "$testobj/engine.o" "$testobj/launchflow.o" "$testobj/launch.o" "$testobj/repeat.o" \
         "$testobj/text_wrap_g.o" "$testobj/screen_selector.o" "$testobj/vtext.o" "$testobj/theme.o" \
         "$testobj/screen_settings.o" "$testobj/ink.o" "$testobj/zones_g.o" "$testobj/bt_model.o" \
         "$testobj/pm_toast_clock.o" "$testobj/sf_store_flow.o" "$testobj/sf_screen_store.o" "$testobj/sf_ports.o" \
@@ -1096,11 +1120,13 @@ build_shot() {
     pool "$shotobj/bt_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/bt_model.cpp"
     pool "$shotobj/screen_bt.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/screen_bt.cpp"
     pool "$shotobj/leftmove.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/leftmove.cpp"
+    pool "$shotobj/engine.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/engine.cpp"
     pool "$shotobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
     pool "$shotobj/jpeg.o" "$cxx" "${gflags[@]}" $jpeg_cflags $appcflags "$root/blockie/jpeg.cpp"
     pool "$shotobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
-    for s in vtext nav home homeflow motion glide t9 slide pagemove repeat pops powermenu powermenu_draw layer_present \
-        layer_mem launchflow toast_strip toast_clock launch sysinfo decodeq portmsg portmsg_view input_pad; do
+    for s in vtext nav home homeflow pageform pagelog motion glide t9 slide pagemove repeat pops powermenu \
+        powermenu_draw layer_present layer_mem launchflow toast_strip toast_clock launch sysinfo dumpz poselog \
+        decodeq portmsg portmsg_view input_pad; do
         pool "$shotobj/$s.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/$s.cpp"
     done
     for s in screen_store store_flow ports children; do
@@ -1116,11 +1142,14 @@ build_shot() {
     "$cxx" "${gobjs[@]}" "$shotobj/screen_selector.o" "$shotobj/text_wrap.o" "$shotobj/theme.o" "$shotobj/ink.o" \
         "$shotobj/screen_settings.o" "$shotobj/zones.o" "$shotobj/fold.o" "$shotobj/bt_model.o" \
         "$shotobj/screen_bt.o" "$shotobj/image.o" "$shotobj/vtext.o" "$shotobj/nav.o" "$shotobj/home.o" \
-        "$shotobj/leftmove.o" \
+        "$shotobj/leftmove.o" "$shotobj/engine.o" \
         "$shotobj/motion.o" "$shotobj/glide.o" "$shotobj/t9.o" "$shotobj/slide.o" "$shotobj/pagemove.o" \
-        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/powermenu.o" \
+        "$shotobj/repeat.o" "$shotobj/pops.o" "$shotobj/homeflow.o" "$shotobj/pageform.o" "$shotobj/pagelog.o" \
+        "$shotobj/powermenu.o" \
         "$shotobj/powermenu_draw.o" "$shotobj/layer_present.o" "$shotobj/layer_mem.o" "$shotobj/launchflow.o" \
-        "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/sysinfo.o" "$shotobj/shot.o" \
+        "$shotobj/toast_strip.o" "$shotobj/toast_clock.o" "$shotobj/launch.o" "$shotobj/sysinfo.o" "$shotobj/dumpz.o" \
+        "$shotobj/poselog.o" \
+        "$shotobj/shot.o" \
         "$shotobj/jpeg.o" "$shotobj/library.o" "$shotobj/decodeq.o" "$shotobj/portmsg.o" "$shotobj/portmsg_view.o" \
         "$shotobj/input_pad.o" "$shotobj/screen_store.o" "$shotobj/store_flow.o" "$shotobj/ports.o" \
         "$shotobj/children.o" "$shotobj/store.o" \

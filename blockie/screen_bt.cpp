@@ -334,7 +334,7 @@ void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now)
     Rect keep = c.clip();
     c.set_clip(kScreen);
     draw_page_ground(c, t);
-    draw_page_chrome(c, fonts_, "bluetooth", nullptr, t);
+    draw_page_chrome(c, fonts_, bluetooth_word(), nullptr, t);
     fx dim = visible(dialog_, now) ? dialog_.fade.at(now) : 0;
     Canvas& k = ink.begin(kScreen);
     draw_rows(k, now, kOne - dim);
@@ -348,6 +348,18 @@ void BtPage::draw(Canvas& c, InkLayer& ink, int64_t now)
     dirty_ = false;
     drawn_secs_ = bt_seconds(state_, now);
     drawn_at_ = now;
+}
+
+std::vector<Rect> BtPage::regions() const
+{
+    const ListView& l = list_;
+    Rect list{0, px(l.top()), kPortraitW, px(l.bottom())};
+    std::vector<Rect> out{{0, 0, kPortraitW, list.y0}};
+    for (int r = l.first_visible(); r <= l.last_visible() && r < rows_.count(); r++) {
+        int top = px64((pos64)l.top() + (pos64)r * l.pitch() - l.offset());
+        out.push_back(Rect{0, top, kPortraitW, top + px(l.pitch())}.intersect(list));
+    }
+    return out;
 }
 
 void BtPage::draw_rows(Canvas& k, int64_t now, fx bar_alpha)

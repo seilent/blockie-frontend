@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
@@ -52,6 +53,7 @@
 #include "launchflow.h"
 #include "library.h"
 #include "nav.h"
+#include "pagerows.h"
 #include "ports.h"
 #include "ready.h"
 #include "repeat.h"
@@ -80,6 +82,8 @@ namespace {
 using Art = std::shared_ptr<const Image>;
 
 constexpr int kThemeWaitMs = 300;
+constexpr int kPrepareRows = 16;
+constexpr int64_t kPrepareUs = 2000;
 constexpr int kBenchIdleMs = 5000;
 constexpr int kBenchPollMs = 50;
 constexpr const char* kZoneKey = "system.timezone";
@@ -102,6 +106,13 @@ int64_t now_ms()
 {
     using namespace std::chrono;
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+int64_t thread_cpu_us()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 int64_t now_us()
@@ -252,6 +263,11 @@ static int run()
         data_root.pop_back();
     Library lib;
     FlowOpts fopts;
+    fopts.lang = true;
+    const char* eenv = std::getenv("BLOCKIE_ENGINE");
+    fopts.fast = !(eenv && std::strcmp(eenv, "pixel") == 0);
+    const char* venv = std::getenv("BLOCKIE_ENGINE_VERIFY");
+    fopts.verify = venv && std::strcmp(venv, "1") == 0;
     HomeFlow flow(fonts, fopts);
     SelectorModel& model = flow.model;
     std::vector<std::string> sys_ids;
@@ -282,6 +298,16 @@ static int run()
     std::fprintf(stderr, pad_ok ? "blockie-frontend: pad fd %d\n" : "blockie-frontend: no pad\n", pad.fd());
 
     bool need_redraw = false;
+    bool posted_last = false;
+    int64_t glow_done_us = -1, landed_us = -1;
+    bool more_last = false;
+    bool drew_last = false;
+    int glide_at[2] = {};
+    uint32_t redraw_why = 0;
+    auto want_redraw = [&](char c) {
+        need_redraw = true;
+        redraw_why |= 1u << (c - 'a');
+    };
     Nav& nav = flow.nav;
     HomeState& home = flow.home;
     Repeat repeat;
@@ -347,6 +373,8 @@ static int run()
     FrameStats fstats;
     const char* fsenv = std::getenv("BLOCKIE_FRAMESTATS");
     fstats.on = fsenv && std::strcmp(fsenv, "1") == 0;
+    const char* probe_env = std::getenv("BLOCKIE_PROBE");
+    bool probe = fstats.on && probe_env && std::strcmp(probe_env, "1") == 0;
     const char* benv = std::getenv("BLOCKIE_BENCH");
     bool bench = benv && std::strcmp(benv, "grow") == 0;
 
@@ -475,25 +503,160 @@ static int run()
             exit_at = -1;
         }
     };
+    struct EngSnap {
+        eng::Instance::Times pane, page;
+        Glow::Times grid;
+        int seeds = 0, trusts = 0;
+    };
+    auto eng_snap = [&]() {
+        EngSnap s;
+        for (const eng::Instance* in : {flow.pane(), flow.page_engine()})
+            if (in) {
+                (in == flow.pane() ? s.pane : s.page) = in->times();
+                s.seeds += in->seed_frames();
+                s.trusts += in->trusted_frames();
+            }
+        s.grid = flow.glow().times;
+        return s;
+    };
+    auto eng_parts = [](const EngSnap& a, const EngSnap& b, int forward) {
+        auto ms = [](int64_t us) {
+            char t[24];
+            std::snprintf(t, sizeof t, "%.2f", us / 1000.0);
+            return std::string(t);
+        };
+        auto letters = [](uint32_t m) {
+            std::string s;
+            for (int i = 0; i < 26; i++)
+                if (m & (1u << i))
+                    s += (char)('a' + i);
+            return s.empty() ? std::string("-") : s;
+        };
+        auto d = [](int64_t x, int64_t y) { return y - x; };
+        int64_t begin = d(a.pane.begin, b.pane.begin) + d(a.page.begin, b.page.begin);
+        int64_t build = d(a.pane.build, b.pane.build) + d(a.page.build, b.page.build);
+        int64_t start = d(a.pane.start, b.pane.start) + d(a.page.start, b.page.start);
+        int64_t pass = d(a.pane.pass, b.pane.pass) + d(a.page.pass, b.page.pass);
+        bool pane_start = b.pane.starts > a.pane.starts, page_start = b.page.starts > a.page.starts;
+        bool pane_pass = b.pane.passes > a.pane.passes, page_pass = b.page.passes > a.page.passes;
+        uint32_t start_why = pane_start ? b.pane.start_why : page_start ? b.page.start_why : 0;
+        uint32_t trust_why = pane_pass ? b.pane.trust_why : page_pass ? b.page.trust_why : 0;
+        int64_t greset = d(a.grid.reset, b.grid.reset), gseed = d(a.grid.seed, b.grid.seed);
+        int64_t gframe = d(a.grid.frame, b.grid.frame);
+        std::string s = "begin " + ms(begin) + " build " + ms(build) + " start ";
+        if (pane_start || page_start)
+            s += ms(start) + (b.seeds > a.seeds ? " m" : " d:" + letters(start_why));
+        else
+            s += "- -";
+        s += " pass ";
+        if (pane_pass || page_pass)
+            s += ms(pass) + (b.trusts > a.trusts ? " t" : " u:" + letters(trust_why));
+        else
+            s += "- -";
+        s += " greset " + ms(greset) + " gseed " + ms(gseed) +
+             (b.grid.seed_marks > a.grid.seed_marks ? " m" : gseed > 0 ? " d" : " -");
+        s += " gframe " + ms(gframe) + " other ";
+        s += forward < 0 ? std::string("-") : ms(forward - (begin + build + start + pass + greset + gseed + gframe));
+        s += " l4 ";
+        s += b.grid.guard_seeds > a.grid.guard_seeds ? (b.grid.guard_pass > a.grid.guard_pass ? "p" : "f") : "-";
+        int64_t sm = d(a.pane.start_marks, b.pane.start_marks) + d(a.page.start_marks, b.page.start_marks);
+        int64_t sf = d(a.pane.start_fills, b.pane.start_fills) + d(a.page.start_fills, b.page.start_fills);
+        int64_t sb = d(a.pane.start_build, b.pane.start_build) + d(a.page.start_build, b.page.start_build);
+        bool s1 = b.pane.s1_starts > a.pane.s1_starts || b.page.s1_starts > a.page.s1_starts;
+        if (pane_start || page_start)
+            s += " sm " + ms(sm) + " sf " + ms(sf) + " sb " + ms(sb) + (s1 ? " s1 1" : " s1 0");
+        else
+            s += " sm - sf - sb - s1 -";
+        if (gseed > 0)
+            s += " sw " + letters(b.grid.seed_why) + " sp " + std::to_string(d(a.grid.seed_past, b.grid.seed_past)) +
+                 " sr " + ms(d(a.grid.seed_raster, b.grid.seed_raster)) + " sg " +
+                 ms(d(a.grid.seed_glow, b.grid.seed_glow));
+        else
+            s += " sw - sp - sr - sg -";
+        s += " gr " + ms(d(a.grid.frame_raster, b.grid.frame_raster)) + " gg " +
+             ms(d(a.grid.frame_glow, b.grid.frame_glow)) + " gb " +
+             std::to_string(b.grid.runs_builds - a.grid.runs_builds);
+        return s;
+    };
     auto frame = [&](int64_t now) -> bool {
         int64_t t0 = now_us();
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
         Surface dst = p.draw_target();
         fonts.begin_frame(-1);
+        bool timed = fstats.on;
+        int64_t u0 = timed ? now_us() : 0;
         toast.under(dst);
+        int toast_us = timed ? (int)(now_us() - u0) : 0;
         bool folding = flow.ctl.active();
+        size_t nth = fstats.work_us.size();
+        bool parts = timed && folding && fstats.kind && nth < 2;
+        EngSnap before = parts ? eng_snap() : EngSnap{};
+        int gb0 = flow.glow().times.runs_builds;
+        auto structs = [&]() {
+            return (flow.pane() ? flow.pane()->adopt_struct() : 0) +
+                   (flow.page_engine() ? flow.page_engine()->adopt_struct() : 0);
+        };
+        int st0 = structs();
+        const eng::Instance* pe = flow.page_engine();
+        int64_t sc0 = pe ? pe->times().start : 0, sw0 = pe ? pe->times().start_warm : 0;
         bool more = flow.frame(now, dst);
+        int64_t warm = pe ? pe->times().start_warm - sw0 : 0;
+        fstats.build(flow.glow().times.runs_builds - gb0);
+        std::string part = parts ? eng_parts(before, eng_snap(), flow.ctl.forward_us() - (int)warm) : std::string();
+        if (parts && nth == 0) {
+            part += std::string(" l5 ") + (structs() > st0 ? 'i' : flow.ctl.l5());
+            int64_t t_us = now_us();
+            char extra[160];
+            std::snprintf(extra, sizeof extra, " l2 %c %.0f rest %.0f", flow.glow().l2,
+                          glow_done_us < 0 ? -1.0 : (t_us - glow_done_us) / 1000.0,
+                          landed_us < 0 ? -1.0 : (t_us - landed_us) / 1000.0);
+            part += extra;
+            bool page = flow.ctl.kind() == FoldKind::Push || flow.ctl.kind() == FoldKind::Pop;
+            part += std::string(" ps ") + (page && pe ? pe->ps() : '-');
+            if (pe && pe->times().start_warm > sw0) {
+                std::snprintf(extra, sizeof extra, " start cold %.2f warm %.2f", (pe->times().start - sc0) / 1000.0,
+                              (pe->times().start_warm - sw0) / 1000.0);
+                part += extra;
+            }
+        }
         more = more || page_animating(now);
+        bool at_rest = !more;
+        int64_t d0 = timed ? now_us() : 0;
         toast.draw(fonts, ink, dst, now);
+        if (timed)
+            toast_us += (int)(now_us() - d0);
         more = more || toast.animating(now);
+        int64_t p0 = timed ? now_us() : 0;
         p.present(kScreen);
         p.flip();
+        int present_us = timed ? (int)(now_us() - p0) : 0;
         bool ok = p.posted();
+        posted_last = ok;
+        if (ok) {
+            more_last = !at_rest;
+            glide_at[0] = flow.scroll_glide().at(now);
+            glide_at[1] = flow.bar_glide().at(now);
+        }
         if (ok)
             ready_report.posted(pad_ok, p.activated());
-        if (ok && folding)
-            fstats.frame(t0, now_us());
+        if (ok && folding) {
+            fstats.frame(t0 + warm, now_us(), flow.ctl.forward_us() - (int)warm, flow.ctl.render_us(), toast_us,
+                         present_us);
+            if (parts && nth == 0) {
+                int khz = 0, cpu = sched_getcpu();
+                char path[96];
+                std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+                if (FILE* f = cpu >= 0 ? std::fopen(path, "r") : nullptr) {
+                    if (std::fscanf(f, "%d", &khz) != 1)
+                        khz = 0;
+                    std::fclose(f);
+                }
+                part += " mhz " + std::to_string(khz / 1000) + " cpu " + std::to_string(cpu);
+            }
+            if (parts)
+                fstats.part(nth, part);
+        }
         gate.posted(ok, more, now);
         if (ok && folding)
             drop_budget = true;
@@ -501,6 +664,7 @@ static int run()
         return ok;
     };
     auto black_frame = [&](int64_t now) {
+        posted_last = false;
         p.begin_frame(now, p.show_at(now));
         p.begin_full();
         Surface dst = p.draw_target();
@@ -532,12 +696,12 @@ static int run()
         if (!flow.animating(now))
             return;
         flow.land_all(now, why);
-        need_redraw = true;
+        want_redraw('o');
     };
 
     auto refuse_with = [&](const LaunchOutcome& o) {
         toast.show(now_ms(), o.line1, o.line2, nav.top() == Screen::Home);
-        need_redraw = true;
+        want_redraw('o');
         return LaunchStart::Refused;
     };
     auto refuse = [&](bool core_absent, const std::string& core) {
@@ -625,7 +789,7 @@ static int run()
                 if (!pad.is_open())
                     pad_ok = false;
             }
-            need_redraw = true;
+            want_redraw('p');
         }
     };
 
@@ -664,13 +828,13 @@ static int run()
             shot_art = drp.img;
             if (nav.top() == Screen::Port)
                 portp.set_art(shot_art);
-            need_redraw = true;
+            want_redraw('a');
             return;
         }
         if (drp.decoded) {
             if (drp.img) {
                 if (flow.art(drp.game_id, drp.side, home.epoch, drp.img) && !flow.ctl.active() && child.pid <= 0)
-                    need_redraw = true;
+                    want_redraw('a');
                 return;
             }
             failed_covers.insert(drp.game_id);
@@ -762,7 +926,7 @@ static int run()
                     if (m.type == "covers")
                         queue_decode(id, m.path, win_gen, ports_gen);
         deal_recent(false, true);
-        need_redraw = true;
+        want_redraw('l');
     };
     auto online = [&]() { return wifi.state().dev_state == kNmDeviceActivated; };
     auto want_shot = [&](const StoreItem* it) {
@@ -832,7 +996,7 @@ static int run()
         for (auto it = failed_covers.begin(); it != failed_covers.end();)
             it = *it >= kStoreIdBase ? failed_covers.erase(it) : std::next(it);
         sf.set_catalog(fresh != nullptr, fresh ? std::move(*fresh) : Catalog{}, now_ms());
-        need_redraw = true;
+        want_redraw('c');
         if (cat_again) {
             cat_again = false;
             read_catalog_async();
@@ -865,7 +1029,7 @@ static int run()
     sf.host.shot = want_shot;
     sf.host.toast = [&](const std::string& l1, const std::string& l2) { toast.show(now_ms(), l1, l2, true); };
     sf.host.closed = [&]() { recent_due = true; };
-    sf.host.redraw = [&]() { need_redraw = true; };
+    sf.host.redraw = [&]() { want_redraw('h'); };
     sf.attach();
     was_online = online();
     flow.launch_game = [&](const HomeGame& g) {
@@ -908,11 +1072,11 @@ static int run()
         if (sc == Screen::Settings)
             return settings_page.action(a, rep, now);
         if (sc == Screen::Port) {
-            need_redraw = true;
+            want_redraw('i');
             return sf.page_input(sc, a, rep, now);
         }
         if (btp.action(a, rep, now) != BtPage::Act::Pop) {
-            need_redraw = true;
+            want_redraw('b');
             return false;
         }
         bt.set_page_open(false, now);
@@ -921,21 +1085,83 @@ static int run()
     };
     flow.rearm = [&](int64_t now) { repeat.rearm(now); };
     flow.page_seed_y = [&](Screen s) { return s == Screen::Settings ? settings_page.focus_y() : sf.seed_y(s); };
+    auto settings_view = [&]() {
+        return flow.opening() ? settings_page.open_view(now_ms()) : settings_page.view(now_ms());
+    };
+    flow.page_rows = [&](Screen s) {
+        if (s == Screen::Bluetooth)
+            return bluetooth_page_rows(btp);
+        return s == Screen::Settings ? settings_page_rows(settings_view()) : std::vector<PageRow>();
+    };
+    flow.page_head = [&](Screen s) {
+        if (s == Screen::Bluetooth)
+            return bluetooth_page_head(fonts);
+        return s == Screen::Settings ? settings_page_head(fonts, settings_view()) : PageHead{};
+    };
+    flow.draw_word = [&](Canvas& c, const PageHead& h) {
+        draw_page_ground(c, theme());
+        draw_page_chrome(c, fonts, h.word.c_str(), nullptr, theme(), h.word == settings_word());
+    };
     flow.last_frame = [&](const Surface& s) {
         copy_surface(p.draw_target(), s);
         if (launch.phase() != LaunchPhase::Leaving)
             toast.under(s);
     };
     flow.ctl.can_animate = can_animate;
-    flow.ctl.clock_us = now_us;
+    if (fstats.on) {
+        flow.ctl.clock_us = now_us;
+        flow.set_clock(now_us);
+        flow.set_probe(probe);
+    }
+    int verified[6] = {};
+    int set_skips = 0, set_fails = 0, set_seen[2] = {};
+    std::string idle_said;
+    flow.ctl.target_current = [&](int64_t now) -> char {
+        if (more_last)
+            return 'e';
+        if (need_redraw)
+            return 'n';
+        if (!posted_last)
+            return 'u';
+        if (page_animating(now))
+            return 'q';
+        return 0;
+    };
     flow.ctl.landed = [&](const char* what, const char* why) {
+        landed_us = now_us();
         std::fprintf(stderr, "blockie-frontend: %s landed (%s)\n", what, why);
         if (std::strcmp(what, "expand") == 0 || std::strcmp(what, "collapse") == 0 || std::strcmp(what, "push") == 0 ||
             std::strcmp(what, "pop") == 0 || std::strcmp(what, "startup") == 0 || std::strcmp(what, "launch") == 0 ||
             std::strcmp(what, "return") == 0)
             fstats.end(why);
+        if (fopts.verify) {
+            int now_v[6] = {flow.pane() ? flow.pane()->verify_scans() : 0,
+                            flow.pane() ? flow.pane()->verify_fails() : 0,
+                            flow.page_engine() ? flow.page_engine()->verify_scans() : 0,
+                            flow.page_engine() ? flow.page_engine()->verify_fails() : 0,
+                            (flow.pane() ? flow.pane()->adopts() : 0) +
+                                (flow.page_engine() ? flow.page_engine()->adopts() : 0),
+                            (flow.pane() ? flow.pane()->adopt_fails() : 0) +
+                                (flow.page_engine() ? flow.page_engine()->adopt_fails() : 0)};
+            char tail[48] = "";
+            if (std::strcmp(what, "expand") == 0 || std::strcmp(what, "collapse") == 0) {
+                std::snprintf(tail, sizeof tail, " grid scans %d fails %d", flow.glow().verify_scans,
+                              flow.glow().verify_fails);
+            } else if (std::strcmp(what, "push") == 0 || std::strcmp(what, "pop") == 0) {
+                std::snprintf(tail, sizeof tail, " settings skips %d fails %d", set_skips - set_seen[0],
+                              set_fails - set_seen[1]);
+                set_seen[0] = set_skips;
+                set_seen[1] = set_fails;
+            }
+            std::fprintf(stderr,
+                         "blockie-frontend: engine verify %s pane scans %d fails %d page scans %d fails %d l5 %d "
+                         "fails %d%s\n",
+                         what, now_v[0] - verified[0], now_v[1] - verified[1], now_v[2] - verified[2],
+                         now_v[3] - verified[3], now_v[4] - verified[4], now_v[5] - verified[5], tail);
+            std::copy(now_v, now_v + 6, verified);
+        }
         if (std::strcmp(what, "return") == 0)
-            need_redraw = true;
+            want_redraw('o');
         launch.landed(what);
     };
     auto apply = [&](PadAction a, bool rep) {
@@ -946,11 +1172,12 @@ static int run()
         }
         bool started = flow.ctl.started() && flow.ctl.active();
         if (changed && !started)
-            need_redraw = true;
+            want_redraw('o');
         if (started) {
             if (flow.ctl.reversed())
                 fstats.end("reversed");
             fstats.begin(fold_kind_name(flow.ctl.kind()));
+            fstats.tag = flow.ctl.start_tag();
             fstats.from_us = flow.ctl.from_us();
             fstats.to(flow.ctl.to_us());
         }
@@ -961,52 +1188,64 @@ static int run()
             set_theme_light(light);
             flow.theme_changed();
         }
-        need_redraw = true;
+        want_redraw('t');
     };
     theme_set.on_value = [&](bool light) { launch.theme(light); };
     theme_set.on_fail = [&](const std::string& error, const std::string& text) {
         settings_page.set_light(theme().light);
         settings_page.refused(kThemeRow, error, text, now_ms());
-        need_redraw = true;
+        want_redraw('t');
     };
     settings_page.on_theme = [&](bool light) { theme_set.set(light, now_ms()); };
     zone_key.on_value = [&](const std::string& v) {
         settings_page.set_zone(v);
         if (nav.top() == Screen::Settings)
-            need_redraw = true;
+            want_redraw('z');
     };
     zone_key.on_fail = [&](const std::string& error, const std::string& text) {
         sync_zone();
         settings_page.refused(kZoneRow, error, text, now_ms());
         if (nav.top() == Screen::Settings)
-            need_redraw = true;
+            want_redraw('z');
     };
     zone_key.on_missing = [&]() {
         settings_page.set_zone_missing(now_ms());
         if (nav.top() == Screen::Settings)
-            need_redraw = true;
+            want_redraw('z');
     };
     settings_page.on_zone = [&](const std::string& id) { zone_key.set(id, now_ms()); };
     auto settings_dirty = [&]() {
         if (nav.top() == Screen::Settings)
-            need_redraw = true;
+            want_redraw('s');
+    };
+    auto page_pix = [&](int64_t now) {
+        Buffer b;
+        Canvas c(b.surface());
+        InkLayer scratch;
+        draw_settings(c, fonts, scratch, settings_page.view(now), theme());
+        return b.pix;
+    };
+    auto settings_set = [&](const std::function<bool()>& set) {
+        bool check = fopts.verify && nav.top() == Screen::Settings;
+        int64_t now = now_ms();
+        std::vector<Buffer::T> before = check ? page_pix(now) : std::vector<Buffer::T>();
+        if (set()) {
+            settings_dirty();
+        } else if (check) {
+            set_skips++;
+            set_fails += page_pix(now) != before;
+        }
     };
     auto sync_key = [&](const SetdKey& k) {
         SettingsRowState st;
         st.shown = k.has_value();
         st.value = k.value();
-        settings_page.set_row(k.key(), st, now_ms());
+        return settings_page.set_row(k.key(), st, now_ms());
     };
     for (auto& k : row_keys) {
         SetdKey* kp = k.get();
-        kp->on_value = [&, kp](const std::string&) {
-            sync_key(*kp);
-            settings_dirty();
-        };
-        kp->on_missing = [&, kp]() {
-            sync_key(*kp);
-            settings_dirty();
-        };
+        kp->on_value = [&, kp](const std::string&) { settings_set([&]() { return sync_key(*kp); }); };
+        kp->on_missing = [&, kp]() { settings_set([&]() { return sync_key(*kp); }); };
         kp->on_fail = [&, kp](const std::string& error, const std::string& text) {
             sync_key(*kp);
             settings_page.refused(kp->key(), error, text, now_ms());
@@ -1025,19 +1264,14 @@ static int run()
                 volume.set(vol_open.pct, vol_open.muted);
             vol_last_set = -1;
         }
-        settings_page.set_row(kVolumeRow, volume_row(true, v.pct, v.muted), now_ms());
-        settings_dirty();
+        settings_set([&]() { return settings_page.set_row(kVolumeRow, volume_row(true, v.pct, v.muted), now_ms()); });
     };
     volume.on_fail = [&]() {
         vol_restore = false;
-        settings_page.set_row(kVolumeRow, volume_row(false, 0, false), now_ms());
-        settings_dirty();
+        settings_set([&]() { return settings_page.set_row(kVolumeRow, volume_row(false, 0, false), now_ms()); });
     };
     volume.on_set = [&](bool) { volume.get(); };
-    backlight.on_blank = [&]() {
-        settings_page.close_row(kBrightnessRow, now_ms());
-        settings_dirty();
-    };
+    backlight.on_blank = [&]() { settings_set([&]() { return settings_page.close_row(kBrightnessRow, now_ms()); }); };
     backlight.on_fail = [&](const std::string& word) {
         settings_page.toast(now_ms(), settings_page.title(kBrightnessRow), word);
         settings_dirty();
@@ -1119,6 +1353,7 @@ static int run()
                      (long long)(now - launch.cover_until() + kCoverWaitMs));
         flow.come_back(now);
         fstats.begin("return");
+        fstats.tag = flow.ctl.start_tag();
         fstats.from_us = flow.ctl.from_us();
         fstats.to(flow.ctl.to_us());
     };
@@ -1149,7 +1384,7 @@ static int run()
     };
     launch.hooks.toast = [&](const std::string& line1, const std::string& line2) {
         toast.show(now_ms(), line1, line2, nav.top() == Screen::Home);
-        need_redraw = true;
+        want_redraw('o');
     };
     LaunchKeys keys(launch, repeat);
     keys.apply = [&](PadAction a, bool rep, int64_t) { apply(a, rep); };
@@ -1379,7 +1614,7 @@ static int run()
         flow.startup(now_ms());
         fstats.begin("t1");
     }
-    need_redraw = true;
+    want_redraw('o');
     key_edges.clear();
     leave_at = -1;
     volume.get();
@@ -1396,7 +1631,7 @@ static int run()
                 bt_seen = bt.serial();
                 btp.set_model(bt.state(), bnow);
                 if (nav.top() == Screen::Bluetooth)
-                    need_redraw = true;
+                    want_redraw('b');
             }
             if (sync_bt_row(settings_page, bt_sub, bt_subtitle(bt.state(), bnow), bnow))
                 settings_dirty();
@@ -1404,21 +1639,25 @@ static int run()
             if (wifi.serial() != wifi_seen) {
                 wifi_seen = wifi.serial();
                 const WifiState& ws = wifi.state();
-                settings_page.set_row(kRadioRow, radio_row(wifi_radio_shown(ws), ws.radio), bnow);
-                if (ws.note.seq != wifi_note) {
-                    wifi_note = ws.note.seq;
-                    if (nav.top() == Screen::Settings)
-                        settings_page.toast(bnow, ws.note.title, ws.note.text);
-                }
+                settings_set([&]() {
+                    bool drawn = settings_page.set_row(kRadioRow, radio_row(wifi_radio_shown(ws), ws.radio), bnow);
+                    if (ws.note.seq != wifi_note) {
+                        wifi_note = ws.note.seq;
+                        if (nav.top() == Screen::Settings) {
+                            settings_page.toast(bnow, ws.note.title, ws.note.text);
+                            drawn = true;
+                        }
+                    }
+                    return drawn;
+                });
                 if (online() != was_online) {
                     was_online = online();
                     sf.online_changed(bnow);
-                    need_redraw = true;
+                    want_redraw('n');
                 }
-                settings_dirty();
             }
             if (nav.top() == Screen::Bluetooth && btp.dirty(bnow))
-                need_redraw = true;
+                want_redraw('b');
         }
 
         std::array<struct pollfd, 10> fds;
@@ -1481,6 +1720,85 @@ static int run()
         timeout = gate.timeout(gate_in(pnow, timeout));
         if (bus.data_remains() || (!flow.ctl.active() && !pending_drops.empty() && !launch.holds()))
             timeout = 0;
+        flow.prepare_pass();
+        if (flow.prepare_owed()) {
+            int64_t prep0 = now_ms();
+            const char* why = timeout == 0                           ? "timeout"
+                              : flow.ctl.active()                    ? "fold"
+                              : animating(pnow)                      ? "animating"
+                              : need_redraw                          ? "redraw"
+                              : gate.armed()                         ? "armed"
+                              : flow.ctl.stale()                     ? "stale"
+                              : !p.activated()                       ? "inactive"
+                              : child.pid > 0                        ? "child"
+                              : launch.phase() != LaunchPhase::Idle ? "launch"
+                                                                     : nullptr;
+            int64_t first[3] = {}, worst[3] = {}, cpu_first[3] = {}, cpu_worst[3] = {}, total[3] = {}, cpu_all[3] = {};
+            int phases[3] = {};
+            while (!why && flow.prepare_owed()) {
+                int ready = poll(fds.data(), (nfds_t)nfds, 0);
+                if (ready != 0) {
+                    why = ready < 0 ? "poll" : "fd";
+                    for (size_t k = 0; ready > 0 && k < nfds; k++)
+                        if (fds[k].revents) {
+                            int ik = (int)k;
+                            why = k == 0    ? "fd display"
+                                  : k == 1  ? "fd signal"
+                                  : ik == pi ? "fd pad"
+                                  : ik == ai ? "fd art"
+                                  : ik == bi ? "fd bus"
+                                  : ik == vi ? "fd volume"
+                                  : ik == ei ? "fd event"
+                                             : "fd";
+                            break;
+                        }
+                    break;
+                }
+                int64_t s0 = now_us(), part[3] = {}, cpart[3] = {};
+                do {
+                    int64_t a0 = fstats.on ? now_us() : 0, ac = fstats.on ? thread_cpu_us() : 0;
+                    char c = flow.prepare(kPrepareRows);
+                    int k = c == 'g' ? 0 : c == 'p' ? 1 : 2;
+                    if (fstats.on) {
+                        part[k] += now_us() - a0;
+                        cpart[k] += thread_cpu_us() - ac;
+                    }
+                    if (k == 0 && !flow.glow_owed())
+                        glow_done_us = now_us();
+                } while (flow.prepare_owed() && now_us() - s0 < kPrepareUs);
+                for (int k = 0; fstats.on && k < 3; k++) {
+                    if (part[k] == 0)
+                        continue;
+                    if (phases[k]++ == 0) {
+                        first[k] = part[k];
+                        cpu_first[k] = cpart[k];
+                    }
+                    worst[k] = std::max(worst[k], part[k]);
+                    cpu_worst[k] = std::max(cpu_worst[k], cpart[k]);
+                    total[k] += part[k];
+                    cpu_all[k] += cpart[k];
+                }
+            }
+            for (int k = 0; fstats.on && k < 3; k++) {
+                if (phases[k] == 0)
+                    continue;
+                bool owed = k == 0 ? flow.glow_owed() : k == 1 ? flow.page_owed() : flow.start_owed();
+                std::fprintf(stderr,
+                             "blockie-frontend: idle prepare %s phases %d first %.2f cpu %.2f max %.2f cpu %.2f "
+                             "total %.2f cpu %.2f ms %s%s\n",
+                             k == 0 ? "glow" : k == 1 ? "page" : "start", phases[k], first[k] / 1000.0,
+                             cpu_first[k] / 1000.0, worst[k] / 1000.0, cpu_worst[k] / 1000.0, total[k] / 1000.0,
+                             cpu_all[k] / 1000.0, owed ? "stopped by " : "done", owed && why ? why : "");
+            }
+            if (fstats.on && (phases[0] > 0 || phases[1] > 0 || phases[2] > 0)) {
+                idle_said.clear();
+            } else if (fstats.on && why && idle_said != why) {
+                std::fprintf(stderr, "blockie-frontend: idle prepare blocked %s\n", why);
+                idle_said = why;
+            }
+            if (timeout > 0)
+                timeout = (int)std::max<int64_t>(0, timeout - (now_ms() - prep0));
+        }
         int pr = poll(fds.data(), (nfds_t)nfds, timeout);
         if (pr < 0) {
             if (errno == EINTR)
@@ -1498,7 +1816,7 @@ static int run()
         if (ci >= 0 && (fds[ci].revents & POLLIN))
             take_catalog();
         if (port_due >= 0 && now_ms() >= port_due)
-            need_redraw = true;
+            want_redraw('d');
         sf.tick(now_ms());
 
         launch_edges();
@@ -1520,7 +1838,7 @@ static int run()
             ready_report.shown(pad_ok, p.activated());
         ready_report.tick();
         if (ready_report.wants_frame(pad_ok, p.activated()))
-            need_redraw = true;
+            want_redraw('r');
 
         if (pi >= 0 && (fds[pi].revents & (POLLIN | POLLHUP | POLLERR))) {
             std::vector<PadEdge> edges = pad.poll_edges();
@@ -1544,10 +1862,10 @@ static int run()
 
         if (ai >= 0 && (fds[ai].revents & POLLIN)) {
             take_drops();
-            if (battery.take(battery_now)) {
-                settings_page.set_row(kBatteryRow, info_row(battery_words(battery_now)), now_ms());
-                settings_dirty();
-            }
+            if (battery.take(battery_now))
+                settings_set([&]() {
+                    return settings_page.set_row(kBatteryRow, info_row(battery_words(battery_now)), now_ms());
+                });
         }
         if (vi >= 0 && (fds[vi].revents & (POLLIN | POLLHUP | POLLERR)))
             volume.readable();
@@ -1573,11 +1891,18 @@ static int run()
         if (g.land_reason || !can_animate())
             settings_page.land();
         if (g.redraw)
-            need_redraw = true;
+            want_redraw('g');
         if (flow.ctl.active() && need_redraw) {
+            fstats.redraw(redraw_why);
             flow.redraw();
             need_redraw = false;
         }
+        if (!need_redraw)
+            redraw_why = 0;
+        if (fstats.on && drew_last && !g.draw)
+            std::fprintf(stderr, "blockie-frontend: glide rest scroll %d %d bar %d %d tails %d\n", glide_at[0],
+                         flow.scroll_glide().target(), glide_at[1], flow.bar_glide().target(), gate.tails());
+        drew_last = g.draw;
         LaunchDraw kind = launch.draw(g.draw);
         if (kind == LaunchDraw::Black)
             black_frame(fnow);

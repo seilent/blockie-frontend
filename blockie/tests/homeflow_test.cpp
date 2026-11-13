@@ -1,11 +1,17 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
+#include "../fold.h"
 #include "../homeflow.h"
+#include "../pagelog.h"
 #include "../theme.h"
 
 using namespace fd;
@@ -52,6 +58,24 @@ bool near(const Surface& a, const Surface& b, int x1)
                 if (std::abs((int)(a.at(x, y) >> sh & 0xFF) - (int)(b.at(x, y) >> sh & 0xFF)) > 1)
                     return false;
     return true;
+}
+
+bool same_rect(Rect a, Rect b) { return a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1; }
+
+bool page_lands(HomeFlow& g, Buffer& out, int64_t& t, const Surface* first)
+{
+    Buffer last, rest;
+    bool start = !first;
+    for (int n = 0; g.ctl.active() && t < 20000; n++, t += 16) {
+        g.frame(t, out.surface());
+        if (n == 0 && first)
+            start = near(out.surface(), *first, out.surface().w);
+        if (g.ctl.active())
+            copy(out.surface(), last.surface());
+    }
+    g.draw(rest.surface(), g.model, g.nav, false, g.nav.pane, kScreen);
+    return start && near(last.surface(), rest.surface(), rest.surface().w) &&
+           near(out.surface(), rest.surface(), rest.surface().w);
 }
 
 }
@@ -315,6 +339,7 @@ int main(int argc, char** argv)
         int64_t gt = settle(g, gout, 0);
         g.input(PadAction::Accept, false, gt);
         gt = settle(g, gout, gt);
+        bool planned = g.plan() != nullptr;
         g.input(PadAction::Accept, false, gt);
         bool refused = asked == 1 && !g.launched() && !g.ctl.active();
         next = LaunchStart::Cut;
@@ -328,6 +353,7 @@ int main(int argc, char** argv)
         bool leaving = g.launched() && g.ctl.active() && g.ctl.kind() == FoldKind::Launch &&
                        g.ctl.run_length() == 33 && g.boundary(gt + 16) == kPaneSplitWide &&
                        near(g.ctl.from(), press.surface(), 960);
+        bool dropped = planned && g.plan() == nullptr;
         g.frame(gt, gout.surface());
         bool frame0 = near(gout.surface(), press.surface(), 960);
         g.frame(gt + 33, gout.surface());
@@ -343,6 +369,18 @@ int main(int argc, char** argv)
         g.draw(fresh.surface(), g.model, g.nav, false, g.nav.pane, kScreen);
         check(back && !g.ctl.active() && near(gout.surface(), fresh.surface(), 960),
               "the return keeps the boundary at rest and ends on a fresh render of the system view");
+        g.input(PadAction::Back, false, tl);
+        tl = settle(g, gout, tl);
+        g.input(PadAction::Accept, false, tl);
+        tl = settle(g, gout, tl);
+        bool replanned = g.plan() != nullptr;
+        next = LaunchStart::Cut;
+        g.input(PadAction::Accept, false, tl);
+        bool cut_kept = g.launched() && !g.ctl.active() && g.plan() != nullptr;
+        g.come_back(tl);
+        bool returned = g.ctl.active() && g.ctl.kind() == FoldKind::Return && g.plan() == nullptr;
+        check(dropped && replanned && cut_kept && returned,
+              "a launch leave and a return drop the last expand's block plan, a cut launch keeps it");
     }
     {
         Nav n;
@@ -374,6 +412,8 @@ int main(int argc, char** argv)
         int64_t pt = 1000;
         g.input(PadAction::Accept, false, pt);
         bool from_home = g.nav.top() == Screen::Settings && g.page_seed() == -1;
+        bool n1 = g.ctl.active() && g.ctl.kind() == FoldKind::Push && g.page_run() == nullptr &&
+                  g.ctl.run_length() == fold_duration(fold_page(0));
         g.input(PadAction::Accept, false, pt += 2000);
         bool from_row = g.nav.top() == Screen::Bluetooth && g.page_seed() == row_y;
         g.input(PadAction::Back, false, pt += 2000);
@@ -382,6 +422,351 @@ int main(int argc, char** argv)
         bool back_home = g.nav.top() == Screen::Home && g.page_seed() == -1;
         check(from_home && from_row && back_to_row && back_home,
               "page seed: a push from settings and its pop plan the row fold at focus_y, the home keeps the menu fold");
+        check(n1, "with no language the page push runs the square fold and no page form");
+    }
+    {
+        FlowOpts ro;
+        ro.lang = true;
+        HomeFlow g(fonts, ro);
+        g.model.systems = {{"GB", 3, ""}, {"GBA", 3, ""}, {"PS1", 3, ""}};
+        g.kinds = {MenuKind::System, MenuKind::System, MenuKind::System};
+        g.games = [](int sys) {
+            std::vector<HomeGame> list;
+            for (int i = 0; i < 3; i++)
+                list.push_back({1000 * (sys + 1) + i, "blockie-test-game-" + std::to_string(i), "GB"});
+            return list;
+        };
+        g.home.load = [](const HomeGame& h) -> Art {
+            auto img = std::make_shared<Image>();
+            img->w = 2;
+            img->h = 2;
+            img->mem.assign(4, 0x203040u + (uint32_t)(h.id % 100) * 0x050301u);
+            return img;
+        };
+        Buffer rout;
+        g.last_frame = [&rout](const Surface& s) { copy(rout.surface(), s); };
+        g.setup();
+        std::vector<HomeGame> rec;
+        for (int i = 0; i < 12; i++)
+            rec.push_back({8400 + i, "blockie-test-recent-" + std::to_string(i), "GB"});
+        g.home.deal_recent(g.model, rec);
+        int64_t rt = settle(g, rout, 0);
+        int64_t fold = 567, dr = 417;
+        auto same = [](const Surface& a, const Surface& b) {
+            for (int y = 0; y < a.h; y++)
+                for (int x = 0; x < a.w; x++)
+                    if (a.at(x, y) != b.at(x, y))
+                        return false;
+            return true;
+        };
+        Buffer rest0;
+        copy(rout.surface(), rest0.surface());
+        g.input(PadAction::Left, false, rt);
+        g.frame(rt, rout.surface());
+        bool focus_in = same(rout.surface(), rest0.surface());
+        Buffer fresh;
+        g.draw(fresh.surface(), g.kept(), g.kept_nav(), true, Pane::Selector, kScreen);
+        bool kept_in = same(fresh.surface(), rest0.surface());
+        const SlidePlan* rp = g.plan();
+        bool in = g.ctl.kind() == FoldKind::Expand && g.ctl.details() && g.ctl.run_length() == fold && rp &&
+                  rp->lang_on && rp->moves.fold == fold && rp->pane_stop == dr && rp->pane_frame &&
+                  rp->pane_frame->blocks.size() == 9;
+        rt = settle(g, rout, rt);
+        g.input(PadAction::Back, false, rt);
+        g.frame(rt, rout.surface());
+        rp = g.plan();
+        bool out = g.ctl.kind() == FoldKind::Collapse && g.ctl.run_length() == fold && rp && rp->moves.fold == fold &&
+                   rp->pane_stop == dr;
+        Buffer late;
+        for (int64_t t = rt + 16; t < rt + fold; t += 16)
+            g.frame(t, rout.surface());
+        g.frame(rt + fold, rout.surface());
+        bool landing = g.ctl.active() && g.ctl.kind() == FoldKind::Collapse;
+        copy(rout.surface(), late.surface());
+        rt = settle(g, rout, rt + fold + 16);
+        bool focus_out = landing && same(late.surface(), rout.surface());
+        std::string what = "step: Recent 12 in and out run the per row pane, its end at " + std::to_string(dr) +
+                           " ms and the fold at " + std::to_string(fold) + " ms";
+        check(in && out, what.c_str());
+        check(focus_in && focus_out,
+              "step: with covers, Recent in's frame 0 equals the rest before it and Recent out's landing frame equals "
+              "the rest after it, over the whole surface: the grid keeps its menu focus strength, and the focus bar, "
+              "the focused label and the watermark leave and arrive with the pane");
+        check(kept_in, "step: an at target render of Recent in's kept state at menu focus, drawn after the input, "
+                       "equals the rest before it: the rest values come from the kept nav");
+        Buffer rest1, back_last;
+        copy(rout.surface(), rest1.surface());
+        g.input(PadAction::Left, false, rt);
+        g.frame(rt, rout.surface());
+        int64_t tb = rt + 200;
+        for (int64_t t = rt + 16; t < tb; t += 16)
+            g.frame(t, rout.surface());
+        g.input(PadAction::Back, false, tb);
+        bool reversed = g.ctl.active() && g.ctl.reversed();
+        int64_t bt = tb;
+        for (; g.ctl.active() && bt < tb + 2000; bt += 16) {
+            g.frame(bt, rout.surface());
+            if (g.ctl.active())
+                copy(rout.surface(), back_last.surface());
+        }
+        rt = settle(g, rout, bt);
+        bool back_lands = reversed && same(back_last.surface(), rest1.surface()) &&
+                          same(rout.surface(), rest1.surface());
+        check(back_lands, "step: Back 200 ms into Recent in reverses it, and its landing frame and the rest after it "
+                          "equal the rest before the input, over the whole surface");
+    }
+    {
+        std::string name = "step";
+        FlowOpts po;
+        po.lang = true;
+        HomeFlow g(fonts, po);
+        g.model.systems = {{"settings", 0, ""}};
+        g.kinds = {MenuKind::Settings};
+        int rows = 0;
+        g.draw_page = [&](Canvas& c, Screen s, int64_t) {
+            c.fill(kScreen, theme().bg);
+            uint32_t ink = s == Screen::Bluetooth ? 0x3060C0 : 0xC0C0C0;
+            for (int r = 0; r <= rows; r++)
+                c.fill({40, 120 + r * 96, 900, 180 + r * 96}, ink);
+        };
+        g.page_input = [&](Screen s, PadAction a, bool rep) {
+            if (s == Screen::Settings && a == PadAction::Accept && !rep) {
+                g.nav.stack.push_back(Screen::Bluetooth);
+                g.push(Screen::Bluetooth);
+                return false;
+            }
+            if (a == PadAction::Down && !rep)
+                rows++;
+            return a == PadAction::Back && !rep;
+        };
+        Rect settings_row{0, 98, kPortraitW, 184}, bt_row{0, 120, kPortraitW, 216};
+        g.page_rows = [&](Screen s) {
+            if (s == Screen::Settings)
+                return std::vector<PageRow>{{"settings-row0", settings_row, eng::Ink::Text}};
+            return std::vector<PageRow>{{"bluetooth-row0", bt_row, eng::Ink::Text}};
+        };
+        g.home.load = [](const HomeGame& h) -> Art {
+            auto img = std::make_shared<Image>();
+            img->w = 2;
+            img->h = 2;
+            img->mem.assign(4, 0x203040u + (uint32_t)(h.id % 100) * 0x050301u);
+            return img;
+        };
+        Buffer gout;
+        g.last_frame = [&gout](const Surface& s) { copy(gout.surface(), s); };
+        g.setup();
+        std::vector<HomeGame> rec;
+        for (int i = 0; i < 4; i++)
+            rec.push_back({8300 + i, "blockie-test-recent-" + std::to_string(i), "GBA"});
+        g.home.deal_recent(g.model, rec);
+        int64_t pt = settle(g, gout, 0);
+        Buffer home;
+        copy(gout.surface(), home.surface());
+
+        g.input(PadAction::Accept, false, pt);
+        const PageRun* run = g.page_run();
+        bool push = g.ctl.kind() == FoldKind::Push && run && !run->form.closing &&
+                    run->form.under.size() == 4 && run->form.under[1].ink == eng::Ink::Art &&
+                    run->form.over.size() == 1 && g.ctl.run_length() == form_duration(run->form);
+        Surface hs = home.surface();
+        bool pushed = page_lands(g, gout, pt, &hs);
+        check(push && pushed,
+              (name + ": home to settings runs the page form from the home at rest to the page at rest").c_str());
+        std::vector<PageRow> page{{"settings-row0", settings_row, eng::Ink::Text}};
+        std::vector<PageRow> want = home_elements(kPaneSplit, true, g.nav.focus - g.nav.menu_top);
+        for (const PageRow& e : page_elements("settings", "chrome", page))
+            want.push_back(e);
+        bool rows_ok = run && page_sid(*run) == 1 && run->rows.size() == want.size();
+        for (size_t i = 0; rows_ok && i < want.size(); i++)
+            rows_ok = run->rows[i].name == want[i].name && same_rect(run->rows[i].r, want[i].r) &&
+                      run->rows[i].ink == want[i].ink;
+        check(rows_ok,
+              (name + ": the home to settings fold is sid 1 and carries the home's rows then the page's, U's elements")
+                  .c_str());
+
+        g.input(PadAction::Accept, false, pt);
+        run = g.page_run();
+        bool text_only = run && run->form.under.size() == 1 && run->form.under[0].ink == eng::Ink::Text;
+        bool bt_rows = run && page_sid(*run) == 2 && run->rows.size() == 6 && run->rows[1].name == "settings-row0" &&
+                       run->rows[3].name == "bluetooth-header" && run->rows[4].name == "bluetooth-row0" &&
+                       same_rect(run->rows[4].r, bt_row);
+        check(bt_rows,
+              (name + ": the settings to bluetooth fold is sid 2 and carries the settings rows then the page's")
+                  .c_str());
+        g.frame(pt, gout.surface());
+        g.frame(pt + 50, gout.surface());
+        g.input(PadAction::Down, false, pt + 66);
+        bool cut = !g.ctl.active() && g.nav.top() == Screen::Bluetooth;
+        g.frame(pt + 66, gout.surface());
+        Buffer bt;
+        g.draw(bt.surface(), g.model, g.nav, false, g.nav.pane, kScreen);
+        check(text_only && cut && near(gout.surface(), bt.surface(), bt.surface().w),
+              (name + ": a key during settings to bluetooth lands it, the next frame is the page at rest").c_str());
+        pt += 100;
+        copy(gout.surface(), bt.surface());
+
+        g.input(PadAction::Back, false, pt);
+        run = g.page_run();
+        bool pop = g.ctl.kind() == FoldKind::Pop && !g.ctl.reversed() && run && run->form.closing &&
+                   g.nav.top() == Screen::Settings;
+        Surface bs = bt.surface();
+        check(pop && page_lands(g, gout, pt, &bs),
+              (name + ": back on bluetooth runs a fresh pop from the page at rest to settings at rest").c_str());
+
+        Buffer settings;
+        copy(gout.surface(), settings.surface());
+        Surface ss = settings.surface();
+        g.input(PadAction::Back, false, pt);
+        run = g.page_run();
+        bool art_pop = run && run->form.closing && run->form.under.size() == 4 &&
+                       run->form.under[1].ink == eng::Ink::Art;
+        check(art_pop && page_lands(g, gout, pt, &ss),
+              (name + ": back on settings runs a fresh pop over the art band and lands on the home at rest").c_str());
+        copy(gout.surface(), home.surface());
+        g.input(PadAction::Accept, false, pt);
+        const PageRun* fwd = g.page_run();
+        for (int64_t f = 0; f < 100; f += 16)
+            g.frame(pt + f, gout.surface());
+        g.input(PadAction::Back, false, pt + 100);
+        bool back = g.ctl.reversed() && g.ctl.kind() == FoldKind::Pop && g.page_run() == fwd && fwd &&
+                    !fwd->form.closing && g.ctl.run_length() == 100 + eng::kTailMs && g.nav.top() == Screen::Home;
+        pt += 100;
+        check(back && page_lands(g, gout, pt, nullptr) && near(gout.surface(), home.surface(), kPortraitW),
+              (name + ": back during the push reverses it in place and lands on the home at rest").c_str());
+    }
+    {
+        FlowOpts lo;
+        lo.lang = true;
+        HomeFlow g(fonts, lo);
+        g.model.systems = {{"settings", 0, ""}};
+        g.kinds = {MenuKind::Settings};
+        g.draw_page = [](Canvas& c, Screen, int64_t) { c.fill(kScreen, theme().bg); };
+        g.page_input = [&](Screen s, PadAction a, bool rep) {
+            if (s == Screen::Settings && a == PadAction::Accept && !rep) {
+                g.nav.stack.push_back(Screen::Bluetooth);
+                g.push(Screen::Bluetooth);
+                return false;
+            }
+            return a == PadAction::Back && !rep;
+        };
+        Rect bt_row{0, 120, kPortraitW, 216};
+        g.page_rows = [&](Screen s) {
+            if (s == Screen::Settings)
+                return std::vector<PageRow>{{"settings-row0", {0, 98, kPortraitW, 184}, eng::Ink::Text}};
+            return std::vector<PageRow>{{"bluetooth-row0", bt_row, eng::Ink::Text}};
+        };
+        Buffer lout;
+        g.last_frame = [&lout](const Surface& s) { copy(lout.surface(), s); };
+        g.setup();
+        const char* tmp = std::getenv("TMPDIR");
+        std::string path = std::string(tmp && *tmp ? tmp : "/tmp") + "/blockie-test-pagelog-XXXXXX";
+        int h = mkstemp(&path[0]);
+        eng::PoseLog plog;
+        bool opened = h >= 0 && plog.open(path, "");
+        if (h >= 0)
+            close(h);
+        PageLogState st;
+        int n = 0;
+        int64_t lt = settle(g, lout, 0);
+        auto run_fold = [&](PadAction a) {
+            g.input(a, false, lt);
+            for (; g.ctl.active() && lt < 20000; lt += 16, n++) {
+                g.frame(lt, lout.surface());
+                if (const PageRun* r = g.page_run())
+                    page_log(plog, st, g.ctl, *r, n, -1, lt);
+            }
+        };
+        run_fold(PadAction::Accept);
+        run_fold(PadAction::Accept);
+        run_fold(PadAction::Back);
+        Rect moved{bt_row.x0, bt_row.y0 + 96, bt_row.x1, bt_row.y1 + 96};
+        Rect first = bt_row;
+        bt_row = moved;
+        run_fold(PadAction::Accept);
+        bool closed = plog.close();
+        std::vector<std::string> lines;
+        std::ifstream in(path);
+        for (std::string line; std::getline(in, line);)
+            lines.push_back(line);
+        in.close();
+        if (h >= 0)
+            unlink(path.c_str());
+        auto words = [](const std::string& line) {
+            std::istringstream ss(line);
+            std::vector<std::string> v;
+            for (std::string w; ss >> w;)
+                v.push_back(w);
+            return v;
+        };
+        auto row_line = [](const char* name, Rect r) {
+            return "row 2 " + std::string(name) + " " + std::to_string(r.x0) + " " + std::to_string(r.y0) + " " +
+                   std::to_string(r.x1) + " " + std::to_string(r.y1) + " text";
+        };
+        int surfaces = 0;
+        std::vector<size_t> pushes;
+        for (size_t i = 0; i < lines.size(); i++) {
+            std::vector<std::string> v = words(lines[i]);
+            if (v.size() >= 2 && v[0] == "surface" && v[1] == "2")
+                surfaces++;
+            if (v.size() >= 10 && v[0] == "fold" && v[3] == "push" && v[9] == "2")
+                pushes.push_back(i);
+        }
+        auto rows_before = [&](size_t at, Rect bt) {
+            const std::vector<std::string> want = {
+                row_line("settings-chrome", {0, 0, kPortraitW, 98}),
+                row_line("settings-row0", {0, 98, kPortraitW, 184}),
+                row_line("settings-ground", {0, 184, kPortraitW, kPortraitH}),
+                row_line("bluetooth-header", {0, 0, kPortraitW, bt.y0}),
+                row_line("bluetooth-row0", bt),
+                row_line("bluetooth-ground", {0, bt.y1, kPortraitW, kPortraitH})};
+            bool ok = at >= want.size();
+            for (size_t k = 0; ok && k < want.size(); k++)
+                ok = lines[at - want.size() + k] == want[k];
+            return ok;
+        };
+        bool logged = opened && closed && surfaces == 1 && pushes.size() == 2 && rows_before(pushes[0], first) &&
+                      rows_before(pushes[1], moved);
+        check(logged, "page log: surface 2 is written once, and each settings to bluetooth fold line has its own "
+                      "rows right before it in element order, the settings chrome, row and ground then the "
+                      "bluetooth header, row and ground, the moved bluetooth row included");
+    }
+
+    {
+        FlowOpts ko;
+        ko.lang = true;
+        HomeFlow g(fonts, ko);
+        g.model.systems = {{"GBA", 12, ""}};
+        g.kinds = {MenuKind::System};
+        g.games = [](int) {
+            std::vector<HomeGame> list;
+            for (int i = 0; i < 12; i++)
+                list.push_back({8000 + i, "Synth Block Game " + std::to_string(i), "GBA"});
+            return list;
+        };
+        g.home.load = [](const HomeGame& h) -> Art {
+            auto img = std::make_shared<Image>();
+            img->w = 2;
+            img->h = 2;
+            img->mem.assign(4, 0x203040u + (uint32_t)(h.id % 100) * 0x050301u);
+            return img;
+        };
+        Buffer gout;
+        g.last_frame = [&gout](const Surface& s) { copy(gout.surface(), s); };
+        g.setup();
+        std::vector<HomeGame> rec;
+        for (int i = 0; i < 4; i++)
+            rec.push_back({8100 + i, "Synth Block Recent " + std::to_string(i), "GBA"});
+        g.home.deal_recent(g.model, rec);
+        int64_t gt = settle(g, gout, 0);
+        g.input(PadAction::Accept, false, gt);
+        const SlidePlan* fwd = g.plan();
+        bool open = fwd && fwd->left == LeftMove::Stepper && !fwd->moves.collapse && !fwd->moves.reversed;
+        for (int64_t f = 0; f < 200; f += 16)
+            g.frame(gt + f, gout.surface());
+        g.input(PadAction::Back, false, gt + 200);
+        check(open && g.ctl.reversed() && g.plan() == fwd && fwd->moves.reversed &&
+                  g.ctl.run_length() == 200 + kBlockTailMs,
+              "a reversal keeps the forward block plan as flow.plan(), marked reversed, and runs back_e + tail");
     }
 
     {
@@ -490,6 +875,79 @@ int main(int argc, char** argv)
         check(!sa.nav.store && sa.model.systems.size() == 2 && sa.model.systems[0].name == "ports" &&
                   sa.nav.focus == 0 && sa.ctl.kind() == FoldKind::Pop,
               "f2: back on the genre list restores the home with ports focused");
+    }
+
+    {
+        FlowOpts lo;
+        lo.lang = true;
+        HomeFlow ls(fonts, lo);
+        ls.model.systems = {{"ports", 3, ""}};
+        ls.kinds = {MenuKind::System};
+        ls.games = [](int) {
+            std::vector<HomeGame> list;
+            for (int i = 0; i < 3; i++)
+                list.push_back({(int64_t(1) << 40) + i, "blockie test " + std::to_string(i), "porter"});
+            return list;
+        };
+        auto port = [&ls]() {
+            ls.nav.stack.push_back(Screen::Port);
+            ls.push(Screen::Port);
+        };
+        ls.open_port = [&port](const HomeGame&) { port(); };
+        ls.port_context = [&port](int) {
+            port();
+            return true;
+        };
+        ls.store_entry = [&ls](int) {
+            SelectorModel m;
+            m.systems = {{"all", 3, "3 ports"}};
+            m.section_label = "all";
+            ls.enter_store(m);
+            return true;
+        };
+        Buffer lb;
+        ls.last_frame = [&lb](const Surface& s) { copy(lb.surface(), s); };
+        ls.ctl.can_animate = []() { return true; };
+        ls.setup();
+        auto flip = [&ls](FoldKind k) { return ls.ctl.active() && ls.ctl.kind() == k && !ls.page_run(); };
+        auto t5 = [&ls](FoldKind k) {
+            const SlidePlan* p = ls.plan();
+            return ls.ctl.active() && ls.ctl.kind() == k && p && p->left == LeftMove::T5 && !p->lang_on;
+        };
+        int64_t t = 0;
+        ls.frame(t, lb.surface());
+        ls.input(PadAction::Accept, false, t);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Context, false, t);
+        bool home_push = flip(FoldKind::Push) && ls.nav.top() == Screen::Port && !ls.page_owed();
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Back, false, t);
+        bool home_pop = flip(FoldKind::Pop);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Back, false, t);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Context, false, t);
+        bool in = flip(FoldKind::Push) && ls.nav.store;
+        t = settle(ls, lb, t);
+        bool idle = !ls.glow_owed() && !ls.page_owed();
+        ls.input(PadAction::Accept, false, t);
+        bool enter = t5(FoldKind::Expand);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Accept, false, t);
+        bool push = flip(FoldKind::Push) && ls.nav.top() == Screen::Port;
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Back, false, t);
+        bool pop = flip(FoldKind::Pop);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Back, false, t);
+        bool shut = t5(FoldKind::Collapse);
+        settle(ls, lb, t);
+        check(home_push && home_pop,
+              "with a language the port page pushes and pops on the square fold from the home's ports grid");
+        check(in && push && pop,
+              "with a language the store opens and its port page pushes and pops on the square fold");
+        check(enter && shut, "with a language the store's genre grid opens and closes on T5");
+        check(idle, "with a language the store owes no glow or page engine prepare");
     }
 
     for (int big = 0; big < 2; big++) {
@@ -623,6 +1081,20 @@ int main(int argc, char** argv)
             check(whole, name.c_str());
         }
     set_theme_light(false);
+    {
+        auto owed = [&](bool lang, bool big) {
+            FlowOpts go;
+            go.lang = lang;
+            go.big = big;
+            HomeFlow g(fonts, go);
+            g.model.systems = {{"GB", 3, ""}};
+            g.kinds = {MenuKind::System};
+            g.setup();
+            return g.glow_owed();
+        };
+        check(owed(true, false) && !owed(false, false) && !owed(true, true),
+              "the grid glow is owed an idle prepare at home only with a language and not in large mode");
+    }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;

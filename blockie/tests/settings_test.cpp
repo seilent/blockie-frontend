@@ -861,6 +861,60 @@ int main(int argc, char** argv)
     }
     {
         Kinds k;
+        InkLayer ink;
+        auto page = [&]() {
+            Buffer b;
+            Canvas c(b.surface());
+            draw_settings(c, fonts, ink, k.p.view(k.t), theme_dark());
+            return b.pix;
+        };
+        bool equal = true;
+        auto reply = [&](const char* pivot, auto call) {
+            k.go(pivot);
+            auto before = page();
+            bool drawn = call();
+            equal = equal && (drawn || page() == before);
+            return drawn;
+        };
+        auto vol = [&](bool ok, int pct) { return k.p.set_row(kVolumeRow, volume_row(ok, pct, false), k.t); };
+        auto bat = [&](const char* words) { return k.p.set_row(kBatteryRow, info_row(words), k.t); };
+        auto radio = [&](bool on) { return k.p.set_row(kRadioRow, radio_row(true, on), k.t); };
+        auto key = [&]() { return k.p.set_row("power.screen_off", row_state("300"), k.t); };
+        k.p.set_row(kBrightnessRow, row_state("40"), k.t);
+        vol(true, 35);
+        bat("62 % charging");
+        radio(true);
+        bool volume =
+            !reply("sound", [&]() { return vol(true, 35); }) && reply("sound", [&]() { return vol(true, 40); });
+        bool failed = reply("sound", [&]() { return vol(false, 0); }) &&
+                      !reply("sound", [&]() { return vol(false, 0); }) &&
+                      reply("sound", [&]() { return vol(true, 40); });
+        bool battery = !reply("power", [&]() { return bat("62 % charging"); }) &&
+                       reply("power", [&]() { return bat("63 % charging"); });
+        bool wifi =
+            !reply("network", [&]() { return radio(true); }) && reply("network", [&]() { return radio(false); });
+        bool fetch = reply("power", key) && !reply("power", key);
+        auto gone = [&]() { return k.p.set_row("power.screen_off", SettingsRowState{}, k.t); };
+        bool missing = reply("power", gone) && !reply("power", gone);
+        auto store = [&](const char* words) {
+            return k.p.set_row(kStorageRow, info_row("free", {{"data", words}}), k.t);
+        };
+        store("82 of 106 gb free");
+        bool lines = !reply("system", [&]() { return store("82 of 106 gb free"); }) &&
+                     reply("system", [&]() { return store("81 of 106 gb free"); });
+        bool shut = !reply("display", [&]() { return k.p.close_row(kBrightnessRow, k.t); });
+        k.go("display");
+        k.act(PadAction::Down);
+        k.act(PadAction::Accept);
+        shut = shut && k.v().sheet.open && k.p.close_row(kBrightnessRow, k.t) && !k.v().sheet.open;
+        check(volume && failed && battery && wifi && fetch && missing && lines && shut && equal,
+              "redraw gate: set_row and close_row report a drawn change on every reply path (the volume reply and its "
+              "failure, the battery row, the Wi-Fi radio row, a first key fetch, the key going missing, a row whose "
+              "lines change, close_row with and without an open sheet), and whenever one returns false the page "
+              "renders byte equal to the render before the call");
+    }
+    {
+        Kinds k;
         k.p.set_row("test.sheet", row_state("5"), k.t);
         int64_t t0 = k.t;
         k.p.action(PadAction::Next, false, t0);
@@ -1057,6 +1111,38 @@ int main(int argc, char** argv)
         check(pushes.size() == 1 && pushes[0] == kBluetoothRow && std::string(p.pivot()) == "network" &&
                   after.focus == 1 && after.rows.size() == 2 && after.rows[1].title == "bluetooth",
               "accept on the bluetooth row asks for the push and keeps network with the row focused for the pop");
+    }
+
+    {
+        std::vector<Rect> rs = settings_regions(3);
+        bool bands = rs.size() == 5 && rs[0].y0 == 0 && rs[1].y0 < rs[1].y1;
+        for (int r = 0; bands && r < 3; r++) {
+            const Rect& b = rs[(size_t)r + 2];
+            bands = b.x0 == 0 && b.x1 == kPortraitW && b.y0 == settings_row_y(r) && b.y1 == settings_row_y(r + 1);
+        }
+        check(bands, "settings regions: the header, the pivot strip and one full width band a row at the row pitch");
+    }
+
+    {
+        Rig r;
+        r.p.set_zone("Asia/Tokyo");
+        r.p.set_row(kBrightnessRow, row_state("40"), r.t);
+        r.act(PadAction::Down);
+        bool off0 = r.v().pivot == 0 && r.v().focus == 1 && r.v().rows.size() == 2;
+        r.act(PadAction::Next);
+        SettingsView cur = r.p.view(r.t), ov = r.p.open_view(r.t);
+        r.p.reset(false);
+        SettingsView rv = r.p.view(r.t);
+        bool same = ov.pivot == rv.pivot && ov.focus == rv.focus && ov.pivots.size() == rv.pivots.size() &&
+                    ov.rows.size() == rv.rows.size();
+        for (size_t i = 0; same && i < ov.pivots.size(); i++)
+            same = std::string(ov.pivots[i]) == rv.pivots[i];
+        for (size_t i = 0; same && i < ov.rows.size(); i++)
+            same = ov.rows[i].title == rv.rows[i].title && ov.rows[i].kind == rv.rows[i].kind;
+        check(off0 && cur.pivot == 1 && cur.rows[0].title == "time zone" && ov.focus == 0 && ov.rows.size() == 2 &&
+                  same,
+              "open_view on the system pivot, display left on its second row, equals the view after reset: its "
+              "pivots, pivot 0, row 0 and pivot 0's two rows, the input to the page rows and the page head");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

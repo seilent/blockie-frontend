@@ -40,6 +40,7 @@ struct SelectorModel {
     std::vector<Art> tiles;
     std::string section_label;
     bool header_dim = false;
+    bool menu_lit = false;
     int tile_focus = -1;
     std::string game_system;
     std::string game_title;

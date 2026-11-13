@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "../frame_gate.h"
+#include "../framestats.h"
 
 using namespace fd;
 
@@ -108,6 +109,36 @@ int main()
         check(a.report_done && !a.draw && !b.report_done,
               "G1 ready() with claim() false (no buffer free) still reports the armed frame done once, and draws "
               "nothing");
+    }
+    {
+        FrameGate g;
+        g.posted(true, true, 0);
+        int t = g.timeout(idle_in(10));
+        GateStep a = g.step(idle_in(17));
+        g.posted(true, false, 17);
+        GateStep b = g.step(idle_in(34));
+        check(t == 0 && a.draw && a.tail && !b.draw && !b.tail && g.tails() == 1,
+              "tail: a posted motion frame draws one landing frame when nothing animates, then rests");
+    }
+    {
+        FrameGate g;
+        g.posted(true, true, 0);
+        GateStep a = g.step(idle_in(17));
+        g.posted(false, false, 17);
+        GateStep b = g.step(idle_in(34));
+        g.posted(true, false, 34);
+        GateStep c = g.step(idle_in(51));
+        check(a.draw && a.tail && b.draw && b.tail && !c.draw && g.tails() == 2,
+              "tail: a landing frame that did not post keeps the tail and draws again");
+    }
+    {
+        FrameGate g;
+        g.posted(true, true, 0);
+        GateIn kid = idle_in(17);
+        kid.child = true;
+        GateStep a = g.step(kid);
+        GateStep b = g.step(idle_in(34));
+        check(!a.draw && b.draw && b.tail, "tail: held while a child runs, drawn once it ends");
     }
     {
         FrameGate g;
@@ -321,6 +352,50 @@ int main()
         g.posted(true, false, 0);
         GateStep s = g.step(out_in(500));
         check(!s.land_reason && !s.redraw && g.timeout(out_in(500)) == -1, "G12 an idle post arms no watchdog");
+    }
+
+    {
+        FrameStats fs;
+        fs.on = true;
+        fs.begin("expand");
+        for (int n = 0; n < 40; n++) {
+            int64_t t0 = (int64_t)n * 16000, work = n == 39 ? 12000 : n == 38 ? 11000 : 8000;
+            int64_t engine = n == 39 ? 9000 : 6000;
+            fs.frame(t0, t0 + work, (int)engine, n == 39 ? 2500 : n == 0 ? 1200 : 0, n == 38 ? 300 : 100, 900);
+        }
+        std::string a = fs.line("end");
+        FrameStats sh;
+        sh.on = true;
+        sh.begin("reversed");
+        for (int n = 0; n < 19; n++)
+            sh.frame(n * 16000, n * 16000 + (n == 7 ? 12000 : 8000), 5000);
+        sh.redraw(1u << ('s' - 'a'));
+        sh.redraw(1u << ('b' - 'a'));
+        sh.build(2);
+        sh.build(1);
+        sh.tag = "rest";
+        sh.part(0, "begin 0.25 build 0.02 start 0.40 m pass 3.10 u:ik");
+        sh.part(1, "begin 0.00 build 0.00 start - - pass 2.00 t");
+        sh.part(2, "never");
+        std::string b = sh.line("end");
+        check(a.find("frames 40 work p95 8.0 max 12.0") != std::string::npos &&
+                  a.find("ms engine p95 6.0 max 9.0 rest p95 2.0 max 5.0 ms") != std::string::npos &&
+                  b.find("frames 19 work p95 12.0 max 12.0") != std::string::npos &&
+                  b.find("rest p95 7.0 max 7.0 ms") != std::string::npos &&
+                  a.find("rest p95 2.0 max 5.0 ms render p95 0.0 max 2.5 toast p95 0.1 max 0.3 present p95 0.9 max 0.9 "
+                         "ms") != std::string::npos &&
+                  b.find("render p95 0.0 max 0.0 toast p95 0.0 max 0.0 present p95 0.0 max 0.0 ms redraws 2 why bs") !=
+                      std::string::npos &&
+                  a.find("ms redraws 0 why - tag -") != std::string::npos &&
+                  b.find("why bs tag rest p0 begin 0.25 build 0.02 start 0.40 m pass 3.10 u:ik p1 begin 0.00 build "
+                         "0.00 start - - pass 2.00 t") != std::string::npos &&
+                  b.find("never") == std::string::npos && b.find(" builds 3") != std::string::npos &&
+                  a.find(" builds 0") != std::string::npos,
+              "framestats: per window the engine time (the fold's advance and forward) p95 and max beside work, the "
+              "rest (work minus the engine time per frame) p95 and max, and inside the rest the renders in "
+              "MotionCtl::frame, the toast and the present, the mid fold redraws with their reasons as letters, the "
+              "fold's start tag and frame 0's and frame 1's engine parts; 40 frames let two frames sit above p95, 19 "
+              "make p95 the max");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);

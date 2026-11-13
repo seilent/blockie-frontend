@@ -260,6 +260,7 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         return;
     }
     bool on = focus_pane == Pane::Selector;
+    bool lit = on || model.menu_lit;
 
     c.fill(c.surface().rect(), th.bg);
     if (scatter)
@@ -302,7 +303,7 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
     TextStyle sub_style = role::homeSubtitle.style();
     int slot_lo = kFirstBaseline - kPitch / 2;
     int slot_hi = kFirstBaseline + (kMenuVisibleRows - 1) * kPitch + kPitch / 2;
-    int focus_item = on ? model.focus : -1;
+    int focus_item = lit ? model.focus : -1;
     for (int i = 0; i < (int)model.systems.size(); i++) {
         MenuPose ps = pose_of(model, i);
         int slot = kFirstBaseline + i * kPitch - model.menu_top_px;
@@ -311,7 +312,7 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         int baseline = slot;
         int label_alpha =
             alpha256(i == focus_item ? role::homeItem.alpha : tok::type_homeItem_alphaDim) * ps.a256 >> 8;
-        if (on && i < (int)model.label_a256.size())
+        if (lit && i < (int)model.label_a256.size())
             label_alpha = model.label_a256[i] * ps.a256 >> 8;
         fonts.draw(c, role::homeItem.style(), model.systems[i].name.c_str(), x64(kLabelX + ps.dx), baseline, th.ink,
                    label_alpha);
@@ -332,14 +333,14 @@ void draw_selector(Canvas& c, Fonts& fonts, const SelectorModel& model, Pane foc
         }
     }
 
-    if (on && model.bar_baseline != kBarAtFocus && model.bar_baseline > slot_lo && model.bar_baseline < slot_hi) {
+    if (lit && model.bar_baseline != kBarAtFocus && model.bar_baseline > slot_lo && model.bar_baseline < slot_hi) {
         int dx = pose_of(model, model.focus).dx;
         int top = model.bar_baseline - kFocusBarTopInset;
         c.blend({kFocusBarX + dx, top, kFocusBarX + dx + kFocusBarWidth, top + kFocusBarHeight}, th.focus,
                 model.bar_a256);
     }
 
-    int watermark_alpha = on ? alpha256(role::watermark.alpha) : 0;
+    int watermark_alpha = lit ? alpha256(role::watermark.alpha) : 0;
     fonts.draw(c, role::watermark.style(), kWatermarkWord, x64(kWatermarkX), kWatermarkBaseline, th.ink,
                watermark_alpha);
 }

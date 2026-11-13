@@ -157,6 +157,23 @@ void MotionCtl::input(int64_t now, const std::function<InputResult()>& nav)
     land("input");
 }
 
+void MotionCtl::adopt_check(bool after, bool moving, int64_t now)
+{
+    char why = '-';
+    if (after)
+        why = 'k';
+    else if (stale_)
+        why = 's';
+    else if (moving)
+        why = 'm';
+    else if (redraw_pending && redraw_pending())
+        why = 'r';
+    else if (target_current)
+        why = target_current(now);
+    from_target_ = why == 0;
+    l5_ = why == 0 ? 'a' : why;
+}
+
 void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
 {
     started_ = true;
@@ -178,12 +195,17 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
         if (inverse(kind_, k) && opens(kind_) && !reversed_ && play_.forward) {
             std::swap(from_, to_);
             back_e_ = now - t0_;
+            if (play_.clamp_back)
+                back_e_ = std::min(back_e_, play_.duration - play_.tail);
             t0_ = now;
             reversed_ = true;
             kind_ = k;
             end_shown_ = false;
             part_ = Rect{};
             from_us_ = -1;
+            start_tag_ = "reversed";
+            from_target_ = false;
+            l5_ = 'v';
             if (settle)
                 settle();
             render_to();
@@ -200,8 +222,11 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
     fold_ = true;
     end_shown_ = false;
     copied_ = false;
+    from_target_ = false;
+    l5_ = '-';
     prev_t_ = -1;
     part_ = Rect{};
+    start_tag_ = "-";
     if (!play_.forward) {
         to_dirty_ = true;
         return;
@@ -209,21 +234,36 @@ void MotionCtl::start(FoldKind k, FoldPlay play, int64_t now)
     int64_t c0 = clock_us ? clock_us() : 0;
     if (k == FoldKind::Launch) {
         copied_ = last != nullptr;
-        if (copied_)
+        if (copied_) {
             last(from_.surface());
+            start_tag_ = "rest";
+        }
     } else if (k != FoldKind::Return && (opens(k) || after)) {
         copied_ = !after && !moving && !stale_ && !play_.details && last && !(redraw_pending && redraw_pending());
-        if (copied_)
+        if (!play_.details && last)
+            adopt_check(after, moving, now);
+        else if (play_.details)
+            l5_ = after ? 'k' : 'd';
+        if (copied_) {
             last(from_.surface());
-        else if (render_kept)
+            start_tag_ = "rest";
+        } else if (render_kept) {
             render_kept(from_.surface());
+            start_tag_ = after ? "after" : "kept";
+        } else if (after) {
+            start_tag_ = "after";
+        }
     } else if (k != FoldKind::Return && last) {
+        adopt_check(false, moving, now);
         last(from_.surface());
+        start_tag_ = "rest";
     }
     from_us_ = clock_us ? (int)(clock_us() - c0) : -1;
     if (settle)
         settle();
     render_to();
+    if (begun)
+        begun();
 }
 
 bool MotionCtl::reverse(int64_t now)
@@ -250,20 +290,33 @@ bool MotionCtl::frame(int64_t now, const Surface& dst)
         finish(now);
     }
     damage_ = dst.rect();
+    forward_us_ = -1;
+    render_us_ = clock_us ? 0 : -1;
+    auto timed = [&](auto f) {
+        int64_t r0 = clock_us ? clock_us() : 0;
+        f();
+        if (clock_us)
+            render_us_ += (int)(clock_us() - r0);
+    };
     if (fold_ && play_.forward) {
         if (to_dirty_)
-            render_to();
+            timed([&]() { render_to(); });
         Surface f = from_.surface();
         Surface t = to_.surface();
         bool fw = forward_dir();
         int64_t ft = forward_time(now);
+        int64_t c0 = clock_us ? clock_us() : 0;
+        if (play_.advance)
+            play_.advance(t0_, now);
         damage_ = play_.forward(fw ? f : t, fw ? t : f, dst, ft, prev_t_);
+        if (clock_us)
+            forward_us_ = (int)(clock_us() - c0);
         prev_t_ = ft;
         if (now - t0_ >= run_length())
             end_shown_ = true;
     } else {
         if (render)
-            render(dst, dst.rect());
+            timed([&]() { render(dst, dst.rect()); });
         stale_ = false;
         prev_t_ = -1;
     }

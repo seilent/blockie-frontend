@@ -140,6 +140,8 @@ public:
     bool redraw = false;
     Want want = Want::None;
     std::shared_ptr<SlidePlan> plan;
+    int64_t tail = 0;
+    int advances = 0;
 
     Host(int recent_n, int games, bool settings)
     {
@@ -280,6 +282,8 @@ public:
         p.details = details;
         p.to_bound = Rect{0, 0, kPaneSplitWide, kPortraitH};
         p.duration = slide_duration(*pl);
+        p.tail = tail;
+        p.advance = [this](int64_t, int64_t) { advances++; };
         SlideText text = title;
         p.prepare = [pl](const Surface& a, const Surface& b) {
             slide_prepare(*pl, a, b);
@@ -576,6 +580,43 @@ int main()
               "the reversal ends on a fresh render of the menu");
         check(equal(before.surface(), out.surface()),
               "a reversed system enter: the last composed frame equals the landed frame, no label jump");
+    }
+
+    {
+        Host h(8, 12, false);
+        h.tail = 150;
+        h.press(PadAction::Accept, 0);
+        int frames = 0;
+        for (int n = 0; frame_ms(n) < 320; n++, frames++)
+            h.frame(frame_ms(n), out);
+        Buffer ref;
+        bool reads = h.ctl.compose_at(100, ref.surface()) && h.ctl.compose_end(ref.surface());
+        check(reads && frames > 0 && h.advances == frames,
+              "advance runs once per MotionCtl::frame, never from compose_at or compose_end");
+        h.press(PadAction::Back, 320);
+        check(h.ctl.reversed() && h.ctl.back_e() == 320 && h.ctl.run_length() == 320 + 150,
+              "a reversal of a fold with a 150 ms tail runs back_e + tail");
+        for (int64_t t = 320; t <= 720; t += 16)
+            h.frame(t, out);
+        Buffer rest = h.render_now(true, Pane::Selector);
+        h.press(PadAction::Accept, 730);
+        check(h.saw("collapse:input") && !h.saw("collapse:end") && h.ctl.kind() == FoldKind::Expand &&
+                  !h.ctl.reversed() && equal(h.ctl.from(), rest.surface()),
+              "rule 3: an enter in a reversal's tail lands it, the enter starts from the collapsed rest");
+    }
+
+    {
+        Host h(8, 12, false);
+        h.tail = 150;
+        h.press(PadAction::Accept, 0);
+        for (int n = 0; frame_ms(n) < 320; n++)
+            h.frame(frame_ms(n), out);
+        h.press(PadAction::Back, 320);
+        for (int64_t t = 320; t <= 720; t += 16)
+            h.frame(t, out);
+        h.press(PadAction::Down, 730);
+        check(h.saw("collapse:input") && !h.saw("collapse:end") && !h.ctl.active() && h.nav.focus == 1,
+              "rule 4: a menu move in a reversal's tail lands it first");
     }
 
     {
@@ -1017,6 +1058,92 @@ int main()
               "a fold started during a return lands it and starts fresh, a return has no inverse");
     }
 
+    {
+        auto run = [](bool clamp, int64_t& back, int64_t& next) {
+            MotionCtl c;
+            c.render = [](const Surface&, Rect) {};
+            FoldPlay p;
+            p.duration = 400;
+            p.tail = 150;
+            p.clamp_back = clamp;
+            p.forward = [](const Surface&, const Surface&, const Surface& dst, int64_t, int64_t) { return dst.rect(); };
+            c.start(FoldKind::Expand, p, 1000);
+            c.start(FoldKind::Collapse, p, 1350);
+            back = c.back_e();
+            next = c.reversed() ? c.forward_time(1367) : -1;
+        };
+        int64_t back = 0, next = 0, back_p2 = 0, next_p2 = 0;
+        run(true, back, next);
+        run(false, back_p2, next_p2);
+        check(back == 250 && next >= 0 && next < 250 && back_p2 == 350,
+              "motion: Back 100 ms into a language fold's tail reverses on the next frame; without a language back_e "
+              "stays unclamped");
+    }
+    {
+        MotionCtl ctl;
+        int64_t clock = 0;
+        ctl.clock_us = [&clock]() { return clock; };
+        FoldPlay p;
+        p.duration = 100;
+        p.advance = [&clock](int64_t, int64_t) { clock += 1000; };
+        p.forward = [&clock](const Surface&, const Surface&, const Surface& dst, int64_t, int64_t) {
+            clock += 3000;
+            return dst.rect();
+        };
+        int renders = 0;
+        ctl.render = [&clock, &renders](const Surface&, Rect) {
+            clock += 2000;
+            renders++;
+        };
+        Buffer out;
+        ctl.frame(0, out.surface());
+        int idle = ctl.forward_us();
+        ctl.start(FoldKind::Expand, std::move(p), 0);
+        clock += 500;
+        ctl.dirty();
+        int before = renders;
+        ctl.frame(17, out.surface());
+        bool mid = renders == before + 1 && ctl.forward_us() == 4000 && ctl.render_us() == 2000;
+        ctl.frame(117, out.surface());
+        bool shown = ctl.active() && ctl.render_us() == 0;
+        ctl.frame(134, out.surface());
+        bool landed = !ctl.active() && ctl.forward_us() == -1 && ctl.render_us() == 2000;
+        check(idle == -1 && mid && shown && landed,
+              "motion: forward_us() times the fold's advance and forward in the frame, not the to side render a dirty "
+              "fold redraws in the same frame, and is -1 on a frame with no fold; render_us() times that render and "
+              "the full render of the frame a fold lands on");
+    }
+    {
+        auto play = []() {
+            FoldPlay p;
+            p.duration = 100;
+            p.forward = [](const Surface&, const Surface&, const Surface& dst, int64_t, int64_t) { return dst.rect(); };
+            return p;
+        };
+        MotionCtl none, rest, kept, after;
+        rest.last = [](const Surface&) {};
+        kept.render_kept = [](const Surface&) {};
+        after.last = [](const Surface&) {};
+        after.render_kept = [](const Surface&) {};
+        none.start(FoldKind::Expand, play(), 0);
+        rest.start(FoldKind::Expand, play(), 0);
+        kept.start(FoldKind::Expand, play(), 0);
+        after.start(FoldKind::Expand, play(), 0);
+        Buffer out;
+        after.frame(17, out.surface());
+        after.start(FoldKind::Push, play(), 20);
+        rest.frame(17, out.surface());
+        rest.start(FoldKind::Collapse, play(), 20);
+        check(std::string(none.start_tag()) == "-" && std::string(rest.start_tag()) == "reversed" &&
+                  std::string(kept.start_tag()) == "kept" && std::string(after.start_tag()) == "after",
+              "motion: start_tag() names how a fold's from side was made: kept when render_kept drew it, after when a "
+              "fold starts on a running one, reversed for a rule 2 reversal, - when neither ran");
+        MotionCtl copy;
+        copy.last = [](const Surface&) {};
+        copy.start(FoldKind::Expand, play(), 0);
+        check(std::string(copy.start_tag()) == "rest", "motion: a fold from rest whose from side is copied from the "
+                                                       "last frame is tagged rest");
+    }
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
     return g_fail == 0 ? 0 : 1;
 }

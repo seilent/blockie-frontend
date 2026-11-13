@@ -1,6 +1,7 @@
 #include "homeflow.h"
 
 #include <algorithm>
+#include <cassert>
 #include <unordered_set>
 #include <utility>
 
@@ -12,6 +13,25 @@
 
 namespace fd {
 
+namespace {
+
+bool has_art(const Art& a) { return a && a->w > 0 && a->h > 0; }
+
+bool same_rect(Rect a, Rect b) { return a.x0 == b.x0 && a.y0 == b.y0 && a.x1 == b.x1 && a.y1 == b.y1; }
+
+int bar_rest(const Nav& n, bool slot)
+{
+    return kMenuFirstBaseline + (slot ? n.focus - n.menu_top : n.focus) * kMenuPitchPx;
+}
+
+int label_rest(const Nav& n, int i)
+{
+    bool lit = n.pane == Pane::Selector && i == n.focus;
+    return alpha256(lit ? role::homeItem.alpha : tok::type_homeItem_alphaDim);
+}
+
+}
+
 void HomeFlow::setup()
 {
     nav.cols = o_.big ? kBigCols : kGridColsWide;
@@ -22,7 +42,16 @@ void HomeFlow::setup()
     home.rows = o_.big ? kBigRows : Nav::kRows;
     home.pad_rows = o_.grid_band ? 2 : 0;
     home.recent_cap = kGridColsWide * Nav::kRows;
-    ctl.render = [this](const Surface& s, Rect bound) { draw(s, model, nav, false, fold_focus(nav), bound); };
+    glow_->seg = o_.fast;
+    glow_->verify = o_.verify;
+    glow_->dry = o_.dry;
+    ctl.render = [this](const Surface& s, Rect bound) {
+        if (ctl.active() && pane_.pane)
+            pane_.pane->invalidate();
+        if (ctl.active() && page_eng_)
+            page_eng_->invalidate();
+        draw(s, model, nav, false, fold_focus(nav), bound);
+    };
     ctl.render_kept = [this](const Surface& s) {
         draw(s, kept_, kept_focus(), true, fold_focus(kept_nav_), s.rect());
     };
@@ -34,7 +63,30 @@ void HomeFlow::setup()
         kept_ = model;
         kept_nav_ = nav;
     };
-    ctl.settle = [this]() { sync(true); };
+    ctl.begun = [this]() {
+        bool l5 = ctl.from_target() && !ctl.reversed();
+        bool page = ctl.kind() == FoldKind::Push || ctl.kind() == FoldKind::Pop;
+        int src = ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Push ? 0 : 1;
+        if (pane_.pane) {
+            pane_.pane->adopt_source(src);
+            pane_.pane->adopt_start(l5 && !page);
+        }
+        if (page_eng_) {
+            page_eng_->adopt_source(src);
+            page_eng_->adopt_start(l5 && page && page_run_);
+        }
+    };
+    ctl.settle = [this]() {
+        if (!ctl.reversed() && next_plan_)
+            plan_ = next_plan_;
+        if (!ctl.reversed())
+            page_run_ = next_run_;
+        next_plan_.reset();
+        next_run_.reset();
+        if (plan_)
+            plan_->moves.reversed = ctl.reversed();
+        sync(true);
+    };
     ctl.redraw_pending = [this]() { return redraw_; };
     ctl.add({"scroll", [this](int64_t t) { return scroll_.running(t); }, [this]() { scroll_.land(); }});
     ctl.add({"bar", [this](int64_t t) { return bar_.running(t); }, [this]() { bar_.land(); }});
@@ -51,6 +103,14 @@ void HomeFlow::setup()
                      g.land();
              }});
     ctl.add({"t9", [this](int64_t t) { return t9_.running(t); }, [this]() { t9_.land(); }});
+    if (o_.lang && !page_eng_) {
+        page_eng_ = std::make_unique<eng::Instance>(kScreen);
+        page_eng_->clock_us = clock_;
+        page_eng_->set_segments(o_.fast);
+        page_eng_->trust_dst(o_.fast);
+        page_eng_->set_verify(o_.verify);
+        page_eng_->keep_cover(false);
+    }
     sync(true);
 }
 
@@ -67,6 +127,8 @@ void HomeFlow::startup(int64_t now)
 void HomeFlow::come_back(int64_t now)
 {
     now_ = now;
+    plan_.reset();
+    next_plan_.reset();
     FoldPlay p;
     p.duration = return_ms();
     p.forward = [](const Surface&, const Surface& b, const Surface& dst, int64_t t, int64_t) {
@@ -87,6 +149,7 @@ bool HomeFlow::launch_back(int64_t now)
 
 bool HomeFlow::input(PadAction a, bool rep, int64_t now)
 {
+    seed_fresh_ = false;
     now_ = now;
     launched_ = false;
     want_ = Want::None;
@@ -105,6 +168,7 @@ bool HomeFlow::input(PadAction a, bool rep, int64_t now)
 
 bool HomeFlow::frame(int64_t now, const Surface& dst)
 {
+    seed_fresh_ = false;
     now_ = now;
     bool more = ctl.frame(now, dst);
     if (!ctl.active() || ctl.kind() == FoldKind::Startup || ctl.kind() == FoldKind::Return) {
@@ -113,6 +177,7 @@ bool HomeFlow::frame(int64_t now, const Surface& dst)
         drawn_focus_ = nav.system_view ? nav.sys_focus - home.first : nav.tile_focus;
     }
     redraw_ = false;
+    last_dst_ = dst;
     return more;
 }
 
@@ -123,6 +188,10 @@ bool HomeFlow::art(int64_t id, int side, int64_t epoch, const Art& img)
     if (!home.drop(model, id, side, epoch, img))
         return false;
     redraw_ = true;
+    if (plan_ && ctl.active())
+        for (Block& bk : plan_->moves.blocks)
+            if (bk.id == id && bk.wide == expanded)
+                bk.art = has_art(img);
     for (int k = 0; k < (int)model.tiles.size(); k++)
         if (k >= (int)before.size() || model.tiles[k] != before[k]) {
             Rect r = tile_slot_rect(posed(model, nav, false, fold_focus(nav)), k, expanded);
@@ -205,6 +274,83 @@ std::vector<HomeGame> HomeFlow::recent_changed(const std::vector<HomeGame>& list
     return want;
 }
 
+void HomeFlow::set_clock(std::function<int64_t()> c)
+{
+    clock_ = std::move(c);
+    glow_->clock_us = clock_;
+    if (pane_.pane)
+        pane_.pane->clock_us = clock_;
+    if (page_eng_)
+        page_eng_->clock_us = clock_;
+}
+
+void HomeFlow::set_probe(bool on)
+{
+    if (page_eng_)
+        page_eng_->set_probe(on);
+}
+
+Rect HomeFlow::band() const { return o_.grid_band ? Rect{0, kBandTop, kPaneSplitWide, kBandBottom} : kScreen; }
+
+bool HomeFlow::glow_owed() const
+{
+    Rect gr = glow_rect_of(band());
+    return o_.lang && !o_.big && nav.top() == Screen::Home && !nav.store &&
+           !(glow_->prep_fresh && glow_->gen == glow_gen_ + 1 && glow_->prep_w == gr.x1 - gr.x0 &&
+             glow_->prep_h == gr.y1 - gr.y0);
+}
+
+char HomeFlow::prepare(int rows)
+{
+    assert(!ctl.active());
+    if (glow_owed()) {
+        glow_prepare(*glow_, glow_gen_ + 1, glow_rect_of(band()), rows);
+        return 'g';
+    }
+    if (page_owed()) {
+        page_eng_->prepare(rows);
+        return 'p';
+    }
+    if (start_owed()) {
+        if (page_eng_->start_ready())
+            page_eng_->drop_start();
+        else
+            page_eng_->prepare_start(last_dst_, seed_start_, seed_src_, seed_ground_, last_dst_.w, rows);
+        return 's';
+    }
+    return 0;
+}
+
+void HomeFlow::seed_in()
+{
+    if (seed_fresh_)
+        return;
+    opening_ = true;
+    PageForm f = page_form(Screen::Home, Screen::Settings, true);
+    opening_ = false;
+    seed_start_ = page_frame(f, 0);
+    Surface words[2] = {word_band(f.under_head), word_band(f.over_head)};
+    seed_src_ = page_sources(ctl.from(), ctl.to(), words);
+    seed_ground_ = LiveF::pack(theme().bg);
+    seed_fresh_ = true;
+}
+
+bool HomeFlow::start_owed()
+{
+    if (!page_eng_ || !o_.fast || ctl.active() || nav.top() != Screen::Home || nav.pane != Pane::Selector ||
+        menu_kind(nav.focus) != MenuKind::Settings || !last_dst_.px ||
+        (ctl.target_current && ctl.target_current(now_)))
+        return false;
+    if (page_eng_->start_busy() && !page_eng_->start_ready())
+        return true;
+    if (!page_eng_->start_ready() && !page_eng_->prepared())
+        return false;
+    seed_in();
+    if (page_eng_->start_ready())
+        return page_eng_->start_key(last_dst_, seed_start_, seed_src_, seed_ground_, last_dst_.w) != 0;
+    return true;
+}
+
 void HomeFlow::redraw()
 {
     redraw_ = true;
@@ -219,6 +365,12 @@ Nav HomeFlow::kept_focus() const
     if (ctl.details())
         k.tile_focus = nav.tile_focus;
     return k;
+}
+
+const PageRun* HomeFlow::page_run() const
+{
+    bool page = ctl.active() && (ctl.kind() == FoldKind::Push || ctl.kind() == FoldKind::Pop);
+    return page ? page_run_.get() : nullptr;
 }
 
 int HomeFlow::boundary(int64_t t) const
@@ -253,18 +405,24 @@ SelectorModel HomeFlow::posed(const SelectorModel& base, const Nav& n, bool at_t
     m.t9_edge = o_.t9_edge;
     m.slots = n.system_view ? SlotMap::RowMajor : o_.slots;
     m.grid_band = o_.grid_band;
-    m.menu_top_px = at_target ? scroll_.target() : scroll_.at(t);
-    int bar = at_target ? bar_.target() : bar_.at(t);
+    bool rest = at_target && !n.store;
+    m.menu_top_px = rest ? n.menu_top * kMenuPitchPx : at_target ? scroll_.target() : scroll_.at(t);
+    int bar = rest ? bar_rest(n, o_.bar_slot) : at_target ? bar_.target() : bar_.at(t);
     m.bar_baseline = o_.bar_slot ? bar : bar - m.menu_top_px;
+    m.menu_lit = o_.lang && !o_.big && focus == Pane::Details && n.pane == Pane::Selector;
     m.label_a256.clear();
-    if (focus == Pane::Selector) {
+    if (focus == Pane::Selector || m.menu_lit) {
         m.label_a256.assign(m.systems.size(), 256);
-        for (size_t i = 0; i < m.systems.size() && i < labels_.size(); i++)
-            m.label_a256[i] = at_target ? labels_[i].target() : labels_[i].at(t);
+        for (size_t i = 0; i < m.systems.size(); i++) {
+            if (rest)
+                m.label_a256[i] = label_rest(n, (int)i);
+            else if (i < labels_.size())
+                m.label_a256[i] = at_target ? labels_[i].target() : labels_[i].at(t);
+        }
     }
     if (n.system_view) {
         m.tile_focus = n.sys_focus - home.first;
-        int gy = at_target ? grid_.target() : grid_.at(t);
+        int gy = rest ? n.sys_scroll * spec().pitch : at_target ? grid_.target() : grid_.at(t);
         m.grid_y_px = grid_y_px(home.first, gy);
     } else {
         m.tile_focus = focus == Pane::Details ? n.tile_focus : -1;
@@ -342,7 +500,9 @@ void HomeFlow::show_recent(int k)
 FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open)
 {
     Rect head = header_rect(fonts_, collapsed);
-    auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, o_.left, head));
+    bool store = open ? nav.store : kept_nav_.store;
+    bool lang = o_.lang && !o_.big && !store;
+    auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, lang ? LeftMove::Stepper : LeftMove::T5, head));
     const Nav& wn = open ? nav : kept_nav_;
     SelectorModel wide = posed(open ? model : kept_, wn, true, Pane::Details);
     if (!open)
@@ -353,16 +513,70 @@ FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& col
         wide.grid_y_px = grid_y_px(first, gy);
     }
     LeftPlan& lp = plan->moves;
+    lp.shared = glow_;
     lp.grid = spec();
     lp.grid_y = wide.grid_y_px;
-    lp.band = o_.grid_band ? Rect{0, kBandTop, kPaneSplitWide, kBandBottom} : kScreen;
+    lp.band = band();
     lp.focus_from = details ? tile_slot_rect(collapsed, nav.tile_focus, false) : Rect{};
     lp.focus_to = tile_slot_rect(wide, wide.tile_focus, true);
     lp.collapse = !open;
-    plan_ = plan;
+    if (lang) {
+        lp.gen = ++glow_gen_;
+        lp.redeal = details;
+        lp.focus_ink = theme().focus;
+        int first = open ? home.first : drawn_first_;
+        auto id_of = [&](bool wide, int k) -> int64_t {
+            const std::vector<HomeGame>& list = wide && wn.system_view ? home.sysgames : home.recent;
+            int i = wide && wn.system_view ? first + k : k;
+            return i >= 0 && i < (int)list.size() ? list[i].id : 0;
+        };
+        for (int k = 0; k < (int)collapsed.tiles.size() && k < kGridTiles; k++) {
+            Block bk;
+            bk.id = id_of(false, k);
+            bk.game = k;
+            bk.col = k % kGridCols;
+            bk.row = k / kGridCols;
+            bk.cell = grid_tile_rect(k, kGridCols);
+            bk.art = has_art(collapsed.tiles[k]);
+            bk.focus = !lp.focus_from.empty() && same_rect(bk.cell.grow(kTileFocusBorder), lp.focus_from);
+            lp.blocks.push_back(bk);
+        }
+        for (int k = 0; k < (int)wide.tiles.size(); k++) {
+            int s = slot_of(k, kGridColsWide, wide.slots);
+            if (s < 0)
+                continue;
+            Rect r = grid_tile_rect(s, kGridColsWide);
+            r.y0 += wide.grid_y_px;
+            r.y1 += wide.grid_y_px;
+            if (r.grow(kTileFocusBorder).intersect(lp.band).empty())
+                continue;
+            Block bk;
+            bk.id = id_of(true, k);
+            bk.game = k;
+            bk.wide = true;
+            bk.col = s % kGridColsWide;
+            bk.row = s / kGridColsWide;
+            bk.cell = r;
+            bk.art = has_art(wide.tiles[k]);
+            bk.focus = !lp.focus_to.empty() && same_rect(r.grow(kTileFocusBorder), lp.focus_to);
+            lp.blocks.push_back(bk);
+        }
+        block_rows(lp);
+        lp.glow_on = true;
+        if (!pane_.pane) {
+            pane_ = pane_surface();
+            pane_.pane->clock_us = clock_;
+            pane_.pane->set_segments(o_.fast);
+            pane_.pane->trust_dst(o_.fast);
+            pane_.pane->set_verify(o_.verify);
+        }
+        slide_lang(*plan, pane_);
+    }
+    next_plan_ = plan;
     FoldPlay p;
     p.details = details;
-    p.to_bound = Rect{0, 0, kPaneSplitWide, kPortraitH};
+    p.to_bound = lang ? kScreen : Rect{0, 0, kPaneSplitWide, kPortraitH};
+    p.clamp_back = lang;
     p.duration = slide_duration(*plan);
     auto tm = std::make_shared<const SelectorModel>(em);
     Fonts* f = &fonts_;
@@ -376,6 +590,10 @@ FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& col
         slide_prepare(*plan, a, b);
         return slide_duration(*plan);
     };
+    if (lang) {
+        p.tail = kBlockTailMs;
+        p.advance = [plan](int64_t t0, int64_t now) { slide_advance(*plan, t0, now); };
+    }
     p.forward = [plan, text](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t prev) {
         return slide_compose(a, b, dst, *plan, t, prev, theme().bg, text);
     };
@@ -389,10 +607,78 @@ Screen page_under(const Nav& n, bool push)
     return n.stack.size() >= 2 ? n.stack[n.stack.size() - 2] : Screen::Home;
 }
 
-FoldPlay HomeFlow::page_play(Screen base)
+PageForm HomeFlow::page_form(Screen base, Screen over, bool push) const
+{
+    PageForm f;
+    f.closing = !push;
+    int split = nav.pane == Pane::Details ? kPaneSplitWide : kPaneSplit;
+    f.under = page_inks(base == Screen::Home ? page_art(split, o_.grid_band) : Rect{});
+    f.over = page_inks(Rect{});
+    auto elements_of = [&](Screen s) {
+        if (s == Screen::Home)
+            return home_elements(split, o_.grid_band, nav.focus - nav.menu_top);
+        std::vector<PageRow> rows = page_rows ? page_rows(s) : std::vector<PageRow>();
+        if (s == Screen::Settings)
+            return page_elements("settings", "chrome", rows);
+        return page_elements(s == Screen::Bluetooth ? "bluetooth" : "page", "header", rows);
+    };
+    f.under_els = elements_of(base);
+    f.over_els = elements_of(over);
+    if (page_head) {
+        bool under = f.closing;
+        Screen s = under ? base : over;
+        PageHead h = s == Screen::Home ? PageHead{} : page_head(s);
+        if (!h.layer || draw_word) {
+            PageHead& set = under ? f.under_head : f.over_head;
+            set = h;
+            set.rank = tab_ranks(f, set);
+        }
+    }
+    return f;
+}
+
+Surface HomeFlow::word_band(const PageHead& h)
+{
+    if (!h.layer || h.letters.empty() || !draw_word)
+        return Surface{};
+    bool light = theme().light;
+    for (const std::unique_ptr<WordBand>& w : words_)
+        if (w->word == h.word && w->light == light)
+            return w->band.surface();
+    words_.push_back(std::make_unique<WordBand>());
+    WordBand& w = *words_.back();
+    w.word = h.word;
+    w.light = light;
+    Canvas c(w.band.surface());
+    draw_word(c, h);
+    return w.band.surface();
+}
+
+FoldPlay HomeFlow::page_play(Screen base, bool push)
 {
     plan_.reset();
+    next_plan_.reset();
+    next_run_.reset();
     page_seed_ = (base != Screen::Home || nav.system_view) && page_seed_y ? page_seed_y(base) : -1;
+    Screen over = push ? nav.top() : popped_;
+    if (o_.lang && base != Screen::Port && over != Screen::Port) {
+        auto run = std::make_shared<PageRun>();
+        run->form = page_form(base, over, push);
+        run->words[0] = word_band(run->form.under_head);
+        run->words[1] = word_band(run->form.over_head);
+        run->in = page_eng_.get();
+        run->pair = base == Screen::Home ? 0 : 1;
+        run->rows = run->form.under_els;
+        run->rows.insert(run->rows.end(), run->form.over_els.begin(), run->form.over_els.end());
+        bool under = false;
+        if (head_side(run->form, under)) {
+            const PageHead& h = form_head(run->form);
+            run->rows.insert(run->rows.end(), h.letters.begin(), h.letters.end());
+            run->rows.insert(run->rows.end(), h.tabs.begin(), h.tabs.end());
+        }
+        next_run_ = run;
+        return page_fold(run);
+    }
     FoldPlan plan = page_seed_ >= 0 ? fold_page_row(page_seed_) : fold_page(nav.focus - nav.menu_top);
     FoldPlay p;
     p.duration = fold_duration(plan);
@@ -406,6 +692,9 @@ FoldPlay HomeFlow::page_play(Screen base)
 
 FoldPlay HomeFlow::launch_play()
 {
+    plan_.reset();
+    next_plan_.reset();
+    next_run_.reset();
     int64_t dur = launch_leave_ms(theme().light);
     FoldPlay p;
     p.duration = dur;
@@ -420,6 +709,8 @@ FoldPlay HomeFlow::launch_play()
 FoldPlay HomeFlow::swap_play()
 {
     plan_.reset();
+    next_plan_.reset();
+    next_run_.reset();
     bool wide = nav.system_view;
     int x_end = wide ? kPaneSplitWide : kPaneLeftEdge;
     auto plan = std::make_shared<LeftPlan>();
@@ -519,10 +810,10 @@ void HomeFlow::start_wanted()
         ctl.start(FoldKind::Collapse, expand_play(turned(kept_, kept_nav_), model, true, false), now_);
         break;
     case Want::Push:
-        ctl.start(FoldKind::Push, page_play(page_under(nav, true)), now_);
+        ctl.start(FoldKind::Push, page_play(page_under(nav, true), true), now_);
         break;
     case Want::Pop:
-        ctl.start(FoldKind::Pop, page_play(page_under(nav, false)), now_);
+        ctl.start(FoldKind::Pop, page_play(page_under(nav, false), false), now_);
         break;
     case Want::Leave:
         ctl.start(FoldKind::Launch, launch_play(), now_);
@@ -533,6 +824,8 @@ void HomeFlow::start_wanted()
     case Want::StoreIn:
     case Want::StoreOut: {
         plan_.reset();
+        next_plan_.reset();
+        next_run_.reset();
         page_seed_ = -1;
         auto shared = std::make_shared<const FoldPlan>(fold_page(store_slot_));
         FoldPlay p;
@@ -569,15 +862,10 @@ void HomeFlow::sync(bool instant)
             g.to(target, t, dur, c);
     };
     go(scroll_, nav.menu_top * kMenuPitchPx, fx_round(tok::motion_scroll), Curve::EaseIn, true);
-    int slot = o_.bar_slot ? nav.focus - nav.menu_top : nav.focus;
-    go(bar_, kMenuFirstBaseline + slot * kMenuPitchPx, fx_round(tok::motion_focusCursor), Curve::Sine,
-       o_.menu_glide);
+    go(bar_, bar_rest(nav, o_.bar_slot), fx_round(tok::motion_focusCursor), Curve::Sine, o_.menu_glide);
     labels_.resize(model.systems.size());
-    for (size_t i = 0; i < labels_.size(); i++) {
-        bool lit = nav.pane == Pane::Selector && (int)i == nav.focus;
-        go(labels_[i], alpha256(lit ? role::homeItem.alpha : tok::type_homeItem_alphaDim),
-           fx_round(tok::motion_focusAlpha), Curve::Linear, o_.menu_glide);
-    }
+    for (size_t i = 0; i < labels_.size(); i++)
+        go(labels_[i], label_rest(nav, (int)i), fx_round(tok::motion_focusAlpha), Curve::Linear, o_.menu_glide);
     int gy = nav.system_view ? nav.sys_scroll * spec().pitch : 0;
     if (o_.grid_band && !instant)
         grid_.to(gy, t, fx_round(tok::motion_scroll), Curve::EaseIn);
@@ -713,8 +1001,9 @@ void HomeFlow::push(Screen s)
     want_ = Want::Push;
 }
 
-void HomeFlow::pop(Screen)
+void HomeFlow::pop(Screen s)
 {
+    popped_ = s;
     if (rearm)
         rearm(now_);
     want_ = Want::Pop;

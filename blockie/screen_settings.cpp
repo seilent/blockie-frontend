@@ -108,15 +108,92 @@ void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Them
     c.set_clip(keep);
 }
 
-void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th)
+void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th, bool clipped)
 {
-    draw_page_header(c, f, word, kHeaderBand, th);
+    draw_page_header(c, f, word, clipped ? tok::pivotTop : kHeaderBand, th);
     if (pivot && *pivot)
         f.draw(c, role::pivotActive.style(), pivot, u64(tok::hubEdge), px(kPivotBaseline), th.ink,
                alpha256(role::pivotActive.alpha));
 }
 
+const char* settings_word() { return kWord; }
+
+namespace {
+
+std::vector<Rect> tile_cuts(std::vector<std::pair<int, int>> inks, int y0, int y1)
+{
+    std::sort(inks.begin(), inks.end());
+    std::vector<std::pair<int, int>> runs;
+    for (const std::pair<int, int>& k : inks) {
+        if (k.second <= 0 || k.first >= kPortraitW)
+            continue;
+        if (!runs.empty() && k.first <= runs.back().second)
+            runs.back().second = std::max(runs.back().second, k.second);
+        else
+            runs.push_back(k);
+    }
+    std::vector<Rect> out;
+    int x = 0;
+    for (size_t i = 0; i < runs.size(); i++) {
+        int x1 = i + 1 < runs.size() ? (runs[i].second + runs[i + 1].first) / 2 : kPortraitW;
+        out.push_back({x, y0, x1, y1});
+        x = x1;
+    }
+    return out;
+}
+
+}
+
+std::vector<Rect> page_letter_cuts(Fonts& f, const char* word)
+{
+    TextStyle st = role::hubHeader.style();
+    int x0 = u64(tok::hubEdge);
+    std::string s = word;
+    std::vector<std::pair<int, int>> inks;
+    for (size_t i = 0; i < s.size();) {
+        size_t j = i + 1;
+        while (j < s.size() && ((unsigned char)s[j] & 0xC0) == 0x80)
+            j++;
+        std::string glyph = s.substr(i, j - i);
+        int pen = x0 + f.width64(st, s.substr(0, j).c_str()) - f.width64(st, glyph.c_str()), l = 0, r = 0;
+        f.ink64(st, glyph.c_str(), l, r);
+        int p = (pen + 32) >> 6;
+        if (r > l)
+            inks.push_back({p + (l >> 6), p + ((r + 63) >> 6)});
+        i = j;
+    }
+    return tile_cuts(inks, 0, px(kHeaderBand));
+}
+
+std::vector<Rect> settings_tab_cuts(Fonts& f, const SettingsView& v)
+{
+    if (v.pivots.empty())
+        return {};
+    Chrome ch;
+    ch.measure(f, kWord, v.pivots);
+    ch.set_active(v.pivot);
+    std::vector<std::pair<int, int>> inks;
+    for (int i = 0; i < ch.pivots(); i++) {
+        const Role& r = i == v.pivot ? role::pivotActive : role::pivotInactive;
+        int l = 0, rt = 0;
+        f.ink64(r.style(), v.pivots[(size_t)i], l, rt);
+        int p = (ch.pivot_x64(i) + 32) >> 6;
+        if (rt > l)
+            inks.push_back({p + (l >> 6), p + ((rt + 63) >> 6)});
+    }
+    return tile_cuts(inks, px(tok::pivotTop), px(tok::pivotBottom));
+}
+
 int settings_row_y(int row) { return px(kRowsTop) + row * px(tok::settingsPitch); }
+
+std::vector<Rect> settings_regions(int rows)
+{
+    std::vector<Rect> out{{0, 0, kPortraitW, px(kHeaderBand)},
+                          {0, px(tok::pivotTop), kPortraitW, px(tok::pivotBottom)}};
+    for (int r = 0; r < rows; r++)
+        out.push_back({0, settings_row_y(r), kPortraitW, settings_row_y(r + 1)});
+    return out;
+}
 
 int value_sheet_rows(Fonts& f)
 {
@@ -437,7 +514,7 @@ void settings_rows_switch(const Surface& from, const Surface& to, const Surface&
 void draw_settings(Canvas& c, Fonts& f, InkLayer& ink, const SettingsView& v, const Theme& th)
 {
     draw_page_ground(c, th);
-    draw_page_chrome(c, f, kWord, nullptr, th);
+    draw_page_chrome(c, f, kWord, nullptr, th, true);
     draw_page_pivots(c, f, ink, kWord, v, th);
     int64_t t = v.now - v.switch_at;
     if (v.from_pivot >= 0 && t >= 0 && t < settings_switch_ms()) {
@@ -566,12 +643,14 @@ void SettingsPage::keep_pivot()
     page_bar_at_ = -kFar;
 }
 
-void SettingsPage::shut_sheets(int row, int64_t now)
+bool SettingsPage::shut_sheets(int row, int64_t now)
 {
+    bool shut = false;
     if (sheet_ && sheet_row_ == row) {
         land();
         sheet_ = false;
         sheet_at_ = now;
+        shut = true;
         if (kind_ == Kind::Words && on_close)
             on_close(table_[(size_t)row].id);
     }
@@ -579,7 +658,9 @@ void SettingsPage::shut_sheets(int row, int64_t now)
         land();
         rowsheet_ = false;
         rowsheet_at_ = now;
+        shut = true;
     }
+    return shut;
 }
 
 void SettingsPage::row_going(int row, int64_t now)
@@ -609,12 +690,16 @@ void SettingsPage::row_coming(int row, bool had)
         pfocus_[p]++;
 }
 
-void SettingsPage::set_row(const std::string& id, const SettingsRowState& st, int64_t now)
+bool SettingsPage::set_row(const std::string& id, const SettingsRowState& st, int64_t now)
 {
     int row = find_row(id);
     if (row < 0 || id == kThemeRow || id == kZoneRow)
-        return;
+        return false;
     SettingsRowState& s = states_[(size_t)row];
+    auto same_line = [](const InfoLine& a, const InfoLine& b) { return a.title == b.title && a.value == b.value; };
+    if (s.shown == st.shown && s.value == st.value && s.text == st.text &&
+        std::equal(s.lines.begin(), s.lines.end(), st.lines.begin(), st.lines.end(), same_line))
+        return false;
     if (s.shown && !st.shown)
         row_going(row, now);
     bool coming = !s.shown && st.shown;
@@ -624,13 +709,13 @@ void SettingsPage::set_row(const std::string& id, const SettingsRowState& st, in
     if (coming)
         row_coming(row, had);
     keep_pivot();
+    return true;
 }
 
-void SettingsPage::close_row(const std::string& id, int64_t now)
+bool SettingsPage::close_row(const std::string& id, int64_t now)
 {
     int row = find_row(id);
-    if (row >= 0)
-        shut_sheets(row, now);
+    return row >= 0 && shut_sheets(row, now);
 }
 
 void SettingsPage::reset(bool light)
@@ -993,6 +1078,18 @@ bool SettingsPage::action(PadAction a, bool repeat, int64_t now)
         return false;
     }
     return a == PadAction::Back;
+}
+
+SettingsView SettingsPage::open_view(int64_t now) const
+{
+    SettingsView v;
+    std::vector<int> ps = pivots_shown();
+    for (int p : ps)
+        v.pivots.push_back(kSettingsPivotWords[p]);
+    if (!ps.empty())
+        v.rows = row_views(ps[0]);
+    v.now = now;
+    return v;
 }
 
 SettingsView SettingsPage::view(int64_t now) const

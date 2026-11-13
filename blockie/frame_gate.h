@@ -23,6 +23,7 @@ struct GateStep {
     const char* land_reason = nullptr;
     bool redraw = false;
     bool draw = false;
+    bool tail = false;
 };
 
 class FrameGate {
@@ -30,10 +31,16 @@ public:
     GateStep step(const GateIn& in);
     void posted(bool posted, bool motion, int64_t now);
     int timeout(const GateIn& in) const;
+    bool armed() const { return armed_; }
+    int tails() const { return tails_; }
 
 private:
+    bool want(const GateIn& in) const;
+
     bool armed_ = false;
     int64_t at_ = 0;
+    bool tail_ = false;
+    int tails_ = 0;
 };
 
 struct GateFd {

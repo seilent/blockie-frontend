@@ -8,6 +8,8 @@ namespace fd {
 
 static bool wants(const GateIn& in) { return !in.child && in.claim && (in.need_redraw || in.animating); }
 
+bool FrameGate::want(const GateIn& in) const { return wants(in) || (tail_ && !in.child && in.claim); }
+
 GateStep FrameGate::step(const GateIn& in)
 {
     GateStep s;
@@ -24,12 +26,16 @@ GateStep FrameGate::step(const GateIn& in)
         s.land_reason = "watchdog";
         s.redraw = true;
     }
-    s.draw = wants(in);
+    s.draw = want(in);
+    s.tail = s.draw && !wants(in);
+    tails_ += s.tail;
     return s;
 }
 
 void FrameGate::posted(bool posted, bool motion, int64_t now)
 {
+    if (posted)
+        tail_ = motion;
     if (!posted || !motion)
         return;
     armed_ = true;
@@ -43,7 +49,7 @@ int FrameGate::timeout(const GateIn& in) const
         int ms = (int)std::max<int64_t>(0, at_ + kFrameWatchdogMs + 1 - in.now);
         t = t < 0 ? ms : std::min(t, ms);
     }
-    if (wants(in))
+    if (want(in))
         t = 0;
     return t;
 }

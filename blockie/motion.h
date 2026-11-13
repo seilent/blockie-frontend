@@ -11,10 +11,13 @@ enum class FoldKind { Expand, Collapse, Push, Pop, Startup, Launch, Return, Swap
 
 struct FoldPlay {
     int64_t duration = 0;
+    int64_t tail = 0;
+    bool clamp_back = false;
     bool details = false;
     Rect to_bound = kScreen;
     std::function<Rect(const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t prev)> forward;
     std::function<int64_t(const Surface& a, const Surface& b)> prepare;
+    std::function<void(int64_t t0, int64_t now)> advance;
 };
 
 struct Channel {
@@ -37,8 +40,10 @@ public:
     std::function<void(const Surface&)> last;
     std::function<void()> keep;
     std::function<void()> settle;
+    std::function<void()> begun;
     std::function<bool()> can_animate;
     std::function<bool()> redraw_pending;
+    std::function<char(int64_t)> target_current;
     std::function<int64_t()> clock_us;
     std::function<void(const char* what, const char* why)> landed;
 
@@ -55,18 +60,25 @@ public:
     bool animating(int64_t now) const;
     bool started() const { return started_; }
     bool active() const { return fold_; }
+    bool stale() const { return stale_; }
     bool details() const { return fold_ && play_.details; }
     bool copied() const { return copied_; }
+    bool from_target() const { return from_target_; }
+    char l5() const { return l5_; }
     bool details_play() const { return play_.details; }
     bool navigating() const { return navigating_; }
     int from_us() const { return from_us_; }
     int to_us() const { return to_us_; }
+    int forward_us() const { return forward_us_; }
+    int render_us() const { return render_us_; }
+    const char* start_tag() const { return start_tag_; }
     bool compose_end(const Surface& dst);
     bool compose_at(int64_t ft, const Surface& dst);
     FoldKind kind() const { return kind_; }
     bool reversed() const { return reversed_; }
     int64_t t0() const { return t0_; }
-    int64_t run_length() const { return reversed_ ? back_e_ : play_.duration; }
+    int64_t run_length() const { return reversed_ ? back_e_ + play_.tail : play_.duration; }
+    int64_t back_e() const { return back_e_; }
     int64_t forward_time(int64_t now) const;
     Rect damage() const { return damage_; }
     Surface from() { return from_.surface(); }
@@ -74,6 +86,7 @@ public:
     void finish(int64_t now);
 
 private:
+    void adopt_check(bool after, bool moving, int64_t now);
     void land_channels(int64_t now, const char* why);
     void render_to();
     bool forward_dir() const;
@@ -90,11 +103,16 @@ private:
     Rect part_;
     bool started_ = false;
     bool copied_ = false;
+    bool from_target_ = false;
+    char l5_ = '-';
     bool end_shown_ = false;
     bool stale_ = false;
     int from_us_ = -1;
     bool navigating_ = false;
     int to_us_ = -1;
+    int forward_us_ = -1;
+    int render_us_ = -1;
+    const char* start_tag_ = "-";
     int64_t prev_t_ = -1;
     Rect damage_ = kScreen;
     std::vector<Channel> channels_;

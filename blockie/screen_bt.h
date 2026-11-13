@@ -18,6 +18,8 @@
 
 namespace fd {
 
+inline const char* bluetooth_word() { return "bluetooth"; }
+
 class BtPage {
 public:
     enum class Act { None, Pop };
@@ -39,6 +41,7 @@ public:
     bool sheet_shown() const { return sheet_.shown; }
     bool dialog_shown() const { return dialog_.shown; }
     int focus_row() const { return list_.focus_row(); }
+    std::vector<Rect> regions() const;
     const std::vector<BtRow>& rows() const { return rows_.v; }
 
 private:

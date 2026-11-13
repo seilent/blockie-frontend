@@ -18,8 +18,10 @@
 namespace fd {
 
 void draw_page_ground(Canvas& c, const Theme& th);
-void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th);
+void draw_page_chrome(Canvas& c, Fonts& f, const char* word, const char* pivot, const Theme& th, bool clipped = false);
 void draw_page_header(Canvas& c, Fonts& f, const char* word, fx band, const Theme& th);
+const char* settings_word();
+std::vector<Rect> page_letter_cuts(Fonts& f, const char* word);
 
 struct SheetView {
     const char* title = "";
@@ -49,6 +51,7 @@ SheetGeom sheet_geom(Fonts& f, const SheetView& s, Rect sr);
 void draw_value_sheet(Canvas& c, Fonts& f, const SheetView& s, const Theme& th);
 int value_sheet_rows(Fonts& f);
 int settings_row_y(int row);
+std::vector<Rect> settings_regions(int rows);
 
 struct ToastView {
     fx e = 0;
@@ -132,6 +135,8 @@ struct SettingsView {
     ToastView toast;
 };
 
+std::vector<Rect> settings_tab_cuts(Fonts& f, const SettingsView& v);
+
 int64_t settings_switch_ms();
 void settings_rows_switch(const Surface& from, const Surface& to, const Surface& dst, Rect area, int64_t t, int dir,
                           uint32_t ground);
@@ -164,8 +169,8 @@ public:
     void set_zones(Zones z);
     void set_zone(const std::string& id);
     void set_zone_missing(int64_t now);
-    void set_row(const std::string& id, const SettingsRowState& st, int64_t now);
-    void close_row(const std::string& id, int64_t now);
+    bool set_row(const std::string& id, const SettingsRowState& st, int64_t now);
+    bool close_row(const std::string& id, int64_t now);
     void set_sheet_rows(int rows) { rows_ = rows < 1 ? 1 : rows; }
     void toast(int64_t now, const std::string& line1, const std::string& line2) { toast_.show(now, line1, line2, false); }
     void refused(const std::string& id, const std::string& error, const std::string& text, int64_t now);
@@ -184,6 +189,7 @@ public:
         rowsheet_at_ = -kFar;
     }
     SettingsView view(int64_t now) const;
+    SettingsView open_view(int64_t now) const;
 
 private:
     enum class Kind { Theme, Region, Zone, Words };
@@ -200,7 +206,7 @@ private:
     std::vector<SettingsRowView> row_views(int pivot) const;
     int row_at(int pivot, int focus) const;
     int find_row(const std::string& id) const;
-    void shut_sheets(int row, int64_t now);
+    bool shut_sheets(int row, int64_t now);
     void row_going(int row, int64_t now);
     void row_coming(int row, bool had);
     void keep_pivot();

@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -32,7 +33,7 @@
 #include "../ui/roles.h"
 #include "../ui/size.h"
 #include "bt_model.h"
-#include "fold.h"
+#include "dumpz.h"
 #include "home.h"
 #include "homeflow.h"
 #include "decodeq.h"
@@ -45,6 +46,9 @@
 #include "library.h"
 #include "motion.h"
 #include "nav.h"
+#include "pageform.h"
+#include "pagelog.h"
+#include "pagerows.h"
 #include "pops.h"
 #include "portmsg.h"
 #include "powermenu.h"
@@ -156,7 +160,111 @@ BtState shot_bt_state(const std::string& state, int64_t now)
     return s;
 }
 
-int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
+const char* page_word(Screen s)
+{
+    return s == Screen::Settings ? settings_word() : s == Screen::Bluetooth ? bluetooth_word() : nullptr;
+}
+
+bool head_tiles(const PageRun* run, int64_t tf)
+{
+    bool under = false;
+    if (!run || !head_side(run->form, under))
+        return true;
+    const PageHead& h = form_head(run->form);
+    auto tiles = [](const std::vector<PageRow>& v, int y0, int y1) {
+        int x = 0;
+        for (const PageRow& e : v) {
+            if (e.r.x0 != x || e.r.x1 <= e.r.x0 || e.r.y0 != y0 || e.r.y1 != y1)
+                return false;
+            x = e.r.x1;
+        }
+        return v.empty() || x == kPortraitW;
+    };
+    int band = px(tok::headerBand), s0 = px(tok::pivotTop), s1 = px(tok::pivotBottom);
+    bool ok = !h.letters.empty() && tiles(h.letters, 0, band) && tiles(h.tabs, s0, s1);
+    fprintf(stderr,
+            "blockie-shot: %lld ms page tiling check %s, %zu letters over 0 to %d x 0 to %d, %zu tabs over 0 to %d "
+            "x %d to %d\n",
+            (long long)tf, ok ? "PASS" : "FAILED", h.letters.size(), kPortraitW, band, h.tabs.size(), kPortraitW, s0,
+            s1);
+    return ok;
+}
+
+bool word_check(Fonts& fonts, const char* word, const Surface& rest, int64_t tf = -1, bool strip = true)
+{
+    Buffer chrome;
+    Canvas c(chrome.surface());
+    draw_page_ground(c, theme());
+    draw_page_chrome(c, fonts, word, nullptr, theme());
+    Surface w = chrome.surface();
+    int rows = px(strip ? tok::pivotTop : tok::headerBand), bad = -1;
+    for (int y = 0; y < rows && bad < 0; y++)
+        if (!std::equal(rest.row(y), rest.row(y) + rest.w, w.row(y)))
+            bad = y;
+    char at[32] = "";
+    if (tf >= 0)
+        snprintf(at, sizeof at, "%lld ms ", (long long)tf);
+    if (bad < 0)
+        fprintf(stderr, "blockie-shot: %s%s word layer check PASS, the rows above y %d equal the page chrome alone\n",
+                at, word, rows);
+    else
+        fprintf(stderr, "blockie-shot: %s%s word layer check FAILED, row %d differs from the page chrome alone\n", at,
+                word, bad);
+    return bad < 0;
+}
+
+bool cut_check(const Surface& s, const std::vector<PageRow>& letters, const char* word, int64_t tf)
+{
+    LiveF::T g = LiveF::pack(theme().bg);
+    int band = px(tok::headerBand), bad = -1;
+    for (size_t k = 1; k < letters.size() && bad < 0; k++)
+        for (int y = 0; y < band && bad < 0; y++)
+            if (s.row(y)[letters[k].r.x0] != g)
+                bad = letters[k].r.x0;
+    char at[32] = "";
+    if (tf >= 0)
+        snprintf(at, sizeof at, "%lld ms ", (long long)tf);
+    if (bad < 0)
+        fprintf(stderr, "blockie-shot: %s%s word cut check PASS, every interior letter cut column is ground in rows 0 "
+                        "to %d\n",
+                at, word, band);
+    else
+        fprintf(stderr, "blockie-shot: %s%s word cut check FAILED, cut column %d carries ink\n", at, word, bad);
+    return bad < 0;
+}
+
+bool clip_check(Fonts& fonts, const Surface& word)
+{
+    Buffer whole;
+    Canvas c(whole.surface());
+    draw_page_ground(c, theme());
+    draw_page_chrome(c, fonts, settings_word(), nullptr, theme(), false);
+    Surface k = whole.surface();
+    LiveF::T g = LiveF::pack(theme().bg);
+    int y0 = px(tok::pivotTop), y1 = px(tok::headerBand), below = 0, bx = -1, by = -1;
+    for (int y = y0; y < y1; y++)
+        for (int x = 0; x < word.w; x++) {
+            below += k.row(y)[x] != g;
+            if (by < 0 && word.row(y)[x] != g) {
+                bx = x;
+                by = y;
+            }
+        }
+    if (by < 0 && below > 0)
+        fprintf(stderr, "blockie-shot: settings clipped word check PASS, the word layer is ground in rows %d to %d, "
+                        "where the whole word draws %d pixels\n",
+                y0, y1, below);
+    else if (by < 0)
+        fprintf(stderr, "blockie-shot: settings clipped word check FAILED, the whole word draws nothing below y %d\n",
+                y0);
+    else
+        fprintf(stderr, "blockie-shot: settings clipped word check FAILED, pixel %d,%d of the word layer carries ink "
+                        "below y %d\n",
+                bx, by, y0);
+    return by < 0 && below > 0;
+}
+
+int shot_bt(const std::string& out, const std::string& state, Fonts& fonts, bool hp)
 {
     int64_t now = 1000000;
     BtState s = shot_bt_state(state, now);
@@ -177,7 +285,9 @@ int shot_bt(const std::string& out, const std::string& state, Fonts& fonts)
         fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
         return 1;
     }
-    return 0;
+    if (!hp || state == "sheet" || state == "confirm")
+        return 0;
+    return word_check(fonts, bluetooth_word(), buf.surface(), -1, false) ? 0 : 1;
 }
 
 std::string frame_path(const std::string& dir, int i)
@@ -491,12 +601,23 @@ struct DriveOpts {
     std::string recent_system = "Synth";
     bool big = false;
     SlotMap slots = SlotMap::RowMajor;
-    LeftMove left = LeftMove::T5;
+    bool fast = true;
+    bool hp = false;
+    std::string word_dir;
     bool t9_edge = false;
     bool bar_slot = false;
     bool grid_band = true;
     bool startup = false;
+    int64_t startup_at = -1;
+    int64_t input_lead = 0;
     int64_t arrive = -1;
+    bool late_sys = false;
+    std::vector<int> artless;
+    std::vector<int> artless_sys;
+    std::string blocks;
+    std::string dump;
+    std::string pane_blocks;
+    std::string pane_dump;
     std::string script;
     int64_t from = 0;
     int64_t at = -1;
@@ -548,9 +669,8 @@ bool exit_status(const std::string& name, int& status)
     return false;
 }
 
-bool all_black(const Surface& s)
+bool all_px(const Surface& s, uint32_t v)
 {
-    uint32_t v = LiveF::pack(launch_ground());
     for (int y = 0; y < s.h; y++)
         for (int x = 0; x < s.w; x++)
             if (s.at(x, y) != v)
@@ -558,10 +678,22 @@ bool all_black(const Surface& s)
     return true;
 }
 
+bool all_black(const Surface& s) { return all_px(s, LiveF::pack(launch_ground())); }
+
 bool same_px(const Surface& a, const Surface& b)
 {
     for (int y = 0; y < a.h; y++)
         if (!std::equal(a.row(y), a.row(y) + a.w, b.row(y)))
+            return false;
+    return true;
+}
+
+bool same_span(const Surface& a, const Surface& b, int x0, int x1)
+{
+    x0 = std::max(0, x0);
+    x1 = std::min(x1, a.w);
+    for (int y = 0; y < a.h && x0 < x1; y++)
+        if (!std::equal(a.row(y) + x0, a.row(y) + x1, b.row(y) + x0))
             return false;
     return true;
 }
@@ -572,21 +704,205 @@ void copy_surface(const Surface& src, const Surface& dst)
         copy_px(dst.row(y), src.row(y), dst.w);
 }
 
+bool listed(const std::vector<int>& v, int i) { return std::find(v.begin(), v.end(), i) != v.end(); }
+
 FlowOpts flow_opts(const DriveOpts& o)
 {
     FlowOpts f;
     f.big = o.big;
     f.slots = o.slots;
-    f.left = o.left;
+    f.lang = true;
+    f.fast = o.fast;
     f.t9_edge = o.t9_edge;
     f.bar_slot = o.bar_slot;
     f.grid_band = o.grid_band;
     return f;
 }
 
+const char* left_name(LeftMove m)
+{
+    switch (m) {
+    case LeftMove::Fade: return "l0";
+    case LeftMove::T5: return "t5";
+    case LeftMove::Stepper: return "stepper";
+    }
+    return "?";
+}
+
+bool in_rect(Rect r, int x, int y) { return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1; }
+
+bool covered_by(const std::vector<Rect>& rs, int x, int y)
+{
+    for (const Rect& r : rs)
+        if (in_rect(r, x, y))
+            return true;
+    return false;
+}
+
+uint32_t shaded(uint32_t src, uint32_t ground, int e, int sigma)
+{
+    double f = std::min(1.0, e / 65280.0 * 256.0 / sigma);
+    uint32_t out = 0;
+    for (int sh = 0; sh < 24; sh += 8) {
+        double g = ground >> sh & 255, v = src >> sh & 255;
+        out |= (uint32_t)std::lround(g + f * (v - g)) << sh;
+    }
+    return out;
+}
+
+bool near_px(uint32_t a, uint32_t b, int tol)
+{
+    for (int sh = 0; sh < 24; sh += 8)
+        if (std::abs((int)(a >> sh & 255) - (int)(b >> sh & 255)) > tol)
+            return false;
+    return true;
+}
+
+struct PaneView {
+    const eng::Instance* in = nullptr;
+    const eng::Frame* frame = nullptr;
+};
+
+bool blocks_hold(const LeftPlan& lp, const std::vector<BlockPose>& poses, const Surface& a, const Surface& b,
+                 const Surface& frame, int x_end, uint32_t ground, int& bad_x, int& bad_y, PaneView pane = PaneView{})
+{
+    int w = std::min(x_end, frame.w), h = frame.h;
+    Rect all{0, 0, w, h};
+    std::vector<int> owner((size_t)w * h, -1);
+    std::vector<uint32_t> want((size_t)w * h, 0);
+    auto mark = [&](int i, int x, int y, uint32_t v) {
+        owner[(size_t)y * w + x] = i;
+        want[(size_t)y * w + x] = v;
+    };
+    auto fail = [&](int x, int y) {
+        bad_x = x;
+        bad_y = y;
+        return false;
+    };
+    std::vector<Rect> covers;
+    for (const BlockPose& q : poses)
+        if (q.top)
+            covers.push_back(block_cover(lp, q));
+    for (size_t i = 0; i < poses.size(); i++) {
+        const BlockPose& q = poses[i];
+        const Block& k = lp.blocks[(size_t)q.block];
+        const Surface& src = k.wide ? b : a;
+        if (q.a256 != 256)
+            return fail(q.rect.x0, q.rect.y0);
+        Rect vis = q.rect.intersect(q.clip).intersect(all);
+        if (vis.empty())
+            continue;
+        Rect box = block_box(lp, q).intersect(all);
+        int dx = q.rect.x0 - k.cell.x0, dy = q.rect.y0 - k.cell.y0;
+        bool under = !q.top;
+        for (int y = box.y0; y < box.y1; y++)
+            for (int x = box.x0; x < box.x1; x++) {
+                bool tile = in_rect(q.rect, x, y);
+                if (tile ? !(k.art && in_rect(vis, x, y)) : !k.focus)
+                    continue;
+                if (under && covered_by(covers, x, y))
+                    continue;
+                mark((int)i, x, y, src.at(x - dx, y - dy));
+            }
+    }
+    Rect gr = block_glow_rect(lp);
+    const Glow& gv = glow_view(lp);
+    bool glow = lp.glow_on && gv.inited && gv.e.size() == (size_t)(gr.x1 - gr.x0) * (gr.y1 - gr.y0);
+    bool panes = pane.in && pane.frame && pane.in->cover_on();
+    Rect pr = panes ? pane.in->rect() : Rect{};
+    int pw = pr.x1 - pr.x0;
+    std::vector<int> pose_of;
+    for (size_t j = 0; panes && j < pane.frame->poses.size(); j++) {
+        size_t id = (size_t)(pane.frame->blocks[(size_t)pane.frame->poses[j].block].id & eng::kIdMask);
+        if (pose_of.size() <= id)
+            pose_of.resize(id + 1, -1);
+        pose_of[id] = (int)j;
+    }
+    Rect band = lp.band.intersect(all);
+    for (int y = band.y0; y < band.y1; y++)
+        for (int x = band.x0; x < band.x1; x++) {
+            if (in_rect(lp.header, x, y))
+                continue;
+            size_t pi = panes && in_rect(pr, x, y) ? (size_t)(y - pr.y0) * pw + (size_t)(x - pr.x0) : 0;
+            if (panes && in_rect(pr, x, y) && pane.in->cover()[pi]) {
+                size_t id = (size_t)(pane.in->ids()[pi] & eng::kIdMask);
+                uint32_t pv = ground;
+                if (id) {
+                    int j = id < pose_of.size() ? pose_of[id] : -1;
+                    if (j < 0)
+                        return fail(x, y);
+                    const eng::Pose& q = pane.frame->poses[(size_t)j];
+                    const eng::Block& k = pane.frame->blocks[(size_t)q.block];
+                    const Surface& src = k.source == 0 ? a : b;
+                    int sx = x - q.rect.x0 + k.src.x0, sy = y - q.rect.y0 + k.src.y0;
+                    if (!in_rect(q.clip, x, y) || !in_rect(src.rect(), sx, sy))
+                        return fail(x, y);
+                    const std::vector<eng::Shade>& sh = pane.frame->shades;
+                    int sigma = (size_t)q.block < sh.size() ? sh[(size_t)q.block].sigma : 256;
+                    pv = shaded(src.at(sx, sy), ground, pane.in->e()[pi], sigma);
+                }
+                if (!near_px(frame.at(x, y), pv, id ? 2 : 0))
+                    return fail(x, y);
+                continue;
+            }
+            size_t o = (size_t)y * w + x;
+            uint32_t v = ground;
+            int tol = 0;
+            if (owner[o] >= 0) {
+                v = want[o];
+                if (glow && in_rect(gr, x, y)) {
+                    const Block& k = lp.blocks[(size_t)poses[(size_t)owner[o]].block];
+                    int e = gv.e[(size_t)(y - gr.y0) * (gr.x1 - gr.x0) + (x - gr.x0)];
+                    v = shaded(v, ground, e, block_sigma(lp, k));
+                    tol = 2;
+                }
+            }
+            if (!near_px(frame.at(x, y), v, tol))
+                return fail(x, y);
+        }
+    return true;
+}
+
+bool shows_art(const Surface& s, Rect r, uint32_t ground)
+{
+    r = r.intersect(s.rect());
+    for (int y = r.y0; y < r.y1; y++)
+        for (int x = r.x0; x < r.x1; x++)
+            if (s.at(x, y) != ground)
+                return true;
+    return false;
+}
+
+void write_pose(FILE* f, int n, const LeftPlan& lp, const BlockPose& q)
+{
+    const Block& k = lp.blocks[(size_t)q.block];
+    Rect box = block_box(lp, q);
+    fprintf(f, "pose %d %d %d %d %d %d %d %d %d %d 0 0 %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", n, q.block,
+            q.rect.x0, q.rect.y0, q.rect.x1, q.rect.y1, q.clip.x0, q.clip.y0, q.clip.x1, q.clip.y1, q.top ? 1 : 0,
+            k.art ? 1 : 0, k.focus ? 1 : 0, box.x0, box.y0, box.x1, box.y1, q.a256, (int)kOne, q.ring.x0, q.ring.y0,
+            q.ring.x1, q.ring.y1, q.beneath ? 1 : 0);
+}
+
+std::vector<uint32_t> band_px(const Surface& s, Rect r)
+{
+    std::vector<uint32_t> out;
+    out.reserve((size_t)(r.x1 - r.x0) * (r.y1 - r.y0));
+    for (int y = r.y0; y < r.y1; y++)
+        for (int x = r.x0; x < r.x1; x++)
+            out.push_back(s.at(x, y));
+    return out;
+}
+
 class Drive {
 public:
     Drive(Fonts& fonts, const DriveOpts& o) : flow(fonts, flow_opts(o)), fonts_(fonts), o_(o) {}
+    ~Drive()
+    {
+        if (blocks_)
+            fclose(blocks_);
+        if (inputs_)
+            fclose(inputs_);
+    }
 
     HomeFlow flow;
     SettingsPage page;
@@ -635,10 +951,11 @@ public:
         };
         bt_ = std::make_unique<BtPage>(fonts_, glyphs_);
         flow.draw_page = [this](Canvas& c, Screen s, int64_t now) {
-            if (s == Screen::Bluetooth)
+            if (s == Screen::Bluetooth) {
                 bt_->draw(c, ink_, now);
-            else
-                draw_settings(c, fonts_, ink_, page.view(now), theme());
+                return;
+            }
+            draw_settings(c, fonts_, ink_, page.view(now), theme());
         };
         flow.page_open = [this](Screen s, int64_t now) {
             if (s == Screen::Settings)
@@ -663,6 +980,37 @@ public:
         };
         flow.rearm = [this](int64_t now) { repeat_.rearm(now); };
         flow.page_seed_y = [this](Screen s) { return s == Screen::Settings ? page.focus_y() : -1; };
+        flow.page_rows = [this](Screen s) {
+            if (s == Screen::Bluetooth)
+                return bluetooth_page_rows(*bt_);
+            return s == Screen::Settings ? settings_page_rows(settings_view()) : std::vector<PageRow>();
+        };
+        flow.page_head = [this](Screen s) {
+            if (s == Screen::Bluetooth)
+                return bluetooth_page_head(fonts_);
+            return s == Screen::Settings ? settings_page_head(fonts_, settings_view()) : PageHead{};
+        };
+        flow.draw_word = [this](Canvas& c, const PageHead& h) {
+            draw_page_ground(c, theme());
+            draw_page_chrome(c, fonts_, h.word.c_str(), nullptr, theme(), h.word == settings_word());
+            if (o_.hp && !cut_check(c.surface(), h.letters, h.word.c_str(), now_))
+                hp_failed_ = true;
+            if (o_.word_dir.empty())
+                return;
+            Buffer full;
+            Canvas fc(full.surface());
+            draw_page_ground(fc, theme());
+            Surface band = c.surface(), w = full.surface();
+            for (int y = 0; y < band.h && y < w.h; y++)
+                copy_px(w.row(y), band.row(y), std::min(band.w, w.w));
+            std::string path = o_.word_dir + "/" + h.word + "-word-" + (theme().light ? "light" : "dark") + ".png";
+            if (write_png(path, w)) {
+                fprintf(stderr, "blockie-shot: %lld ms word layer %s\n", (long long)now_, path.c_str());
+            } else {
+                fprintf(stderr, "blockie-shot: cannot write %s\n", path.c_str());
+                hp_failed_ = true;
+            }
+        };
         flow.last_frame = [this](const Surface& s) {
             copy_surface(launch_.phase() == LaunchPhase::Leaving ? shown_.surface() : last_.surface(), s);
         };
@@ -699,7 +1047,7 @@ public:
         h.act = [this](PadAction a, int64_t now) { keys_.act(a, now); };
         keys_.apply = [this](PadAction a, bool rep, int64_t now) {
             fprintf(stderr, "blockie-shot: %lld ms input %s%s\n", (long long)now, key_name(a), rep ? " repeat" : "");
-            flow.input(a, rep, now);
+            flow.input(a, rep, now - o_.input_lead);
         };
         flow.ctl.landed = [this](const char* what, const char* why) {
             fprintf(stderr, "blockie-shot: %lld ms %s landed (%s)\n", (long long)now_, what, why);
@@ -723,8 +1071,12 @@ public:
         };
         std::vector<HomeGame> list(recent_games.begin(),
                                    recent_games.begin() + std::min(recent_games.size(), (size_t)o_.recent_n));
-        if (o_.arrive >= 0)
+        if (o_.arrive >= 0 && !o_.late_sys)
             for (const HomeGame& g : list)
+                late_.insert(g.id);
+        int focus = flow.nav.focus;
+        if (o_.arrive >= 0 && o_.late_sys && focus >= 0 && focus < (int)games.size())
+            for (const HomeGame& g : games[(size_t)focus])
                 late_.insert(g.id);
         flow.home.deal_recent(flow.model, list);
         return true;
@@ -733,18 +1085,48 @@ public:
     int run(const std::string& out, const std::string& frames_dir)
     {
         set_now(0);
-        if (o_.startup)
+        bool waiting = o_.startup_at > 0;
+        if (waiting && frame_time(1) >= o_.startup_at) {
+            fprintf(stderr, "blockie-shot: --startup-at %lld leaves fewer than 2 still frames before the startup\n",
+                    (long long)o_.startup_at);
+            return 1;
+        }
+        if (o_.startup && !waiting)
             flow.startup(0);
-        flow.draw(last_.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
+        if (waiting) {
+            Canvas gc(last_.surface());
+            gc.fill(kScreen, theme().bg);
+        } else {
+            flow.draw(last_.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
+        }
         copy_surface(last_.surface(), shown_.surface());
         FILE* side = nullptr;
         if (!frames_dir.empty() && !(side = fopen((frames_dir + "/frames.txt").c_str(), "w"))) {
             fprintf(stderr, "blockie-shot: cannot write %s/frames.txt\n", frames_dir.c_str());
             return 1;
         }
+        if (!o_.pane_blocks.empty() && !pane_log_.open(o_.pane_blocks, o_.pane_dump, "pane-")) {
+            fprintf(stderr, "blockie-shot: cannot write %s\n", o_.pane_blocks.c_str());
+            if (side)
+                fclose(side);
+            return 1;
+        }
+        if (!o_.blocks.empty() && !(blocks_ = fopen(o_.blocks.c_str(), "w"))) {
+            fprintf(stderr, "blockie-shot: cannot write %s\n", o_.blocks.c_str());
+            if (side)
+                fclose(side);
+            return 1;
+        }
+        if (!frames_dir.empty() && !(inputs_ = fopen((frames_dir + "/inputs.txt").c_str(), "w"))) {
+            fprintf(stderr, "blockie-shot: cannot write %s/inputs.txt\n", frames_dir.c_str());
+            fclose(side);
+            return 1;
+        }
         int written = 0;
         int tail = o_.tail;
         bool was_moving = false;
+        bool was_home_moving = false;
+        bool moved = false;
         for (int n = 0;; n++) {
             int64_t tf = frame_time(n);
             bool stop = o_.at >= 0 && tf >= o_.at;
@@ -753,12 +1135,18 @@ public:
             advance(tf);
             set_now(tf);
             fonts_.next_frame();
+            bool wait = waiting && tf < o_.startup_at;
+            if (waiting && !wait) {
+                waiting = false;
+                flow.startup(tf);
+            }
             MotionCtl& ctl = flow.ctl;
             bool was_fold = ctl.active();
             bool was_details = ctl.details();
             FoldKind was_kind = ctl.kind();
             bool step_in = flow.take_step_in();
-            bool motion = was_moving || flow.animating(tf) || page_moving(tf) || toast_.animating(tf);
+            bool still = !was_home_moving;
+            bool motion = !wait && (was_moving || flow.animating(tf) || page_moving(tf) || toast_.animating(tf));
             copy_surface(last_.surface(), prev_.surface());
             copy_surface(shown_.surface(), seen_frame_.surface());
             in_frame_ = true;
@@ -772,11 +1160,12 @@ public:
                 bc.fill(kScreen, launch_ground());
                 launch_.black_shown();
                 more = flow.animating(tf);
-            } else if (kind == LaunchDraw::Home) {
+            } else if (kind == LaunchDraw::Home && !wait) {
                 more = flow.frame(tf, last_.surface());
             }
             more = more || page_moving(tf);
             in_frame_ = false;
+            was_home_moving = more;
             more = more || toast_.visible(tf);
             was_moving = more;
             int step = 0, ok = input_ok_;
@@ -814,22 +1203,57 @@ public:
                         (long long)tf, what, held ? "the frame is " : "FAILED, the frame is not ", res,
                         frame_hash(last_.surface()));
             }
+            bool paging = ctl.active() && (ctl.kind() == FoldKind::Push || ctl.kind() == FoldKind::Pop);
+            if (o_.hp && paging && !ctl.reversed() && ctl.t0() != page_t0_) {
+                page_t0_ = ctl.t0();
+                bool judged = still && o_.input_lead == 0;
+                bool held = judged && same_px(prev_.surface(), last_.surface());
+                bool tiled = head_tiles(flow.page_run(), tf);
+                ok = ok && (held || !judged) && tiled;
+                hp_failed_ = hp_failed_ || (judged && !held) || !tiled;
+                fprintf(stderr, "blockie-shot: %lld ms page frame 0 check %s\n", (long long)tf,
+                        !judged ? "not judged, the input leads the frame or the screen was moving before it"
+                        : held  ? "the frame is the frame shown before the input"
+                                : "FAILED");
+            }
             if (step_in) {
                 step = 1;
-                Buffer ref;
-                flow.draw(ref.surface(), flow.kept(), flow.kept_focus(), true, Pane::Details, kScreen);
-                bool held = same_px(ref.surface(), last_.surface());
-                ok = ok && held;
+                bool split = block_details();
+                bool rows = lang_details();
+                bool judged = !rows || still;
+                bool held = false;
+                if (rows) {
+                    held = still && same_px(prev_.surface(), last_.surface());
+                } else {
+                    Buffer ref;
+                    flow.draw(ref.surface(), flow.kept(), flow.kept_focus(), true, Pane::Details, kScreen);
+                    if (split) {
+                        Buffer sel;
+                        flow.draw(sel.surface(), flow.kept(), flow.kept_nav(), true, Pane::Selector, kScreen);
+                        held = same_span(sel.surface(), last_.surface(), 0, kPaneLeftEdge) &&
+                               same_span(ref.surface(), last_.surface(), kPaneLeftEdge, ref.surface().w);
+                    } else {
+                        held = same_px(ref.surface(), last_.surface());
+                    }
+                }
+                ok = ok && (held || !judged);
                 fprintf(stderr, "blockie-shot: %lld ms step in check %s\n", (long long)tf,
-                        held ? "the frame is the state before the input with Details focus" : "FAILED");
+                        !judged ? "not judged, the home was moving on the frame before the input"
+                        : !held ? "FAILED"
+                        : rows  ? "the frame is the frame shown before the input, the pane keeping the menu focus"
+                        : split ? "left of 436 the menu focus rest before the input, right of it the state before the "
+                                  "input with Details focus, the designed right pane focus step"
+                                : "the frame is the state before the input with Details focus");
             }
             if (was_fold && !ctl.active() && was_kind != FoldKind::Startup) {
                 bool collapse_step = was_details && was_kind == FoldKind::Collapse;
+                bool split = collapse_step && block_details();
+                bool rows = collapse_step && lang_details();
+                Buffer rest;
                 if (collapse_step) {
                     step = 1;
-                    Buffer ref;
-                    flow.draw(ref.surface(), flow.model, flow.nav, false, Pane::Details, kScreen);
-                    ok = same_px(ref.surface(), prev_.surface());
+                    details_rest(rest.surface(), split);
+                    ok = same_px(rest.surface(), prev_.surface());
                 } else if (was_kind == FoldKind::Launch && launch_.phase() != LaunchPhase::Idle) {
                     ok = all_black(last_.surface());
                 } else if (was_kind == FoldKind::Launch) {
@@ -841,13 +1265,38 @@ public:
                     ok = ctl.compose_end(ref.surface()) && same_px(ref.surface(), last_.surface());
                 } else {
                     ok = same_px(prev_.surface(), last_.surface());
+                    flow.draw(rest.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
                 }
                 bool waits = was_kind == FoldKind::Launch && launch_.phase() != LaunchPhase::Idle;
                 fprintf(stderr, "blockie-shot: %lld ms %s end check %s\n", (long long)tf, fold_kind_name(was_kind),
-                        ok ? (collapse_step ? "the last composed frame equals the destination with Details focus"
-                              : waits       ? "the leave lands on the wait's black"
-                                            : "the composite at T equals a fresh render")
-                           : "FAILED");
+                        !ok             ? "FAILED"
+                        : rows          ? "the last composed frame equals the destination at menu focus, the pane "
+                                          "keeping the menu focus"
+                        : split         ? "the last composed frame is the menu focus rest left of 436 and the "
+                                          "destination with Details focus right of it, the designed right pane focus "
+                                          "step"
+                        : collapse_step ? "the last composed frame equals the destination with Details focus"
+                        : waits         ? "the leave lands on the wait's black"
+                                        : "the composite at T equals a fresh render");
+                if (was_kind != FoldKind::Launch && was_kind != FoldKind::Return) {
+                    unsigned long long hf = frame_hash(prev_.surface()), hr = frame_hash(rest.surface());
+                    const char* parts =
+                        rows    ? ", the destination at menu focus across the frame, the pane keeping the menu focus"
+                        : split ? ", menu focus left of 436, the designed right pane focus step right of it"
+                                : "";
+                    fprintf(stderr,
+                            "blockie-shot: %lld ms %s land check %s, last fold frame %016llx, static rest render "
+                            "%016llx%s\n",
+                            (long long)tf, fold_kind_name(was_kind), hf == hr ? "PASS" : "FAILED", hf, hr, parts);
+                }
+                const char* word = page_word(flow.nav.top());
+                if (o_.hp && word && (was_kind == FoldKind::Push || was_kind == FoldKind::Pop)) {
+                    bool held = word_check(fonts_, word, last_.surface(), tf, flow.nav.top() == Screen::Settings);
+                    if (flow.nav.top() == Screen::Bluetooth)
+                        held = cut_check(last_.surface(), bluetooth_page_head(fonts_).letters, word, tf) && held;
+                    ok = ok && held;
+                    hp_failed_ = hp_failed_ || !held;
+                }
             }
             const T9& t9 = flow.t9();
             std::string sys = t9.shown(tf).system;
@@ -870,21 +1319,22 @@ public:
             if (ctl.active() && ctl.reversed() && ctl.t0() != back_logged_) {
                 back_logged_ = ctl.t0();
                 fprintf(stderr, "blockie-shot: %lld ms reversal at e %lld ms\n", (long long)ctl.t0(),
-                        (long long)ctl.run_length());
+                        (long long)ctl.back_e());
             }
-            bool swap = o_.left == LeftMove::T5 && ctl.active() &&
+            const SlidePlan* sp = flow.plan();
+            bool swap = sp && sp->left == LeftMove::T5 && ctl.active() &&
                         (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse);
             int64_t ft = ctl.forward_time(tf);
             int64_t k = ctl.kind() == FoldKind::Collapse && !ctl.reversed() ? slide_ms() - ft : ft;
             int leave_ms = fx_round(tok::motion_swapOut);
             bool same = swap_seen_ && (ctl.t0() == swap_t0_ ||
-                                       (ctl.reversed() && !swap_back_ && ctl.t0() - ctl.run_length() == swap_t0_));
+                                       (ctl.reversed() && !swap_back_ && ctl.t0() - ctl.back_e() == swap_t0_));
             bool crossed = same && std::min(swap_k_, k) < leave_ms && std::max(swap_k_, k) > 0;
             if (!step && swap && ((k > 0 && k <= leave_ms) || crossed)) {
                 Buffer ref;
                 const char* what = k <= 0 ? "landing" : k < leave_ms ? "leave" : k == leave_ms ? "hold" : "arrival";
                 int64_t gap = n > 0 ? tf - frame_time(n - 1) : 0;
-                bool short_back = ctl.reversed() && tf == ctl.t0() && ctl.run_length() <= gap;
+                bool short_back = ctl.reversed() && tf == ctl.t0() && ctl.back_e() <= gap;
                 step = k <= 0 ? 4 : short_back ? 3 : 2;
                 bool held = ctl.compose_at(ft, ref.surface()) && same_px(ref.surface(), last_.surface());
                 ok = ok && held;
@@ -932,6 +1382,30 @@ public:
                         (long long)tf, res, frame_hash(shown_.surface()));
             }
             seen_toast_e_ = toast_e;
+            if (wait) {
+                bool held = all_px(shown_.surface(), LiveF::pack(theme().bg));
+                ok = ok && held;
+                cause = " the plain ground before the frontend's first frame";
+                fprintf(stderr, "blockie-shot: %lld ms startup wait check %s\n", (long long)tf,
+                        held ? "the frame is plain ground with motion 0" : "FAILED");
+            }
+            if (o_.startup_at > 0 && motion && !moved) {
+                moved = true;
+                bool late = tf >= o_.startup_at;
+                ok = ok && late;
+                fprintf(stderr, "blockie-shot: %lld ms startup motion check %s %lld ms\n", (long long)tf,
+                        late ? "the first motion frame is at or past" : "FAILED, the first motion frame is before",
+                        (long long)o_.startup_at);
+            }
+            if (!block_frame(n, !frames_dir.empty() && tf >= o_.from ? written : -1, tf)) {
+                ok = 0;
+                cause = " the frame is not every block at its logged pose over ground";
+            }
+            if (dump_failed_ && !dump_logged_) {
+                dump_logged_ = true;
+                ok = 0;
+                cause = " the e and block id dump could not be written";
+            }
             if (!frames_dir.empty() && tf >= o_.from) {
                 std::string png = frame_path(frames_dir, written);
                 if (!write_png(png, shown_.surface())) {
@@ -956,7 +1430,7 @@ public:
                     fclose(side);
                 return 1;
             }
-            bool pending = next_ < steps_.size() || repeat_.active() || (o_.arrive >= 0 && !arrived_);
+            bool pending = waiting || next_ < steps_.size() || repeat_.active() || (o_.arrive >= 0 && !arrived_);
             if (pending || more)
                 tail = o_.tail;
             else if (o_.at < 0 && tail-- <= 0)
@@ -966,15 +1440,33 @@ public:
             fprintf(stderr, "blockie-shot: cannot close %s/frames.txt\n", frames_dir.c_str());
             return 1;
         }
+        if (!pane_log_.close()) {
+            fprintf(stderr, "blockie-shot: cannot close %s\n", o_.pane_blocks.c_str());
+            return 1;
+        }
+        FILE* bl = blocks_;
+        blocks_ = nullptr;
+        if (bl && fclose(bl) != 0) {
+            fprintf(stderr, "blockie-shot: cannot close %s\n", o_.blocks.c_str());
+            return 1;
+        }
+        FILE* in = inputs_;
+        inputs_ = nullptr;
+        if (in && fclose(in) != 0) {
+            fprintf(stderr, "blockie-shot: cannot close %s/inputs.txt\n", frames_dir.c_str());
+            return 1;
+        }
         if (!out.empty() && !write_png(out, shown_.surface())) {
             fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
             return 1;
         }
         fprintf(stderr, "blockie-shot: drive %d frames to %lld ms\n", written, (long long)now_);
-        return 0;
+        return dump_failed_ || hp_failed_ ? 1 : 0;
     }
 
 private:
+    SettingsView settings_view() const { return flow.opening() ? page.open_view(now_) : page.view(now_); }
+
     void end_check_input()
     {
         MotionCtl& ctl = flow.ctl;
@@ -982,15 +1474,47 @@ private:
         if (!ctl.compose_end(end.surface()))
             return;
         bool collapse_step = ctl.details_play() && ctl.kind() == FoldKind::Collapse;
-        flow.draw(ref.surface(), flow.model, flow.nav, false, collapse_step ? Pane::Details : flow.nav.pane, kScreen);
+        bool split = collapse_step && block_details();
+        bool rows = collapse_step && lang_details();
+        if (collapse_step)
+            details_rest(ref.surface(), split);
+        else
+            flow.draw(ref.surface(), flow.model, flow.nav, false, flow.nav.pane, kScreen);
         bool ok = same_px(end.surface(), ref.surface());
         if (!ok)
             input_ok_ = 0;
         fprintf(stderr, "blockie-shot: %lld ms %s end check on an input %s\n", (long long)now_,
                 fold_kind_name(ctl.kind()),
-                ok ? (collapse_step ? "the end pose equals the destination with Details focus"
-                                    : "the end pose equals a fresh render")
-                   : "FAILED");
+                !ok             ? "FAILED"
+                : rows          ? "the end pose equals the destination at menu focus, the pane keeping the menu focus"
+                : split         ? "the end pose is the menu focus rest left of 436 and the destination with Details "
+                                  "focus right of it, the designed right pane focus step"
+                : collapse_step ? "the end pose equals the destination with Details focus"
+                                : "the end pose equals a fresh render");
+    }
+
+    bool block_details() const
+    {
+        const SlidePlan* sp = flow.plan();
+        return sp && block_form(sp->left) && sp->moves.glow_on;
+    }
+
+    bool lang_details() const { return block_details() && flow.plan()->lang_on; }
+
+    void details_rest(const Surface& dst, bool split)
+    {
+        if (lang_details()) {
+            flow.draw(dst, flow.model, flow.nav, false, Pane::Selector, kScreen);
+            return;
+        }
+        flow.draw(dst, flow.model, flow.nav, false, Pane::Details, kScreen);
+        if (!split)
+            return;
+        Buffer sel;
+        flow.draw(sel.surface(), flow.model, flow.nav, false, Pane::Selector, kScreen);
+        Surface s = sel.surface();
+        for (int y = 0; y < dst.h; y++)
+            copy_px(dst.row(y), s.row(y), std::min(kPaneLeftEdge, dst.w));
     }
 
     void system_line(const Surface& s, const std::string& sys)
@@ -1057,7 +1581,8 @@ private:
     {
         Step& st = steps_[i];
         if (st.pct >= 0) {
-            st.ms = flow.ctl.t0() + flow.ctl.run_length() * st.pct / 100;
+            int64_t span = flow.ctl.reversed() ? flow.ctl.back_e() : flow.ctl.run_length();
+            st.ms = flow.ctl.t0() + span * st.pct / 100;
             st.pct = -1;
         }
         if (i > 0)
@@ -1069,6 +1594,8 @@ private:
 
     void apply(const Step& st)
     {
+        if (inputs_)
+            fprintf(inputs_, "%lld %s %d\n", (long long)now_, st.key.c_str(), st.down ? 1 : 0);
         if (st.key == "ret") {
             if (st.down)
                 game_returned();
@@ -1105,10 +1632,169 @@ private:
             repeat_.release(a, kFromKeys, now_);
     }
 
+    void pane_frame(int n, int png_n, int64_t tf)
+    {
+        MotionCtl& ctl = flow.ctl;
+        const SlidePlan* sp = flow.plan();
+        bool fold = ctl.active() && (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse);
+        if (!pane_log_.on() || !fold || !sp || !sp->pane || !sp->pane_frame)
+            return;
+        int64_t ft = ctl.forward_time(tf);
+        int rest = pane_rest(*sp, ft, ctl.reversed(), sp->pane->settled());
+        if (ctl.t0() != pane_t0_ || ctl.reversed() != pane_back_) {
+            if (pane_t0_ < 0)
+                pane_log_.surface(eng::kPaneSid, "pane", "step", sp->pane->rect());
+            pane_t0_ = ctl.t0();
+            pane_back_ = ctl.reversed();
+            pane_log_.fold(ctl.t0(), "step", fold_kind_name(ctl.kind()), ctl.reversed(), 3 * sp->pane_stop,
+                           *sp->pane_frame, sp->moves.collapse, sp->moves.redeal, eng::kPaneSid);
+        }
+        if (!pane_log_.frame(n, png_n, tf, ft, rest, *sp->pane_frame, *sp->pane, -1, eng::kPaneSid))
+            dump_failed_ = true;
+    }
+
+    void page_frame_log(int n, int png_n, int64_t tf)
+    {
+        const PageRun* run = flow.page_run();
+        if (run && !page_log(pane_log_, page_log_, flow.ctl, *run, n, png_n, tf))
+            dump_failed_ = true;
+    }
+
+    bool block_frame(int n, int png_n, int64_t tf)
+    {
+        pane_frame(n, png_n, tf);
+        page_frame_log(n, png_n, tf);
+        MotionCtl& ctl = flow.ctl;
+        const SlidePlan* sp = flow.plan();
+        bool fold = ctl.active() && (ctl.kind() == FoldKind::Expand || ctl.kind() == FoldKind::Collapse);
+        if (!blocks_ || !fold || !sp || !block_form(sp->left))
+            return true;
+        const LeftPlan& lp = sp->moves;
+        bool fw = ctl.kind() == FoldKind::Expand && !ctl.reversed();
+        Surface f = ctl.from(), t = ctl.to();
+        Surface a = fw ? f : t, b = fw ? t : f;
+        Surface frame = last_.surface();
+        uint32_t ground = LiveF::pack(theme().bg);
+        auto boundary = [&](int64_t at) { return std::clamp(slide_pose(*sp, at).boundary, kPaneSplit, frame.w); };
+        int64_t ft = ctl.forward_time(tf);
+        int64_t tl = block_time(lp, ft);
+        int bx = boundary(ft);
+        int rest = block_rest(lp, ft, tl);
+        if (ctl.t0() != fold_t0_ || ctl.reversed() != fold_back_) {
+            fold_t0_ = ctl.t0();
+            fold_back_ = ctl.reversed();
+            int64_t d3 = block_thirds(lp);
+            fprintf(blocks_, "fold %lld %s %s %d %d %d %lld %zu\n", (long long)ctl.t0(), left_name(sp->left),
+                    fold_kind_name(ctl.kind()), ctl.reversed() ? 1 : 0, lp.collapse ? 1 : 0, lp.redeal ? 1 : 0,
+                    (long long)d3, lp.blocks.size());
+            for (size_t i = 0; i < lp.blocks.size(); i++) {
+                const Block& k = lp.blocks[i];
+                fprintf(blocks_, "block %zu %lld %d %d %d %d %d %d %d %d %d %d %d %d %d\n", i, (long long)k.id,
+                        k.wide ? 1 : 0, k.game, k.col, k.row, k.cell.x0, k.cell.y0, k.cell.x1, k.cell.y1,
+                        k.art ? 1 : 0, k.focus ? 1 : 0, block_key(lp, (int)i) + 1, block_sigma(lp, k),
+                        block_departs(lp, (int)i) ? 1 : 0);
+            }
+            int64_t dm = (d3 + 2) / 3, tail = kBlockTailMs;
+            int64_t ends[2][2] = {{0, lp.collapse ? dm + tail : 0}, {d3, lp.collapse ? 0 : dm}};
+            for (int e = 0; e < 2; e++) {
+                int lb = boundary(ends[e][1]);
+                std::vector<BlockPose> legs = block_legs(lp, ends[e][0], lb);
+                fprintf(blocks_, "leg %d %lld %d %zu\n", e, (long long)ends[e][0], lb, legs.size());
+                for (const BlockPose& q : legs)
+                    write_pose(blocks_, -1, lp, q);
+            }
+        }
+        std::vector<BlockPose> poses = block_poses(lp, ft, tl, bx);
+        bool copied = lp.glow_on ? glow_view(lp).copied : rest != 0;
+        fprintf(blocks_, "frame %d %d %lld %lld %lld %d %d %zu %d %d %d %d\n", n, png_n, (long long)tf,
+                (long long)ft, (long long)tl, bx, rest, poses.size(), copied ? 1 : 0, lp.glow_on ? 1 : 0,
+                block_settled(lp) ? 1 : 0, lp.glow_on && glow_view(lp).last == tf ? 1 : 0);
+        if (!o_.dump.empty() && !dump_frame(n, lp, a, b))
+            dump_failed_ = true;
+        int arrived = 0, dark = 0;
+        for (const BlockPose& q : poses) {
+            write_pose(blocks_, n, lp, q);
+            const Block& k = lp.blocks[(size_t)q.block];
+            if (arrived_at_ < ctl.t0() || k.wide != fw || !late_.count(k.id) || !art.count(k.id))
+                continue;
+            arrived++;
+            Rect vis = q.rect.intersect(q.clip);
+            bool hidden = k.col == kGridColsWide - 1 && !lp.redeal && vis.empty() &&
+                          !q.rect.intersect(block_clip(lp, bx)).empty();
+            if (!k.art || hidden || !shows_art(k.wide ? b : a, k.cell.intersect(lp.band), ground) ||
+                (!vis.empty() && !shows_art(frame, vis, ground)))
+                dark++;
+        }
+        if (arrived && (arrive_logged_ != ctl.t0() || dark)) {
+            arrive_logged_ = ctl.t0();
+            fprintf(stderr, "blockie-shot: %lld ms arrive check %s, %d arrived blocks on the destination side\n",
+                    (long long)tf,
+                    dark ? "FAILED, an arrived block is clipped away inside the pane or shows ground"
+                         : "every arrived block draws its art from this frame",
+                    arrived);
+        }
+        if (dark)
+            return false;
+        if (copied)
+            return true;
+        int bad_x = -1, bad_y = -1;
+        bool held = blocks_hold(lp, poses, a, b, frame, std::max(bx, kPaneLeftEdge), ground, bad_x, bad_y,
+                                PaneView{sp->pane.get(), sp->pane_frame.get()});
+        if (held)
+            fprintf(stderr, "blockie-shot: %lld ms blocks check the frame is every block at its logged pose%s\n",
+                    (long long)tf, ctl.reversed() ? ", reversed at e - s" : "");
+        else
+            fprintf(stderr, "blockie-shot: %lld ms blocks check FAILED at x %d y %d\n", (long long)tf, bad_x, bad_y);
+        return held;
+    }
+
+    bool dump_frame(int n, const LeftPlan& lp, const Surface& a, const Surface& b)
+    {
+        const Glow& gl = glow_view(lp);
+        Rect gr = block_glow_rect(lp);
+        size_t px = (size_t)(gr.x1 - gr.x0) * (size_t)(gr.y1 - gr.y0);
+        const Surface* src[2] = {&a, &b};
+        const char* side[2] = {"a", "b"};
+        char name[32];
+        for (int i = 0; i < 2; i++) {
+            unsigned long long h = frame_hash(*src[i]);
+            if (h == dump_hash_[i])
+                continue;
+            std::vector<uint32_t> v = band_px(*src[i], gr);
+            snprintf(name, sizeof name, "/%s-%05d.z", side[i], n);
+            if (!dump_z(o_.dump + name, v.data(), v.size() * sizeof(uint32_t))) {
+                fprintf(stderr, "blockie-shot: cannot write %s%s\n", o_.dump.c_str(), name);
+                return false;
+            }
+            dump_hash_[i] = h;
+            fprintf(blocks_, "surf %d %s %016llx %d\n", n, side[i], h, i == 0 && !lp.redeal ? kSwapSigma : 256);
+        }
+        bool have = gl.e.size() == px && gl.ids.size() == px && gl.age.size() == px;
+        std::vector<uint16_t> e = have ? gl.e : std::vector<uint16_t>(px, 0);
+        std::vector<uint8_t> ids = have ? gl.ids : std::vector<uint8_t>(px, 0);
+        std::vector<uint8_t> age = have ? gl.age : std::vector<uint8_t>(px, (uint8_t)kGlowAgeMs);
+        snprintf(name, sizeof name, "/e-%05d.z", n);
+        bool ok = dump_z(o_.dump + name, e.data(), e.size() * sizeof(uint16_t));
+        if (ok) {
+            snprintf(name, sizeof name, "/id-%05d.z", n);
+            ok = dump_z(o_.dump + name, ids.data(), ids.size());
+        }
+        if (ok) {
+            snprintf(name, sizeof name, "/g-%05d.z", n);
+            ok = dump_z(o_.dump + name, age.data(), age.size());
+        }
+        if (!ok)
+            fprintf(stderr, "blockie-shot: cannot write %s%s\n", o_.dump.c_str(), name);
+        else
+            fprintf(blocks_, "dump %d %d %d %d %d\n", n, gr.x0, gr.y0, gr.x1, gr.y1);
+        return ok;
+    }
+
     void arrive()
     {
         arrived_ = true;
         arrive_held_ = false;
+        arrived_at_ = now_;
         for (int64_t id : late_) {
             auto it = art.find(id);
             if (it != art.end())
@@ -1138,8 +1824,11 @@ private:
                 continue;
             }
             PadAction a = PadAction::Up;
-            if (repeat_.due(t, a))
+            if (repeat_.due(t, a)) {
+                if (inputs_)
+                    fprintf(inputs_, "%lld repeat 1 %s\n", (long long)t, key_name(a));
                 keys_.repeat(a, t);
+            }
         }
     }
 
@@ -1188,6 +1877,21 @@ private:
     int64_t back_logged_ = -1;
     Buffer rest_sel_;
     Buffer rest_det_;
+    FILE* blocks_ = nullptr;
+    FILE* inputs_ = nullptr;
+    unsigned long long dump_hash_[2] = {0, 0};
+    bool dump_failed_ = false;
+    bool hp_failed_ = false;
+    int64_t page_t0_ = -1;
+    bool dump_logged_ = false;
+    int64_t fold_t0_ = -1;
+    bool fold_back_ = false;
+    eng::PoseLog pane_log_;
+    int64_t pane_t0_ = -1;
+    bool pane_back_ = false;
+    PageLogState page_log_;
+    int64_t arrived_at_ = -1;
+    int64_t arrive_logged_ = -1;
 };
 
 bool ports_library(const std::string& dir, Library& lib)
@@ -1299,7 +2003,7 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
             if (i == 0 && !o.title0.empty())
                 g.name = o.title0;
             g.system = kNames[s];
-            if (s == focus && !d->sys_covers.empty())
+            if (s == focus && !d->sys_covers.empty() && !listed(o.artless, i) && !listed(o.artless_sys, i))
                 d->art[g.id] = d->sys_covers[(size_t)i % d->sys_covers.size()];
             list.push_back(g);
         }
@@ -1319,7 +2023,7 @@ int run_drive(Fonts& fonts, const DriveOpts& o, const std::string& out, const st
         g.id = kRecentIds + k;
         g.name = rtitles.empty() ? "Synth Recent " + std::to_string(k + 1) : rtitles[(size_t)k % rtitles.size()];
         g.system = rsys[(size_t)k % rsys.size()];
-        if (!d->recent_covers.empty())
+        if (!d->recent_covers.empty() && !listed(o.artless, k))
             d->art[g.id] = d->recent_covers[(size_t)k % d->recent_covers.size()];
         d->recent_games.push_back(g);
     }
@@ -2976,6 +3680,7 @@ int main(int argc, char** argv)
     std::string frames_dir;
     std::string bt_sub;
     std::string bt_state;
+    std::string word_out;
     int tile_focus = -1;
     int sys_focus = 0;
     int systems = 6;
@@ -3032,6 +3737,12 @@ int main(int argc, char** argv)
             light = true;
         else if (a == "--page" && i + 1 < argc)
             page = argv[++i];
+        else if (a == "--word" && i + 1 < argc)
+            word_out = argv[++i];
+        else if (a == "--hp")
+            drive.hp = true;
+        else if (a == "--word-dir" && i + 1 < argc)
+            drive.word_dir = argv[++i];
         else if (a == "--sheet") {
             page_opts.sheet = true;
             if (i + 1 < argc && (std::string(argv[i + 1]) == "tz" || std::string(argv[i + 1]).rfind("tz:", 0) == 0))
@@ -3104,13 +3815,37 @@ int main(int argc, char** argv)
             drive.big = std::string(argv[++i]) == "g2";
         else if (a == "--slots" && i + 1 < argc)
             drive.slots = std::string(argv[++i]) == "c" ? SlotMap::RecentC : SlotMap::RowMajor;
-        else if (a == "--left" && i + 1 < argc) {
-            std::string v = argv[++i];
-            if (v != "t5" && v != "l0") {
-                fprintf(stderr, "blockie-shot: --left takes t5 or l0\n");
+        else if (a == "--engine" && i + 1 < argc) {
+            std::string e = argv[++i];
+            if (e != "fast" && e != "pixel") {
+                fprintf(stderr, "blockie-shot: --engine takes fast or pixel\n");
                 return 2;
             }
-            drive.left = v == "l0" ? LeftMove::Fade : LeftMove::T5;
+            drive.fast = e == "fast";
+        }
+        else if (a == "--blocks" && i + 1 < argc)
+            drive.blocks = argv[++i];
+        else if (a == "--pane-blocks" && i + 1 < argc)
+            drive.pane_blocks = argv[++i];
+        else if (a == "--pane-dump" && i + 1 < argc)
+            drive.pane_dump = argv[++i];
+        else if (a == "--dump" && i + 1 < argc)
+            drive.dump = argv[++i];
+        else if (a == "--late" && i + 1 < argc) {
+            std::string v = argv[++i];
+            if (v != "recent" && v != "sys") {
+                fprintf(stderr, "blockie-shot: --late takes recent or sys\n");
+                return 2;
+            }
+            drive.late_sys = v == "sys";
+        }
+        else if (a == "--artless" && i + 1 < argc) {
+            for (const std::string& v : comma_list(argv[++i]))
+                drive.artless.push_back(atoi(v.c_str()));
+        }
+        else if (a == "--artless-sys" && i + 1 < argc) {
+            for (const std::string& v : comma_list(argv[++i]))
+                drive.artless_sys.push_back(atoi(v.c_str()));
         }
         else if (a == "--t9clip" && i + 1 < argc)
             drive.t9_edge = std::string(argv[++i]) == "edge";
@@ -3140,6 +3875,12 @@ int main(int argc, char** argv)
         }
         else if (a == "--startup")
             drive.startup = true;
+        else if (a == "--input-lead" && i + 1 < argc)
+            drive.input_lead = std::max<int64_t>(0, atoll(argv[++i]));
+        else if (a == "--startup-at" && i + 1 < argc) {
+            drive.startup = true;
+            drive.startup_at = std::max<int64_t>(0, atoll(argv[++i]));
+        }
         else if (a == "--exit" && i + 1 < argc) {
             drive.exit_class = argv[++i];
             int status = 0;
@@ -3219,6 +3960,10 @@ int main(int argc, char** argv)
     }
     if (!pops_dir.empty())
         return run_pops(pops_dir, pop_lead, pop_summary, pop_case.empty() ? pops_dir : pop_case);
+    if (!drive.dump.empty() && drive.blocks.empty()) {
+        fprintf(stderr, "blockie-shot: --dump needs --blocks FILE\n");
+        return 2;
+    }
     if (drive.on && menu_top_set) {
         fprintf(stderr, "blockie-shot: --menutop is not a --drive option, the drive keeps the focus in view\n");
         return 2;
@@ -3233,12 +3978,13 @@ int main(int argc, char** argv)
         fprintf(stderr,
                 "usage: blockie-shot OUT.png [--focus selector|details] [--fonts DIR] [--tiles DIR] [--header TEXT]"
                 " [--tilefocus N] [--sysfocus N] [--systems N] [--menutop N] [--items] [--btsub TEXT]"
-                " [--light] [--page settings] [--pivot WORD] [--pagefocus N] [--sheet [tz|tz:REGION]] [--sheetfocus N]"
+                " [--light] [--page settings [--word FILE]] [--pivot WORD] [--pagefocus N]"
+                " [--sheet [tz|tz:REGION]] [--sheetfocus N]"
                 " [--sheetrows 6|7] [--zone ID] [--zone-missing] [--zonetab PATH] [--set ID=VALUE] [--hide ID]"
                 " [--battery CAP:STATUS|unknown] [--volume PCT[:muted]|fail] [--radio on|off|gone]"
                 " [--storage FREE:TOTAL:SYSFREE:SYSTOTAL|nocard:SYSFREE:SYSTOTAL] [--about OS_RELEASE|FRONTEND|KERNEL]"
                 " [--toast LINE1|LINE2] [--scatter]"
-                " [--gamedetail SYSTEM|TITLE] [--bt unavailable|off|empty|list|searching|sheet|confirm]\n"
+                " [--gamedetail SYSTEM|TITLE] [--bt unavailable|off|empty|list|searching|sheet|confirm [--hp]]\n"
                 "       blockie-shot --pageflip push|pop --frames DIR [same options]\n"
                 "       blockie-shot --page settings --frames DIR [--script KEY|fail|missing:d|u:MS,...] [--from MS]"
                 " [--tail N]"
@@ -3246,9 +3992,14 @@ int main(int argc, char** argv)
                 "       blockie-shot --drive [OUT.png] [--frames DIR] [--script KEY|ret|cover|theme:d|u:MS|PCT%%,...]"
                 " [--at MS] [--from MS]"
                 " [--recentn N] [--recentin K] [--sysgames N] [--noart] [--title0 TEXT] [--titles FILE]"
-                " [--recenttitles FILE] [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c] [--left t5|l0]"
-                " [--t9clip pane|edge] [--bar content|slot] [--gridscroll band|full] [--startup] [--arrive MS]"
-                " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT]"
+                " [--recenttitles FILE] [--recentsys NAME[,NAME...]] [--grid g1|g2] [--slots a|c]"
+                " [--engine fast|pixel] [--hp] [--word-dir DIR]"
+                " [--blocks FILE [--dump DIR]]"
+                " [--pane-blocks FILE [--pane-dump DIR]] [--t9clip pane|edge]"
+                " [--bar content|slot]"
+                " [--gridscroll band|full] [--startup] [--arrive MS] [--late recent|sys] [--artless N[,N...]]"
+                " [--artless-sys N[,N...]]"
+                " [--tail N] [--cadence MS] [--repeat-covers] [--fallback FONT] [--startup-at MS] [--input-lead MS]"
                 " [--exit quit|crash|oom|busy|config|exec|core|audio|spawn] [--quitstamp] [--port]"
                 " [--helper install|update|remove] [--portsdir DATA/roms/ports] [--libretro DIR] [same options]\n"
                 "       blockie-shot --portmsg CALLS [OUT.png] [--frames DIR] [--plate black|FILE.png] [--at MS]"
@@ -3268,6 +4019,11 @@ int main(int argc, char** argv)
                 " [--from MS] [--tail N] [same options]\n");
         return 2;
     }
+    bool still = page == "settings" && !drive.on && !sequence && !page_frames && !pm_shot && bt_state.empty();
+    if (!word_out.empty() && !still) {
+        fprintf(stderr, "blockie-shot: --word needs a settings still, OUT.png --page settings\n");
+        return 2;
+    }
     if (font_dir.empty())
         font_dir = "fonts";
     set_theme_light(light);
@@ -3279,7 +4035,7 @@ int main(int argc, char** argv)
     }
     fonts.begin_frame(-1);
     if (!bt_state.empty())
-        return shot_bt(out, bt_state, fonts);
+        return shot_bt(out, bt_state, fonts, drive.hp);
     if (!page_opts.zonetab.empty() && access(page_opts.zonetab.c_str(), R_OK) != 0)
         fprintf(stderr, "blockie-shot: cannot read %s, the sheet lists only utc\n", page_opts.zonetab.c_str());
     Zones zones = page_opts.zonetab.empty() ? Zones() : load_zones(page_opts.zonetab);
@@ -3360,20 +4116,22 @@ int main(int argc, char** argv)
         draw_selector(mc, fonts, model, Pane::Selector, scatter, false);
         Canvas pc(pageb.surface());
         draw_settings(pc, fonts, ink, sv, theme());
-        auto plan = std::make_shared<const FoldPlan>(fold_page(model.focus - menu_top));
-        int64_t dur = fold_duration(*plan);
         Surface shown = push ? menub.surface() : pageb.surface();
         Surface dest = push ? pageb.surface() : menub.surface();
+        eng::Instance page_eng(kScreen);
         MotionCtl ctl;
         ctl.render = [&](const Surface& s, Rect) { copy_surface(dest, s); };
         ctl.last = [&](const Surface& s) { copy_surface(shown, s); };
         ctl.render_kept = ctl.last;
-        FoldPlay play;
-        play.duration = dur;
-        play.forward = [plan](const Surface& a, const Surface& b, const Surface& dst, int64_t t, int64_t) {
-            fold_compose(a, b, dst, *plan, t);
-            return dst.rect();
-        };
+        auto run = std::make_shared<PageRun>();
+        run->form.closing = !push;
+        run->form.under = page_inks(page_art(kPaneSplit, true));
+        run->form.over = page_inks(Rect{});
+        run->form.under_els = home_elements(kPaneSplit, true, model.focus - menu_top);
+        run->form.over_els = page_elements("settings", "chrome", settings_page_rows(sv));
+        run->in = &page_eng;
+        FoldPlay play = page_fold(run);
+        int64_t dur = play.duration;
         ctl.start(push ? FoldKind::Push : FoldKind::Pop, play, 0);
         Buffer outb;
         int n = 0;
@@ -3389,16 +4147,49 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (!word_out.empty() && (sv.sheet.open || sv.rowsheet.open || sv.toast.e > 0)) {
+        fprintf(stderr, "blockie-shot: --word needs a rest, with no sheet or toast open\n");
+        return 2;
+    }
+    auto settings_still = [&](const Surface& s, const SettingsView& v) {
+        Canvas pc(s);
+        draw_settings(pc, fonts, ink, v, theme());
+    };
     Buffer buf;
-    Canvas c(buf.surface());
-    if (page == "settings")
-        draw_settings(c, fonts, ink, sv, theme());
-    else
+    if (page == "settings") {
+        settings_still(buf.surface(), sv);
+    } else {
+        Canvas c(buf.surface());
         draw_selector(c, fonts, model, focus, scatter, detail);
+    }
 
     if (!write_png(out, buf.surface())) {
         fprintf(stderr, "blockie-shot: cannot write %s\n", out.c_str());
         return 1;
     }
-    return 0;
+    if (word_out.empty())
+        return 0;
+    bool ok = word_check(fonts, settings_word(), buf.surface());
+    SettingsView wv = sv;
+    wv.pivots.clear();
+    Buffer wb;
+    settings_still(wb.surface(), wv);
+    ok = clip_check(fonts, wb.surface()) && ok;
+    Surface r = buf.surface(), w = wb.surface();
+    int s0 = px(tok::pivotTop), s1 = px(tok::pivotBottom), bad = -1;
+    for (int y = 0; y < r.h && bad < 0; y++)
+        if ((y < s0 || y >= s1) && !std::equal(r.row(y), r.row(y) + r.w, w.row(y)))
+            bad = y;
+    if (!write_png(word_out, w)) {
+        fprintf(stderr, "blockie-shot: cannot write %s\n", word_out.c_str());
+        return 1;
+    }
+    if (bad < 0)
+        fprintf(stderr, "blockie-shot: settings word layer %s written, equal to the rest outside rows %d to %d\n",
+                word_out.c_str(), s0, s1);
+    else
+        fprintf(stderr, "blockie-shot: settings word layer %s FAILED, row %d differs from the rest outside the "
+                        "pivot strip\n",
+                word_out.c_str(), bad);
+    return ok && bad < 0 ? 0 : 1;
 }

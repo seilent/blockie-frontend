@@ -2,15 +2,18 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "../gfx/canvas.h"
 #include "../gfx/font.h"
+#include "engine.h"
 #include "glide.h"
 #include "home.h"
 #include "launchflow.h"
 #include "motion.h"
 #include "nav.h"
+#include "pageform.h"
 #include "pagemove.h"
 #include "screen_selector.h"
 #include "slide.h"
@@ -21,11 +24,14 @@ namespace fd {
 struct FlowOpts {
     bool big = false;
     SlotMap slots = SlotMap::RowMajor;
-    LeftMove left = LeftMove::T5;
     bool t9_edge = false;
     bool bar_slot = false;
     bool grid_band = true;
     bool menu_glide = true;
+    bool lang = false;
+    bool fast = false;
+    bool verify = false;
+    bool dry = false;
 };
 
 Screen page_under(const Nav& n, bool push);
@@ -46,6 +52,9 @@ public:
     std::function<bool(Screen, PadAction, bool)> page_input;
     std::function<void(Screen, int64_t now)> page_open;
     std::function<int(Screen)> page_seed_y;
+    std::function<std::vector<PageRow>(Screen)> page_rows;
+    std::function<PageHead(Screen)> page_head;
+    std::function<void(Canvas&, const PageHead&)> draw_word;
     std::function<void(const std::vector<HomeGame>& want, int scroll)> covers_wanted;
     std::function<void()> system_left;
     std::function<void(int64_t now)> rearm;
@@ -83,8 +92,29 @@ public:
     bool launched() const { return launched_; }
     int page_seed() const { return page_seed_; }
     const T9& t9() const { return t9_; }
+    const SlidePlan* plan() const { return plan_.get(); }
+    const eng::Instance* pane() const { return pane_.pane.get(); }
+    const eng::Instance* page_engine() const { return page_eng_.get(); }
+    const Glide& scroll_glide() const { return scroll_; }
+    const Glide& bar_glide() const { return bar_; }
+    bool glow_owed() const;
+    bool page_owed() const
+    {
+        return page_eng_ && !nav.store && nav.top() != Screen::Port && !page_eng_->prepared() &&
+               !page_eng_->start_busy();
+    }
+    bool start_owed();
+    bool prepare_owed() { return glow_owed() || page_owed() || start_owed(); }
+    void prepare_pass() { seed_fresh_ = false; }
+    char prepare(int rows);
+    Rect band() const;
+    void set_clock(std::function<int64_t()> c);
+    void set_probe(bool on);
+    const Glow& glow() const { return *glow_; }
+    const PageRun* page_run() const;
 
     Nav kept_focus() const;
+    bool opening() const { return opening_; }
     const SelectorModel& kept() const { return kept_; }
     const Nav& kept_nav() const { return kept_nav_; }
     int boundary(int64_t t) const;
@@ -132,7 +162,9 @@ private:
     int grid_y_px(int first, int gy) const;
     void show_recent(int k);
     FoldPlay expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open);
-    FoldPlay page_play(Screen base);
+    PageForm page_form(Screen base, Screen over, bool push) const;
+    FoldPlay page_play(Screen base, bool push);
+    void seed_in();
     FoldPlay launch_play();
     FoldPlay swap_play();
     void start_wanted();
@@ -152,6 +184,7 @@ private:
     int64_t now_ = 0;
     bool launched_ = false;
     int page_seed_ = -1;
+    Screen popped_ = Screen::Home;
     bool redraw_ = false;
     Rect art_rect_;
     bool step_in_ = false;
@@ -160,9 +193,30 @@ private:
     int drawn_gy_ = 0;
     int drawn_first_ = 0;
     int drawn_focus_ = -1;
+    std::shared_ptr<Glow> glow_ = std::make_shared<Glow>();
+    uint64_t glow_gen_ = 0;
     std::shared_ptr<SlidePlan> plan_;
     std::unique_ptr<HomeKept> store_;
     int store_slot_ = 0;
+    std::shared_ptr<SlidePlan> next_plan_;
+    PaneSurface pane_;
+    std::unique_ptr<eng::Instance> page_eng_;
+    std::function<int64_t()> clock_;
+    std::shared_ptr<PageRun> page_run_;
+    std::shared_ptr<PageRun> next_run_;
+    Surface last_dst_;
+    eng::Frame seed_start_;
+    std::vector<Surface> seed_src_;
+    bool opening_ = false;
+    struct WordBand {
+        std::string word;
+        bool light = false;
+        Buffer band{kPortraitW, std_px(tok::headerBand)};
+    };
+    std::vector<std::unique_ptr<WordBand>> words_;
+    Surface word_band(const PageHead& h);
+    uint32_t seed_ground_ = 0;
+    bool seed_fresh_ = false;
 };
 
 }
