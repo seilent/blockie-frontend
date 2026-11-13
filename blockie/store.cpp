@@ -47,6 +47,12 @@ std::string stem(const std::string& name)
     return n > 4 && name.compare(n - 4, 4, ".zip") == 0 ? name.substr(0, n - 4) : name;
 }
 
+std::string leaf(const std::string& path)
+{
+    size_t s = path.find_last_of('/');
+    return s == std::string::npos ? path : path.substr(s + 1);
+}
+
 bool by_title(const StoreItem& a, const StoreItem& b)
 {
     std::string x = a.title, y = b.title;
@@ -202,7 +208,7 @@ std::vector<StoreItem> store_items(const Catalog* cat, const std::vector<IndexPo
     auto script_of = [&](const std::string& dir, const std::string& title, StoreItem& it) {
         for (size_t k = 0; k < index.size(); k++) {
             const IndexPort& ip = index[k];
-            bool match = !ip.dir.empty() ? ip.dir == dir : ip.title == title;
+            bool match = !ip.dir.empty() ? leaf(ip.dir) == dir : ip.title == title;
             if (!match)
                 continue;
             used[k] = true;
@@ -239,12 +245,12 @@ std::vector<StoreItem> store_items(const Catalog* cat, const std::vector<IndexPo
         const IndexPort& ip = index[k];
         bool same = false;
         for (StoreItem& it : out)
-            if (it.port < 0 && !ip.dir.empty() && it.name == ip.dir)
+            if (it.port < 0 && !ip.dir.empty() && it.name == leaf(ip.dir))
                 same = true;
         if (same)
             continue;
         StoreItem it;
-        it.name = ip.dir.empty() ? ip.base : ip.dir;
+        it.name = ip.dir.empty() ? ip.base : leaf(ip.dir);
         it.title = ip.title.empty() ? ip.base : ip.title;
         it.cover = ip.cover;
         it.script = ip.base;

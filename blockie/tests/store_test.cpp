@@ -350,6 +350,22 @@ int main()
             if (it.name == "blockie-test-c.zip")
                 same = it.id == id;
         check(same, "a port keeps its id when the catalogue changes");
+        std::vector<fd::IndexPort> full = {
+            {9, "blockie-test-a", "blockie test a", "/blockie-test/roms/ports/blockie-test-a", ""},
+            {10, "blockie-test-hand", "blockie test hand", "/blockie-test/roms/ports/blockie-test-hand", ""},
+            {11, "blockie-test-hand-b", "blockie test hand b", "/blockie-test/roms/ports/blockie-test-hand", ""}};
+        int a_inst = 0, extra = 0;
+        std::string hand;
+        for (const fd::StoreItem& it : fd::store_items(&c, full)) {
+            if (it.name == "blockie-test-a.zip" && it.installed && it.game_id == 9)
+                a_inst++;
+            if (it.port < 0) {
+                extra++;
+                hand = it.name;
+            }
+        }
+        check(a_inst == 1, "an index dir written as a full path matches its catalogue port");
+        check(extra == 1 && hand == "blockie-test-hand", "a port only in the index is named by its dir");
     }
 
     {
