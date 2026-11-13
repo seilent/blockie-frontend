@@ -26,6 +26,14 @@ void blit_art(Canvas& c, const Image* art, Rect r, int a)
     c.blit(*art, r.x0 + (r.x1 - r.x0 - art->w) / 2, r.y0 + (r.y1 - r.y0 - art->h) / 2, a);
 }
 
+Surface shift_x(Surface s, int ox)
+{
+    if constexpr (std::is_same_v<LiveL, Rows>)
+        s.px += ox;
+    s.w -= ox;
+    return s;
+}
+
 void draw_toast_of(Canvas& c, Fonts& f, InkLayer& ink, const ToastClock& tc, int64_t now, const Theme& t)
 {
     if (tc.phase(now) == 0)
@@ -137,12 +145,73 @@ void PortPage::layout()
             lines_.push_back({&role::npNext, l, base, role::npNext.alpha});
         }
     }
+    for (Line& l : lines_) {
+        TextStyle st = l.role->style();
+        int top = 0, bottom = 0;
+        fonts_.ink_rows(st, l.text.c_str(), top, bottom);
+        l.up = std::max(fonts_.ascent(st.px), -top);
+        l.down = std::max(fonts_.descent(st.px), bottom);
+    }
 }
 
 int PortPage::scroll_max() const
 {
     int last = lines_.empty() ? 0 : lines_.back().base;
     return std::max(0, last - kPortLastBase);
+}
+
+bool PortPage::rest_in(const Line& l, int s) const
+{
+    if (l.text.empty() || l.base + l.down - s > kBandBottom)
+        return false;
+    return s == 0 || l.base - l.up - s >= px(tok::toastHeight);
+}
+
+std::pair<int, int> PortPage::extent(int s) const
+{
+    int top = 0, bottom = 0;
+    bool any = false;
+    for (const Line& l : lines_) {
+        if (!rest_in(l, s))
+            continue;
+        top = any ? std::min(top, l.base - l.up - s) : l.base - l.up - s;
+        bottom = any ? std::max(bottom, l.base + l.down - s) : l.base + l.down - s;
+        any = true;
+    }
+    return any ? std::make_pair(top, bottom) : std::make_pair(px(tok::toastHeight), px(tok::toastHeight));
+}
+
+Rect PortPage::list_clip(int64_t now) const
+{
+    std::pair<int, int> to = extent(scroll_.target());
+    int span = scroll_.target() - fly_from_;
+    if (!scroll_.running(now) || span == 0)
+        return Rect{kPortColX, to.first, kPortColRight, to.second};
+    int64_t done = scroll_.at(now) - fly_from_;
+    int y0 = fly_top_ + (int)((to.first - fly_top_) * done / span);
+    int y1 = fly_bot_ + (int)((to.second - fly_bot_) * done / span);
+    return Rect{kPortColX, y0, kPortColRight, y1};
+}
+
+bool PortPage::drawn(int key, int64_t now) const
+{
+    if (rest_in(lines_[(size_t)key], scroll_.target()))
+        return true;
+    return scroll_.running(now) && std::find(fly_set_.begin(), fly_set_.end(), key) != fly_set_.end();
+}
+
+void PortPage::scroll_to(int to, int64_t now)
+{
+    Rect c = list_clip(now);
+    std::vector<int> set;
+    for (int i = 0; i < (int)lines_.size(); i++)
+        if (drawn(i, now))
+            set.push_back(i);
+    fly_set_ = std::move(set);
+    fly_from_ = scroll_.at(now);
+    fly_top_ = c.y0;
+    fly_bot_ = c.y1;
+    scroll_.to(to, now, ms_of(tok::motion_scroll), Curve::EaseIn);
 }
 
 void PortPage::set_item(const StoreItem& it, bool online, int64_t now)
@@ -352,7 +421,7 @@ PortPage::Act PortPage::action(PadAction a, bool repeat, int64_t now)
         if (column_focus()) {
             int to = std::clamp(scroll_.target() + d * kPortScrollStep, 0, scroll_max());
             if (to != scroll_.target())
-                scroll_.to(to, now, ms_of(tok::motion_scroll), Curve::EaseIn);
+                scroll_to(to, now);
             break;
         }
         int to = std::clamp(focus_ + d, 0, (int)acts_.size() - 1);
@@ -422,18 +491,19 @@ void PortPage::draw_row(Canvas& k, const Action& a, int top, fx alpha, bool focu
 {
     Row r = row_of(a);
     Rect keep = k.clip();
-    k.set_clip(Rect{0, top, kPortRowClip, top + px(sz().rowHeight)}.intersect(keep));
-    draw_list_row(k, fonts_, &glyphs_, r, top, alpha, focused);
+    Canvas v(shift_x(k.surface(), kPortRowX));
+    v.set_clip(Rect{0, top, kPortRowClip - kPortRowX, top + px(sz().rowHeight)}.intersect(
+        Rect{keep.x0 - kPortRowX, keep.y0, keep.x1 - kPortRowX, keep.y1}));
+    draw_list_row(v, fonts_, &glyphs_, r, top, alpha, focused);
     if (working_ && no_total_ && live(a))
-        draw_dots(k, r, top, now);
-    k.set_clip(keep);
+        draw_dots(v, r, top, now);
 }
 
 void PortPage::draw_dots(Canvas& k, const Row& r, int top, int64_t now)
 {
     int x0 = row_title_x64(fonts_, r, true) >> 6;
     int y = top + px(kPortDotsDrop);
-    busy_dots(k, Rect{x0, y, kPortRowClip, y + px(kDotSide)}, kWhite, now - spin0_);
+    busy_dots(k, Rect{x0, y, kPortRowClip - kPortRowX, y + px(kDotSide)}, kWhite, now - spin0_);
 }
 
 void PortPage::draw_rows(Canvas& c, InkLayer& ink, int64_t now, fx pane)
@@ -446,7 +516,7 @@ void PortPage::draw_rows(Canvas& c, InkLayer& ink, int64_t now, fx pane)
         draw_row(k, rows[i], kPortRowsTop + (int)i * pitch, fx_mul((int)i == focus_ ? lit : dim, pane),
                  (int)i == focus_, now);
     if (!rows.empty() && !column_focus()) {
-        int x = px(tok::hubEdge - tok::focus_barOffset);
+        int x = kPortRowX + px(tok::hubEdge - tok::focus_barOffset);
         int y = kPortRowsTop + index_px(bar_.at(now), pitch);
         k.blend({x, y, x + px(tok::focus_barWidth), y + pitch}, kWhite, alpha256(pane));
     }
@@ -455,16 +525,16 @@ void PortPage::draw_rows(Canvas& c, InkLayer& ink, int64_t now, fx pane)
 
 void PortPage::draw_column(Canvas& c, InkLayer& ink, int64_t now, fx pane)
 {
-    Rect area{kPortColX, 0, kPortColRight, kPortColBottom};
     Canvas& k = ink.begin(Rect{kPaneSplit, 0, kPortraitW, kPortColBottom});
     Rect keep = k.clip();
-    k.set_clip(area.intersect(keep));
+    k.set_clip(list_clip(now).intersect(keep));
     int off = scroll_.at(now);
-    for (const Line& l : lines_) {
-        int base = l.base - off;
-        if (l.text.empty() || base < -kPortBodyPitch || base > kPortColBottom + kPortBodyPitch)
+    for (int i = 0; i < (int)lines_.size(); i++) {
+        const Line& l = lines_[(size_t)i];
+        if (l.text.empty() || !drawn(i, now))
             continue;
-        fonts_.draw(k, l.role->style(), l.text.c_str(), kPortColX * 64, base, kWhite, alpha256(fx_mul(l.alpha, pane)));
+        fonts_.draw(k, l.role->style(), l.text.c_str(), kPortColX * 64, l.base - off, kWhite,
+                    alpha256(fx_mul(l.alpha, pane)));
     }
     k.set_clip(keep);
     ink.compose(c.surface(), theme().ink);
@@ -562,12 +632,13 @@ std::vector<Rect> PortPage::line_rects(int64_t now) const
 {
     std::vector<Rect> out;
     int off = scroll_.at(now);
-    for (const Line& l : lines_) {
-        if (l.text.empty())
+    Rect clip = list_clip(now);
+    for (int i = 0; i < (int)lines_.size(); i++) {
+        const Line& l = lines_[(size_t)i];
+        if (l.text.empty() || !drawn(i, now))
             continue;
-        TextStyle st = l.role->style();
-        int y0 = std::max(0, l.base - off - fonts_.ascent(st.px));
-        int y1 = std::min(kPortColBottom, l.base - off + fonts_.descent(st.px));
+        int y0 = std::max(clip.y0, l.base - off - l.up);
+        int y1 = std::min(clip.y1, l.base - off + l.down);
         if (y1 > y0)
             out.push_back(Rect{kPaneSplit, y0, kPortraitW, y1});
     }

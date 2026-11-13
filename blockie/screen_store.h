@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "../core/tween.h"
@@ -21,10 +22,10 @@
 
 namespace fd {
 
-constexpr int kStoreShotSide = 336;
+constexpr int kStoreShotSide = 2 * kTileSide + kGridGutter;
 
-constexpr int kPortArtX = 32;
-constexpr int kPortArtTop = 144;
+constexpr int kPortArtX = kGridX;
+constexpr int kPortArtTop = kTileFirstTop;
 constexpr int kPortColX = 512;
 constexpr int kPortColRight = 928;
 constexpr int kPortColBottom = 720;
@@ -36,7 +37,8 @@ constexpr int kPortTitleLines = 4;
 constexpr int kPortSizeStep = 48;
 constexpr int kPortBodyPitch = 36;
 constexpr int kPortScrollStep = 36;
-constexpr int kPortRowsTop = 480;
+constexpr int kPortRowsTop = kTileFirstTop + 2 * kGridRowPitch;
+constexpr int kPortRowX = kGridX - std_px(tok::hubEdge);
 constexpr int kPortRowClip = 408;
 constexpr fx kPortDotsDrop = fx_int(21);
 constexpr int kPortDialogClip = 928;
@@ -99,6 +101,7 @@ private:
         std::string text;
         int base = 0;
         fx alpha = kOne;
+        int up = 0, down = 0;
     };
     struct Action {
         Kind kind = Kind::Install;
@@ -112,6 +115,11 @@ private:
     bool live(const Action& a) const;
     void draw_dots(Canvas& k, const Row& r, int top, int64_t now);
     int scroll_max() const;
+    bool rest_in(const Line& l, int s) const;
+    std::pair<int, int> extent(int s) const;
+    Rect list_clip(int64_t now) const;
+    bool drawn(int key, int64_t now) const;
+    void scroll_to(int to, int64_t now);
     bool column_focus() const { return column_ || (acts_.empty() && land_focus_ < 0); }
     void dialog(bool stop, int64_t now);
     void open_stop(Overlay& d, int64_t now);
@@ -143,6 +151,8 @@ private:
     Tween bar_;
     bool column_ = false;
     Glide scroll_;
+    int fly_from_ = 0, fly_top_ = 0, fly_bot_ = 0;
+    std::vector<int> fly_set_;
     std::vector<Line> lines_;
     Art art_;
     Overlay dialog_, login_dialog_;

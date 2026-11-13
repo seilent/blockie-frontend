@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -490,8 +491,8 @@ int main(int argc, char** argv)
         Surface ps = page.surface();
         uint32_t ground = ps.at(2, kPortraitH - 2);
         int inked = 0;
-        for (int y = 522; y < 526; y++)
-            for (int x = 100; x < kPortRowClip; x++)
+        for (int y = kPortRowsTop + 42; y < kPortRowsTop + 46; y++)
+            for (int x = kPortRowX + 100; x < kPortRowClip; x++)
                 inked += ps.at(x, y) != ground ? 1 : 0;
         check(r.helper.running() && inked > 0,
               "f2: an install with no total draws the busy dots 21 u under the install row's top");
@@ -507,7 +508,7 @@ int main(int argc, char** argv)
             uint32_t ground = ps.at(2, kPortraitH - 2);
             int inked = 0;
             for (int y = y0; y < y0 + 4; y++)
-                for (int x = 100; x < kPortRowClip; x++)
+                for (int x = kPortRowX + 100; x < kPortRowClip; x++)
                     inked += ps.at(x, y) != ground ? 1 : 0;
             return inked;
         };
@@ -568,7 +569,7 @@ int main(int argc, char** argv)
             uint32_t ground = ps.at(2, kPortraitH - 2);
             int inked = 0;
             for (int y = kPortRowsTop + 80 + 42; y < kPortRowsTop + 80 + 46; y++)
-                for (int x = 100; x < kPortRowClip; x++)
+                for (int x = kPortRowX + 100; x < kPortRowClip; x++)
                     inked += ps.at(x, y) != ground ? 1 : 0;
             return inked;
         };
@@ -721,9 +722,9 @@ int main(int argc, char** argv)
         QrGrid v3, v4, v18;
         bool enc = qr_encode(kUrl38, v3) && qr_encode("https://s.team/q/1/" + std::string(41, '2'), v4) &&
                    qr_encode("https://s.team/q/1/" + std::string(493, '3'), v18);
-        check(enc && v3.version == 3 && qr_module_px(v3, kStoreShotSide) == 9 && v4.version == 4 &&
-                  qr_module_px(v4, kStoreShotSide) == 8 && v18.version == 18 && qr_module_px(v18, kStoreShotSide) == 3,
-              "sf1: 38 bytes is version 3 at 9 px, 60 bytes version 4 at 8 px, 512 bytes version 18 at 3 px");
+        check(enc && v3.version == 3 && qr_module_px(v3, kStoreShotSide) == 8 && v4.version == 4 &&
+                  qr_module_px(v4, kStoreShotSide) == 7 && v18.version == 18 && qr_module_px(v18, kStoreShotSide) == 3,
+              "sf1: 38 bytes is version 3 at 8 px, 60 bytes version 4 at 7 px, 512 bytes version 18 at 3 px");
         bool ok[2] = {false, false};
         for (int light = 0; light < 2; light++) {
             set_theme_light(light != 0);
@@ -736,14 +737,15 @@ int main(int argc, char** argv)
             r.pp.draw(c, ink, r.now);
             Surface sb = b.surface();
             Pix dark = LiveF::pack(0x111111), white = LiveF::pack(0xFFFFFF);
-            int x0 = kPortArtX + 1, y0 = kPortArtTop + 1, m0 = x0 + 4 * 9, n0 = y0 + 4 * 9;
+            int full = 8 * 37, pad = (kStoreShotSide - full) / 2, x0 = kPortArtX + pad, y0 = kPortArtTop + pad;
+            int m0 = x0 + 4 * 8, n0 = y0 + 4 * 8;
             ok[light] = run && sb.at(x0, y0) == white && sb.at(m0 - 1, n0) == white && sb.at(m0, n0) == dark &&
-                        sb.at(m0 + 7 * 9 - 1, n0) == dark && sb.at(m0 + 7 * 9, n0) == white &&
-                        sb.at(x0 + 333 - 1, y0 + 333 - 1) == white && (light || sb.at(x0 - 1, y0) == dark);
+                        sb.at(m0 + 7 * 8 - 1, n0) == dark && sb.at(m0 + 7 * 8, n0) == white &&
+                        sb.at(x0 + full - 1, y0 + full - 1) == white && (light || sb.at(x0 - 1, y0) == dark);
         }
         set_theme_light(false);
         check(ok[0] && ok[1],
-              "sf1: the code fills the art rect on the page canvas, 9 px modules in a white quiet zone, both themes");
+              "sf1: the code fills the art rect on the page canvas, 8 px modules in a white quiet zone, both themes");
     }
 
     {
@@ -841,8 +843,11 @@ int main(int argc, char** argv)
         InkLayer ink;
         a.pp.draw(c, ink, a.pp.overlays_end());
         Surface sb = b.surface();
-        check(run && a.pp.qr_shown() && a.pp.login_wait() &&
-                  sb.at(kPortArtX + kStoreShotSide / 2, kPortArtTop + 1) == sb.at(2, kPortraitH - 2),
+        bool bare = true;
+        for (int y = kPortArtTop; y < kPortArtTop + kStoreShotSide; y++)
+            for (int x = kPortArtX; x < kPortArtX + kStoreShotSide; x++)
+                bare = bare && sb.at(x, y) == sb.at(2, kPortraitH - 2);
+        check(run && a.pp.qr_shown() && a.pp.login_wait() && bare,
               "sf1 l2: while the push waits the port page's art slot draws no code");
         Rig d(fonts);
         d.sf.l2 = true;
@@ -1020,6 +1025,55 @@ int main(int argc, char** argv)
         r.sf.tick(r.now);
         check(open && none_yet && shots.size() == 1 && shots[0].active && shots[0].top != Screen::Port,
               "f2: a port page pop asks for the next shot only once the pop has started");
+    }
+
+    {
+        Rig r(fonts);
+        bool open = to_port(r);
+        r.flow.redraw();
+        r.flow.input(PadAction::Back, false, r.now);
+        check(open && r.flow.ctl.kind() == FoldKind::Pop && std::string(r.flow.ctl.start_tag()) == "rest",
+              "c1: a port page pop on the square fold copies the last presented frame, even with a redraw pending");
+    }
+
+    {
+        GlyphCache glyphs;
+        PortPage pp(fonts, glyphs);
+        StoreItem it;
+        it.name = it.title = "blockie-test-a.zip";
+        it.porter = "blockie-test-porter";
+        it.genres = {"action"};
+        it.size = 4096;
+        it.port = 0;
+        for (int i = 0; i < 20; i++)
+            it.description += std::string(i ? "\n" : "") + "blockie test line " + std::to_string(i);
+        pp.open(it, true, false);
+        int top = px(tok::toastHeight);
+        TextStyle st = role::npArtist.style();
+        std::vector<Rect> r0 = pp.line_rects(0);
+        bool inside = !r0.empty();
+        for (const Rect& r : r0)
+            inside = inside && r.y0 >= top && r.y1 <= kBandBottom;
+        check(inside && r0[0].y0 == kPortPorterBase - fonts.ascent(st.px) &&
+                  r0[0].y1 - r0[0].y0 >= fonts.ascent(st.px) + fonts.descent(st.px),
+              "c1: at scroll 0 every line rect is a whole ink box inside 80 to 712, the porter's from its box top");
+        pp.action(PadAction::Right, false, 900);
+        pp.action(PadAction::Down, false, 1000);
+        std::vector<Rect> mid = pp.line_rects(1050), r1 = pp.line_rects(1200);
+        bool whole = !r1.empty() && r1[0].y0 > top && r0.size() == r1.size();
+        for (const Rect& r : r1)
+            whole = whole && r.y0 >= top && r.y1 <= kBandBottom;
+        check(whole, "c1: at rest after a step no line is cut at 80 or 712, the porter leaves and a line enters");
+        check(!mid.empty() && mid[0].y0 > r0[0].y0 && mid[0].y0 < r1[0].y0,
+              "c1: in flight the clip's top moves between the start and target extents");
+        check(mid.size() == r0.size() + 1,
+              "c1: in flight the drawn set is the start set and the target set, the leaving and entering lines both");
+        pp.action(PadAction::Down, false, 1300);
+        std::vector<Rect> held = pp.line_rects(1350);
+        pp.action(PadAction::Down, false, 1350);
+        std::vector<Rect> next = pp.line_rects(1351);
+        check(!held.empty() && held.size() == next.size() && std::abs(held[0].y0 - next[0].y0) <= 1,
+              "c1: a key mid scroll starts from the frame drawn, its lines and its clip");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
