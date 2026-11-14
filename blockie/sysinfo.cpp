@@ -9,6 +9,11 @@
 #ifndef BLOCKIE_FE_COMMIT
 #define BLOCKIE_FE_COMMIT ""
 #endif
+#ifndef BLOCKIE_FE_STEAM_FILES
+#define BLOCKIE_FE_STEAM_FILES 0
+#endif
+#define BLOCKIE_WORD(x) #x
+#define BLOCKIE_VALUE(x) BLOCKIE_WORD(x)
 
 namespace fd {
 
@@ -16,6 +21,7 @@ namespace {
 
 constexpr size_t kReadMax = 65536;
 const char* const kCommit = BLOCKIE_FE_COMMIT;
+const char* const kSteamFiles = "steam_files=" BLOCKIE_VALUE(BLOCKIE_FE_STEAM_FILES);
 
 bool read_text(const std::string& path, std::string& out)
 {
@@ -185,6 +191,8 @@ std::string kernel_release()
 }
 
 const char* frontend_commit() { return kCommit; }
+
+const char* frontend_steam_files() { return kSteamFiles; }
 
 std::vector<InfoLine> about_lines(const std::string& os_release, const std::string& frontend,
                                   const std::string& kernel)

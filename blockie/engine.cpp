@@ -292,6 +292,20 @@ fx step_progress(int64_t t3, int steps)
     return fx_int(j) + curve(Curve::EaseIn, tau);
 }
 
+int step_a256(int step, int64_t ms)
+{
+    if (ms <= 0 || step <= 0)
+        return 0;
+    int64_t e = (int64_t)step * 256 * 3 * ms / 50;
+    return e >= kFull ? 256 : (int)(e * 256 / kFull);
+}
+
+int64_t step_ms(int step)
+{
+    int64_t per = (int64_t)3 * 256 * std::max(1, step);
+    return (50 * (int64_t)kFull + per - 1) / per;
+}
+
 Instance::Instance(Rect motion, bool argb) : rect_(motion), argb_(argb)
 {
     size_t n = (size_t)std::max(0, motion.x1 - motion.x0) * (size_t)std::max(0, motion.y1 - motion.y0);

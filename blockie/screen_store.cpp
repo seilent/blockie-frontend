@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 
 #include "../ui/busydots.h"
 #include "../ui/roles.h"
 #include "../ui/size.h"
+#include "engine.h"
 #include "ring_spin.h"
 #include "screen_settings.h"
 #include "text_wrap.h"
@@ -57,7 +59,20 @@ StopWords stop_words(HelperCmd cmd)
         return {"stop getting files", "keep getting files"};
     if (cmd == HelperCmd::Update)
         return {"stop update", "keep updating"};
+    if (cmd == HelperCmd::Remove)
+        return {"stop removing", "keep removing"};
     return {"stop install", "keep installing"};
+}
+
+InkLayer& row_cross_ink()
+{
+    static InkLayer layer;
+    return layer;
+}
+
+bool same_row(const Row& a, const Row& b)
+{
+    return a.primary == b.primary && a.secondary == b.secondary && a.arc == b.arc && std::strcmp(a.glyph, b.glyph) == 0;
 }
 
 }
@@ -93,6 +108,10 @@ void PortPage::open(const StoreItem& it, bool online, bool working)
     acts_ = actions();
     was_ = acts_;
     change_at_ = -1000000;
+    cross_rows_.clear();
+    cross_dots_.clear();
+    cross_at_ = -1000000;
+    cross_end_ = -1000000;
     focus_ = 0;
     land_focus_ = -1;
     bar_.set(0);
@@ -241,17 +260,24 @@ void PortPage::reflow(const std::vector<Action>& was, int64_t now)
     };
     if (same(was, acts_))
         return;
+    if (now <= cross_at_)
+        cross_end_ = cross_at_ + cross_ms();
+    else if (now < cross_end_)
+        cross_end_ = now;
     if (now >= change_at_)
         was_ = was;
     change_at_ = std::max(now, hold_until_);
     int from = land_focus_ >= 0 ? land_focus_ : focus_;
     Kind keep = from >= 0 && from < (int)was.size() ? was[(size_t)from].kind : Kind::Play;
-    int to = -1;
-    for (int i = 0; i < (int)acts_.size(); i++)
-        if (acts_[(size_t)i].kind == keep)
-            to = i;
-    if (to < 0)
-        to = std::min(from, (int)acts_.size()) - 1;
+    auto at = [this](Kind k) {
+        for (int i = 0; i < (int)acts_.size(); i++)
+            if (acts_[(size_t)i].kind == k)
+                return i;
+        return -1;
+    };
+    int to = at(keep);
+    if (to < 0 && from > 0 && from <= (int)was.size())
+        to = at(was[(size_t)from - 1].kind);
     land_focus_ = std::clamp(to, 0, std::max(0, (int)acts_.size() - 1));
     tick(now);
 }
@@ -262,6 +288,12 @@ void PortPage::set_working(bool on, HelperCmd cmd, bool queued, int64_t now)
     cmd_ = cmd;
     if (!on)
         return;
+    if (now < cross_end_) {
+        cross_at_ = -1000000;
+        cross_end_ = -1000000;
+    }
+    change_at_ = std::min(change_at_, now);
+    hold_until_ = std::min(hold_until_, now);
     arc_ = 0;
     copying_ = false;
     qr_ = QrGrid();
@@ -300,18 +332,56 @@ void PortPage::progress(const HelperProgress& p, int64_t now)
     no_total_ = !progress_known(p);
 }
 
-void PortPage::finished(bool done, int64_t now)
+void PortPage::finished(bool done, bool cross, int64_t now)
 {
+    if (cross && !done)
+        snap_rows(now);
     working_ = false;
     copying_ = false;
     qr_ = QrGrid();
     has_pending_ = false;
     arc_ = done ? 360 : 0;
     hold_until_ = done ? now + kPortDoneHoldMs : now;
+    if (cross && done)
+        snap_rows(now);
+    if (cross)
+        cross_at_ = hold_until_;
     if (dialog_.shown && stop_dialog_)
         hide_overlay(dialog_, now, true);
     if (!done)
         words_.clear();
+    cross_end_ = cross ? cross_at_ + cross_ms() : std::min(cross_end_, now);
+}
+
+void PortPage::snap_rows(int64_t now)
+{
+    cross_rows_.clear();
+    cross_dots_.clear();
+    for (const Action& a : now < change_at_ ? was_ : acts_) {
+        cross_rows_.push_back(row_of(a));
+        cross_dots_.push_back(working_ && no_total_ && live(a));
+    }
+}
+
+std::vector<PortPage::CrossSlot> PortPage::cross_slots() const
+{
+    int nf = (int)cross_rows_.size(), nt = (int)acts_.size();
+    std::vector<CrossSlot> out;
+    for (int i = 0; i < std::max(nf, nt); i++)
+        out.push_back({i < nf ? i : -1, i < nt ? i : -1, i});
+    return out;
+}
+
+int64_t PortPage::cross_ms() const
+{
+    int64_t d = 0, text = eng::step_ms(eng::kTextStep), art = eng::step_ms(eng::kArtStep);
+    for (const CrossSlot& s : cross_slots()) {
+        if (s.from < 0)
+            d = std::max(d, art);
+        else if (s.to < 0 || !same_row(cross_rows_[(size_t)s.from], row_of(acts_[(size_t)s.to], true)))
+            d = std::max(d, text);
+    }
+    return d;
 }
 
 void PortPage::tick(int64_t now)
@@ -322,7 +392,7 @@ void PortPage::tick(int64_t now)
         arc_ = 0;
         words_.clear();
     }
-    if (land_focus_ >= 0 && now >= change_at_) {
+    if (land_focus_ >= 0 && now >= std::max(change_at_, cross_end_)) {
         focus_ = std::clamp(land_focus_, 0, std::max(0, (int)acts_.size() - 1));
         land_focus_ = -1;
         bar_.set(fx_int(focus_));
@@ -395,10 +465,12 @@ PortPage::Act PortPage::action(PadAction a, bool repeat, int64_t now)
         dialog_.scale.set(dialog_.scale.to);
         dialog_.bar.set(fx_int(dialog_.focus));
     }
-    bool held = now < change_at_ || (!working_ && arc_ == 360 && now < hold_until_);
+    bool held = now < change_at_ || (!working_ && arc_ == 360 && now < hold_until_) || now < cross_end_;
     if (held) {
         change_at_ = now;
         hold_until_ = now;
+        cross_at_ = -1000000;
+        cross_end_ = -1000000;
         arc_ = 0;
         words_.clear();
         tick(now);
@@ -460,7 +532,7 @@ PortPage::Act PortPage::action(PadAction a, bool repeat, int64_t now)
     return out;
 }
 
-Row PortPage::row_of(const Action& a) const
+Row PortPage::row_of(const Action& a, bool rest) const
 {
     Row r;
     r.primary = a.word;
@@ -468,7 +540,7 @@ Row PortPage::row_of(const Action& a) const
     r.ring = true;
     r.glyph = a.glyph;
     r.ring_scale = kOne;
-    if (live(a)) {
+    if (!rest && live(a)) {
         r.arc = no_total_ && working_ ? 0 : arc_;
         r.secondary = words_;
     }
@@ -487,15 +559,14 @@ bool PortPage::live(const Action& a) const
                                          (cmd_ == HelperCmd::SteamGet && a.kind == Kind::SteamGet));
 }
 
-void PortPage::draw_row(Canvas& k, const Action& a, int top, fx alpha, bool focused, int64_t now)
+void PortPage::draw_row(Canvas& k, const Row& r, bool dots, int top, fx alpha, bool focused, int64_t now)
 {
-    Row r = row_of(a);
     Rect keep = k.clip();
     Canvas v(shift_x(k.surface(), kPortRowX));
     v.set_clip(Rect{0, top, kPortRowClip - kPortRowX, top + px(sz().rowHeight)}.intersect(
         Rect{keep.x0 - kPortRowX, keep.y0, keep.x1 - kPortRowX, keep.y1}));
     draw_list_row(v, fonts_, &glyphs_, r, top, alpha, focused);
-    if (working_ && no_total_ && live(a))
+    if (dots)
         draw_dots(v, r, top, now);
 }
 
@@ -512,15 +583,52 @@ void PortPage::draw_rows(Canvas& c, InkLayer& ink, int64_t now, fx pane)
     fx lit = tok::type_listPlaylist_alpha, dim = tok::type_listPlaylist_alphaDim;
     const std::vector<Action>& rows = now < change_at_ ? was_ : acts_;
     Canvas& k = ink.begin(Rect{0, kPortRowsTop, kPaneSplit, kPortraitH});
-    for (size_t i = 0; i < rows.size(); i++)
-        draw_row(k, rows[i], kPortRowsTop + (int)i * pitch, fx_mul((int)i == focus_ ? lit : dim, pane),
-                 (int)i == focus_, now);
-    if (!rows.empty() && !column_focus()) {
+    bool bar = now < cross_at_ || now >= cross_end_;
+    if (!bar)
+        draw_cross(k, ink, now, pane);
+    else
+        for (size_t i = 0; i < rows.size(); i++)
+            draw_row(k, row_of(rows[i]), working_ && no_total_ && live(rows[i]), kPortRowsTop + (int)i * pitch,
+                     fx_mul((int)i == focus_ ? lit : dim, pane), (int)i == focus_, now);
+    if (bar && action_count(now) > 0 && !column_focus()) {
         int x = kPortRowX + px(tok::hubEdge - tok::focus_barOffset);
         int y = kPortRowsTop + index_px(bar_.at(now), pitch);
         k.blend({x, y, x + px(tok::focus_barWidth), y + pitch}, kWhite, alpha256(pane));
     }
     ink.compose(c.surface(), theme().ink);
+}
+
+void PortPage::draw_cross(Canvas& k, InkLayer& ink, int64_t now, fx pane)
+{
+    int pitch = px(sz().rowHeight);
+    fx lit = tok::type_listPlaylist_alpha, dim = tok::type_listPlaylist_alphaDim;
+    int64_t t = now - cross_at_;
+    bool closed = t >= eng::step_ms(eng::kTextStep);
+    int text = eng::step_a256(eng::kTextStep, t), art = eng::step_a256(eng::kArtStep, t);
+    int lands = land_focus_ >= 0 ? land_focus_ : focus_;
+    Rect area{0, kPortRowsTop, kPaneSplit, kPortraitH};
+    InkLayer& o = row_cross_ink();
+    Canvas& f = o.begin(area);
+    auto bar = [&](Canvas& on, int y) {
+        int x = kPortRowX + px(tok::hubEdge - tok::focus_barOffset);
+        on.blend({x, y, x + px(tok::focus_barWidth), y + pitch}, kWhite, alpha256(pane));
+    };
+    if (!column_focus() && !closed)
+        bar(f, kPortRowsTop + index_px(bar_.at(now), pitch));
+    if (!column_focus() && lands < (int)acts_.size())
+        bar(k, kPortRowsTop + lands * pitch);
+    for (const CrossSlot& s : cross_slots()) {
+        int top = kPortRowsTop + s.at * pitch;
+        fx a = fx_mul(s.at == focus_ ? lit : dim, pane), b = fx_mul(s.at == lands ? lit : dim, pane);
+        Row to = s.to >= 0 ? row_of(acts_[(size_t)s.to], true) : Row{};
+        if (s.to >= 0)
+            draw_row(k, to, false, top, b, s.at == lands, now);
+        if (s.from >= 0 && !closed)
+            draw_row(f, cross_rows_[(size_t)s.from], cross_dots_[(size_t)s.from] != 0, top, a, s.at == focus_, now);
+        int m = s.from < 0 ? art : s.to < 0 || a != b || !same_row(cross_rows_[(size_t)s.from], to) ? text : 256;
+        if (m < 256)
+            ink_add(ink.surface(), o.surface(), m, 256 - m, Rect{0, top, kPaneSplit, top + pitch}.intersect(area));
+    }
 }
 
 void PortPage::draw_column(Canvas& c, InkLayer& ink, int64_t now, fx pane)
@@ -550,7 +658,7 @@ void PortPage::draw(Canvas& c, InkLayer& ink, int64_t now)
     bool col = column_focus();
     fx rows_a = col ? tok::motion_quickplayAlpha : tok::alpha_full;
     fx col_a = col ? tok::alpha_full : tok::motion_quickplayAlpha;
-    Rect art{kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide};
+    Rect art = art_rect();
     if (qr_shown() && !login_wait_)
         qr_draw(c, qr_, art, t.light ? t.ink : t.bg, t.light ? t.bg : t.ink);
     else
@@ -623,10 +731,29 @@ bool PortPage::animating(int64_t now) const
 {
     if (overlay_moving(dialog_, now) || toast_.animating(now) || scroll_.running(now) || !bar_.done(now))
         return true;
-    return now < change_at_;
+    return now < std::max(change_at_, cross_end_);
 }
 
 int PortPage::focus_y() const { return kPortRowsTop + focus_ * px(sz().rowHeight) + px(sz().rowHeight) / 2; }
+
+int PortPage::action_count(int64_t now) const
+{
+    if (now < change_at_)
+        return (int)was_.size();
+    if (now < cross_at_ || now >= cross_end_)
+        return (int)acts_.size();
+    bool closed = now - cross_at_ >= eng::step_ms(eng::kTextStep);
+    int n = 0;
+    for (const CrossSlot& s : cross_slots())
+        if (s.to >= 0 || !closed)
+            n = std::max(n, 1 + s.at);
+    return n;
+}
+
+Rect PortPage::art_rect() const
+{
+    return {kPortArtX, kPortArtTop, kPortArtX + kStoreShotSide, kPortArtTop + kStoreShotSide};
+}
 
 std::vector<Rect> PortPage::line_rects(int64_t now) const
 {

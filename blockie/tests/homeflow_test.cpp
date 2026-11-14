@@ -884,8 +884,8 @@ int main(int argc, char** argv)
         FlowOpts lo;
         lo.lang = true;
         HomeFlow ls(fonts, lo);
-        ls.model.systems = {{"ports", 3, ""}};
-        ls.kinds = {MenuKind::System};
+        ls.model.systems = {{"GB", 3, ""}, {"ports", 3, ""}};
+        ls.kinds = {MenuKind::System, MenuKind::System};
         ls.games = [](int) {
             std::vector<HomeGame> list;
             for (int i = 0; i < 3; i++)
@@ -903,7 +903,7 @@ int main(int argc, char** argv)
         };
         ls.store_entry = [&ls](int) {
             SelectorModel m;
-            m.systems = {{"all", 3, "3 ports"}};
+            m.systems = {{"all", 3, "3 ports"}, {"rpg", 3, "3 ports"}};
             m.section_label = "all";
             ls.enter_store(m);
             return true;
@@ -912,45 +912,60 @@ int main(int argc, char** argv)
         ls.last_frame = [&lb](const Surface& s) { copy(lb.surface(), s); };
         ls.ctl.can_animate = []() { return true; };
         ls.setup();
-        auto flip = [&ls](FoldKind k) { return ls.ctl.active() && ls.ctl.kind() == k && !ls.page_run(); };
-        auto t5 = [&ls](FoldKind k) {
+        auto slot = [&ls]() { return ls.nav.focus - ls.nav.menu_top; };
+        auto flip = [&ls](FoldKind k, int v) {
+            return ls.ctl.active() && ls.ctl.kind() == k && !ls.page_run() && !ls.plan() &&
+                   ls.ctl.run_length() == fold_duration(fold_page(v));
+        };
+        auto lift = [&ls](FoldKind k) {
             const SlidePlan* p = ls.plan();
-            return ls.ctl.active() && ls.ctl.kind() == k && p && p->left == LeftMove::T5 && !p->lang_on;
+            return ls.ctl.active() && ls.ctl.kind() == k && p && p->lang_on && p->left == LeftMove::Stepper &&
+                   !ls.page_run();
         };
         int64_t t = 0;
         ls.frame(t, lb.surface());
+        ls.input(PadAction::Down, false, t);
+        t = settle(ls, lb, t);
         ls.input(PadAction::Accept, false, t);
         t = settle(ls, lb, t);
         ls.input(PadAction::Context, false, t);
-        bool home_push = flip(FoldKind::Push) && ls.nav.top() == Screen::Port && !ls.page_owed();
+        bool home_push = flip(FoldKind::Push, slot()) && ls.nav.top() == Screen::Port;
+        t = settle(ls, lb, t);
+        bool port_idle = ls.nav.top() == Screen::Port && !ls.page_owed();
+        ls.input(PadAction::Back, false, t);
+        bool home_pop = flip(FoldKind::Pop, slot());
         t = settle(ls, lb, t);
         ls.input(PadAction::Back, false, t);
-        bool home_pop = flip(FoldKind::Pop);
         t = settle(ls, lb, t);
-        ls.input(PadAction::Back, false, t);
-        t = settle(ls, lb, t);
+        int home_slot = slot();
         ls.input(PadAction::Context, false, t);
-        bool in = flip(FoldKind::Push) && ls.nav.store;
+        bool in = flip(FoldKind::Push, home_slot) && ls.nav.store;
         t = settle(ls, lb, t);
-        bool idle = !ls.glow_owed() && !ls.page_owed();
+        bool idle = ls.glow_owed();
+        bool store_idle = !ls.page_owed();
         ls.input(PadAction::Accept, false, t);
-        bool enter = t5(FoldKind::Expand);
+        bool enter = lift(FoldKind::Expand);
         t = settle(ls, lb, t);
         ls.input(PadAction::Accept, false, t);
-        bool push = flip(FoldKind::Push) && ls.nav.top() == Screen::Port;
+        bool push = flip(FoldKind::Push, slot()) && ls.nav.top() == Screen::Port;
         t = settle(ls, lb, t);
         ls.input(PadAction::Back, false, t);
-        bool pop = flip(FoldKind::Pop);
+        bool pop = flip(FoldKind::Pop, slot());
         t = settle(ls, lb, t);
         ls.input(PadAction::Back, false, t);
-        bool shut = t5(FoldKind::Collapse);
+        bool shut = lift(FoldKind::Collapse);
+        t = settle(ls, lb, t);
+        ls.input(PadAction::Back, false, t);
+        bool out = flip(FoldKind::Pop, slot()) && !ls.nav.store;
         settle(ls, lb, t);
         check(home_push && home_pop,
               "with a language the port page pushes and pops on the square fold from the home's ports grid");
-        check(in && push && pop,
-              "with a language the store opens and its port page pushes and pops on the square fold");
-        check(enter && shut, "with a language the store's genre grid opens and closes on T5");
-        check(idle, "with a language the store owes no glow or page engine prepare");
+        check(in && out, "store block: the store opens and closes on the square fold");
+        check(enter && shut, "store block: the store's genre grid opens and closes on the lift with K2");
+        check(push && pop, "store block: the store's port page pushes and pops on the square fold");
+        check(idle, "store block: the store owes the idle glow prepare");
+        check(store_idle, "store block: the store owes no page engine prepare");
+        check(port_idle, "store block: the port page owes no page engine prepare");
     }
 
     for (int big = 0; big < 2; big++) {

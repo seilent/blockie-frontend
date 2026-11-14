@@ -36,6 +36,11 @@ struct FlowOpts {
 
 Screen page_under(const Nav& n, bool push);
 
+struct WordCross;
+std::shared_ptr<WordCross> word_cross(Fonts& f, const SelectorModel& from, Pane fp, const SelectorModel& to, Pane tp);
+void cross_rect(const Surface& a, const Surface& b, const Surface& dst, Rect r, int m);
+void cross_word(WordCross& w, bool back, const Surface& dst, int x_end, int m, uint32_t ground);
+
 class HomeFlow : public NavHost {
 public:
     HomeFlow(Fonts& fonts, const FlowOpts& o) : fonts_(fonts), o_(o) {}

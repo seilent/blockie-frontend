@@ -172,6 +172,7 @@ static int run()
 {
     std::fprintf(stderr, "blockie-frontend: started\n");
     std::fprintf(stderr, "blockie-frontend: commit %s\n", *frontend_commit() ? frontend_commit() : "unknown");
+    std::fprintf(stderr, "blockie-frontend: %s\n", frontend_steam_files());
 
     Bus bus;
     ThemeSetting theme_set;
@@ -346,7 +347,6 @@ static int run()
     std::mutex cat_mutex;
     std::thread cat_thread;
     int cat_evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    bool recent_due = false;
     int64_t shot_id = -1;
     std::string shot_path;
     Art shot_art;
@@ -453,10 +453,8 @@ static int run()
         return it != held.end() ? it->second : Art();
     };
     auto deal_recent = [&](bool first, bool keep = false) {
-        if (flow.nav.store) {
-            recent_due = true;
+        if (flow.nav.store)
             return 0;
-        }
         std::vector<Art>& grid = home.system_view ? home.recent_hold : model.tiles;
         held.clear();
         for (size_t k = 0; k < home.recent.size() && k < grid.size(); k++)
@@ -921,10 +919,8 @@ static int run()
             if (sw.first.id == kPortsSystem)
                 count = sw.second;
         flow.home_model().systems[(size_t)sys].games = count;
-        if (flow.nav.store) {
-            deal_recent(false, true);
+        if (flow.nav.store)
             return;
-        }
         std::vector<int64_t> gone = flow.regame(sys, flow.games(sys));
         {
             std::lock_guard<std::mutex> lk(dmutex);
@@ -1049,7 +1045,7 @@ static int run()
     };
     sf.host.shot = want_shot;
     sf.host.toast = [&](const std::string& l1, const std::string& l2) { toast.show(now_ms(), l1, l2, true); };
-    sf.host.closed = [&]() { recent_due = true; };
+    sf.host.closed = [&]() { deal_recent(false, true); };
     sf.host.redraw = [&]() { want_redraw('h'); };
     sf.host.result = [&](const HelperResult& r) {
         sync_steam();
@@ -1196,10 +1192,6 @@ static int run()
     };
     auto apply = [&](PadAction a, bool rep) {
         bool changed = flow.input(a, rep, now_ms());
-        if (recent_due && !flow.nav.store) {
-            recent_due = false;
-            deal_recent(false, true);
-        }
         bool started = flow.ctl.started() && flow.ctl.active();
         if (changed && !started)
             want_redraw('o');

@@ -33,6 +33,8 @@ constexpr int kPageSid = 1;
 void blend_row(uint32_t* p, int n, uint32_t ground, int a);
 
 fx step_progress(int64_t t3, int steps);
+int step_a256(int step, int64_t ms);
+int64_t step_ms(int step);
 
 struct Shade {
     int t = kFull;

@@ -63,11 +63,12 @@ public:
     HelperCmd cmd() const { return cmd_; }
     bool toasting(int64_t now) const { return toast_.phase(now) != 0; }
     bool dialog_shown() const { return dialog_.shown; }
+    const Overlay& dialog_box() const { return dialog_; }
     const std::string& words() const { return words_; }
     bool arcing() const { return working_ && !no_total_ && arc_ > 0; }
     int focus() const { return column_focus() ? -1 : focus_; }
     void progress(const HelperProgress& p, int64_t now);
-    void finished(bool done, int64_t now);
+    void finished(bool done, bool cross, int64_t now);
     void set_art(const Art& art) { art_ = art; }
     void set_qr(QrGrid q) { qr_ = std::move(q); }
     void clear_qr() { qr_ = QrGrid(); }
@@ -92,8 +93,10 @@ public:
     void toast(int64_t now, const std::string& l1, const std::string& l2) { toast_.show(now, l1, l2, false); }
     const StoreItem& item() const { return item_; }
     int focus_y() const;
-    int action_count(int64_t now) const { return (int)(now < change_at_ ? was_ : acts_).size(); }
+    int action_count(int64_t now) const;
+    Rect art_rect() const;
     std::vector<Rect> line_rects(int64_t now) const;
+    int64_t cross_end() const { return cross_end_; }
 
 private:
     struct Line {
@@ -107,6 +110,11 @@ private:
         Kind kind = Kind::Install;
         const char* word = "";
         const char* glyph = "";
+    };
+    struct CrossSlot {
+        int from = -1;
+        int to = -1;
+        int at = 0;
     };
 
     std::vector<Action> actions() const;
@@ -124,8 +132,12 @@ private:
     void dialog(bool stop, int64_t now);
     void open_stop(Overlay& d, int64_t now);
     void dialog_action(Overlay& d, bool stop, PadAction a, bool repeat, int64_t now, Act& out);
-    Row row_of(const Action& a) const;
-    void draw_row(Canvas& k, const Action& a, int top, fx alpha, bool focused, int64_t now);
+    Row row_of(const Action& a, bool rest = false) const;
+    void draw_row(Canvas& k, const Row& r, bool dots, int top, fx alpha, bool focused, int64_t now);
+    void snap_rows(int64_t now);
+    std::vector<CrossSlot> cross_slots() const;
+    int64_t cross_ms() const;
+    void draw_cross(Canvas& k, InkLayer& ink, int64_t now, fx pane);
     void draw_rows(Canvas& c, InkLayer& ink, int64_t now, fx pane);
     void draw_column(Canvas& c, InkLayer& ink, int64_t now, fx pane);
 
@@ -146,6 +158,10 @@ private:
     int64_t shown_at_ = -1000000;
     std::vector<Action> acts_, was_;
     int64_t change_at_ = -1000000;
+    std::vector<Row> cross_rows_;
+    std::vector<uint8_t> cross_dots_;
+    int64_t cross_at_ = -1000000;
+    int64_t cross_end_ = -1000000;
     int focus_ = 0;
     int land_focus_ = -1;
     Tween bar_;

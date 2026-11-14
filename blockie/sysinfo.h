@@ -71,6 +71,7 @@ std::vector<InfoLine> storage_lines(const Storage& s);
 std::string os_release_value(const std::string& text, const std::string& key);
 std::string kernel_release();
 const char* frontend_commit();
+const char* frontend_steam_files();
 std::vector<InfoLine> about_lines(const std::string& os_release, const std::string& frontend,
                                   const std::string& kernel);
 

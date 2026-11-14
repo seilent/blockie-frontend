@@ -380,7 +380,7 @@ void StoreFlow::result(const HelperResult& r)
     }
     if (r.why == "cancel" && helper_.running()) {
         if (r.name == pp_.item().name) {
-            pp_.finished(false, now);
+            pp_.finished(false, true, now);
             pp_.set_item(pp_.item(), host.online(), now);
         }
         host.redraw();
@@ -390,7 +390,7 @@ void StoreFlow::result(const HelperResult& r)
     if (r.done && r.cmd == HelperCmd::Update)
         updated_.insert(r.name);
     if (r.name == pp_.item().name)
-        pp_.finished(r.done, now);
+        pp_.finished(r.done, r.done || r.why == "cancel", now);
     rebuild(now);
     toast(store_toast(r), now);
     host.redraw();

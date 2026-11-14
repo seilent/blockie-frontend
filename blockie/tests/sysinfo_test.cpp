@@ -177,6 +177,9 @@ int main(int argc, char** argv)
     check(!kernel_release().empty(), "uname gives a kernel release");
     std::string want = argc > 1 ? argv[1] : "";
     check(want == frontend_commit(), "the frontend commit is the build's BLOCKIE_FE_COMMIT");
+    std::string files = argc > 2 ? argv[2] : "0";
+    check(std::string(frontend_steam_files()) == "steam_files=" + files,
+          "the build info reads steam_files= with the build's BLOCKIE_FE_STEAM_FILES, 0 by default");
     lines = about_lines(osr, frontend_commit(), "5.10.0-test");
     check(lines.size() == 4 && lines[1].value == (want.empty() ? std::string("unknown") : want),
           "the about row shows the build's commit, unknown when the build had none");

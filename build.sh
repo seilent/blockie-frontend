@@ -434,7 +434,8 @@ build_app() {
     pool "$appobj/backlight.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/backlight.cpp"
     pool "$appobj/wifi_model.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/wifi_model.cpp"
     pool "$appobj/wifi.o" "$cxx" "${gflags[@]}" $dbus_cflags $appcflags "$root/blockie/wifi.cpp"
-    pool "$appobj/sysinfo.o" "$cxx" "${gflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
+    pool "$appobj/sysinfo.o" "$cxx" "${gflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" \
+        -DBLOCKIE_FE_STEAM_FILES="$steam_files" $appcflags \
         "$root/blockie/sysinfo.cpp"
     pool "$appobj/library.o" "$cxx" "${scanflags[@]}" $appcflags "$root/blockie/library.cpp"
     pool "$appobj/image.o" "$cxx" "${gflags[@]}" $appcflags "$root/blockie/image.cpp"
@@ -807,7 +808,8 @@ build_bt_model_test() {
 
 build_sysinfo_test() {
     toolver=$("$cxx" --version | head -n 1)
-    pool "$testobj/sysinfo.o" "$cxx" "${launchflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" $appcflags \
+    pool "$testobj/sysinfo.o" "$cxx" "${launchflags[@]}" -DBLOCKIE_FE_COMMIT="\"$fe_commit\"" \
+        -DBLOCKIE_FE_STEAM_FILES="$steam_files" $appcflags \
         "$root/blockie/sysinfo.cpp"
     pool "$testobj/sysinfo_test.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/tests/sysinfo_test.cpp"
     pool "$testobj/children.o" "$cxx" "${launchflags[@]}" $appcflags "$root/blockie/children.cpp"
@@ -828,7 +830,7 @@ build_sysinfo_test() {
         -o "$out/sysinfo/blockie-ready-test.tmp" || return 1
     mv "$out/sysinfo/blockie-ready-test.tmp" "$out/sysinfo/blockie-ready-test"
     echo "build.sh: $out/sysinfo/blockie-sysinfo-test $out/sysinfo/blockie-volume-test $out/sysinfo/blockie-ready-test"
-    "$out/sysinfo/blockie-sysinfo-test" "$fe_commit" && "$out/sysinfo/blockie-volume-test" &&
+    "$out/sysinfo/blockie-sysinfo-test" "$fe_commit" "$steam_files" && "$out/sysinfo/blockie-volume-test" &&
         "$out/sysinfo/blockie-ready-test"
 }
 

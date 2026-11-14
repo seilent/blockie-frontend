@@ -32,6 +32,56 @@ int label_rest(const Nav& n, int i)
 
 }
 
+struct WordCross {
+    Buffer a;
+    Buffer b;
+    Rect ink;
+};
+
+std::shared_ptr<WordCross> word_cross(Fonts& f, const SelectorModel& from, Pane fp, const SelectorModel& to, Pane tp)
+{
+    auto w = std::make_shared<WordCross>();
+    w->ink = header_ink_rect(f, from).unite(header_ink_rect(f, to));
+    w->ink.y0 = std::max(w->ink.y0, kBandTop);
+    for (int side = 0; side < 2 && !w->ink.empty(); side++) {
+        Canvas wc((side ? w->b : w->a).surface());
+        wc.fill(w->ink, theme().bg);
+        wc.set_clip(w->ink);
+        draw_section_header(wc, f, side ? to : from, side ? tp : fp, theme());
+    }
+    return w;
+}
+
+void cross_rect(const Surface& a, const Surface& b, const Surface& dst, Rect r, int m)
+{
+    r = r.intersect(dst.rect());
+    for (int y = r.y0; y < r.y1; y++) {
+        const uint32_t* sa = a.row(y);
+        const uint32_t* sb = b.row(y);
+        uint32_t* d = dst.row(y);
+        if (m >= 256) {
+            copy_px(d + r.x0, sb + r.x0, r.x1 - r.x0);
+            continue;
+        }
+        for (int x = r.x0; x < r.x1; x++)
+            d[x] = blend_px(sa[x], sb[x], m);
+    }
+}
+
+void cross_word(WordCross& w, bool back, const Surface& dst, int x_end, int m, uint32_t ground)
+{
+    Surface wa = (back ? w.b : w.a).surface(), wb = (back ? w.a : w.b).surface();
+    Rect r = w.ink.intersect(dst.rect()).intersect({0, 0, x_end, dst.h});
+    for (int y = r.y0; y < r.y1; y++)
+        for (int x = r.x0; x < r.x1; x++) {
+            if (dst.at(x, y) != ground)
+                continue;
+            uint32_t v = m >= 256 ? wb.at(x, y) : blend_px(wa.at(x, y), wb.at(x, y), m);
+            if (v != ground)
+                dst.at(x, y) = v;
+        }
+}
+
 void HomeFlow::setup()
 {
     nav.cols = o_.big ? kBigCols : kGridColsWide;
@@ -296,7 +346,7 @@ Rect HomeFlow::band() const { return o_.grid_band ? Rect{0, kBandTop, kPaneSplit
 bool HomeFlow::glow_owed() const
 {
     Rect gr = glow_rect_of(band());
-    return o_.lang && !o_.big && nav.top() == Screen::Home && !nav.store &&
+    return o_.lang && !o_.big && nav.top() == Screen::Home &&
            !(glow_->prep_fresh && glow_->gen == glow_gen_ + 1 && glow_->prep_w == gr.x1 - gr.x0 &&
              glow_->prep_h == gr.y1 - gr.y0);
 }
@@ -507,8 +557,7 @@ void HomeFlow::show_recent(int k)
 FoldPlay HomeFlow::expand_play(const SelectorModel& em, const SelectorModel& collapsed, bool details, bool open)
 {
     Rect head = header_rect(fonts_, collapsed);
-    bool store = open ? nav.store : kept_nav_.store;
-    bool lang = o_.lang && !o_.big && !store;
+    bool lang = o_.lang && !o_.big;
     auto plan = std::make_shared<SlidePlan>(slide_plan(kPaneSplitWide, lang ? LeftMove::Stepper : LeftMove::T5, head));
     const Nav& wn = open ? nav : kept_nav_;
     SelectorModel wide = posed(open ? model : kept_, wn, true, Pane::Details);

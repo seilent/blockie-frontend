@@ -1,9 +1,11 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "../../ui/qr.h"
+#include "../../ui/size.h"
 #include "../store_flow.h"
 #include "../theme.h"
 
@@ -330,7 +332,10 @@ int main(int argc, char** argv)
         bool held = r.pp.focus() == 1 && r.pp.action_count(r.now) == 2;
         r.now += kPortDoneHoldMs;
         r.pp.tick(r.now);
-        check(asked && held && r.pp.focus() == 0 && r.pp.action_count(r.now) == 1,
+        bool falling = r.pp.focus() == 1 && r.pp.action_count(r.now) == 2;
+        r.now += eng::step_ms(eng::kTextStep);
+        r.pp.tick(r.now);
+        check(asked && held && falling && r.pp.focus() == 0 && r.pp.action_count(r.now) == 1,
               "f2: a removed row keeps the focus through the done hold, the focus moves up at the landing");
         Rig o(fonts);
         asked = to_remove(o);
@@ -342,7 +347,7 @@ int main(int argc, char** argv)
         o.now += 16;
         o.pp.tick(o.now);
         held = o.pp.focus() == 1 && o.pp.action_count(o.now) == 2;
-        o.now += kPortDoneHoldMs;
+        o.now += kPortDoneHoldMs + eng::step_ms(eng::kTextStep);
         o.pp.tick(o.now);
         check(asked && held && o.pp.focus() == -1 && o.pp.action_count(o.now) == 0,
               "f2: a remove done offline leaves no rows, the column takes the focus only at the landing");
@@ -355,7 +360,7 @@ int main(int argc, char** argv)
         s.online = false;
         s.sf.online_changed(s.now);
         held = s.pp.focus() == 1 && s.pp.action_count(s.now) == 2;
-        s.now += kPortDoneHoldMs;
+        s.now += kPortDoneHoldMs + eng::step_ms(eng::kTextStep);
         s.pp.tick(s.now);
         check(asked && held && s.pp.action_count(s.now) == 0,
               "f2: a second change inside the done hold keeps the shown rows until the landing");
@@ -677,12 +682,14 @@ int main(int argc, char** argv)
         r.steam.ports = {{"blockie-test-a.zip", true}};
         r.helper.finish();
         r.now += 16;
-        bool held = r.pp.action_count(r.now) == 3 && r.pp.action_count(r.now + kPortDoneHoldMs) == 2;
+        bool held = r.pp.action_count(r.now) == 3 &&
+                    r.pp.action_count(r.now + kPortDoneHoldMs + eng::step_ms(eng::kTextStep)) == 2;
         r.flow.input(PadAction::Accept, false, r.now);
         bool quiet = r.launches == 0 && !r.helper.running() && r.pp.action_count(r.now) == 2;
         r.flow.input(PadAction::Accept, false, r.now);
         check(run && held && quiet && r.launches == 1 && r.pp.focus() == 0,
-              "sf1: a done get holds 250 ms, an accept in the hold does nothing, then the focus is on play");
+              "sf1: a done get holds until its row has gone, an accept in the hold does nothing, then the focus is on "
+              "play");
         Rig f(fonts);
         run = getting(f);
         f.helper.line("fail\tblockie-test-a.zip\towned");
@@ -1074,6 +1081,344 @@ int main(int argc, char** argv)
         std::vector<Rect> next = pp.line_rects(1351);
         check(!held.empty() && held.size() == next.size() && std::abs(held[0].y0 - next[0].y0) <= 1,
               "c1: a key mid scroll starts from the frame drawn, its lines and its clip");
+    }
+
+    {
+        Rig r(fonts);
+        bool held = to_hold(r);
+        int64_t done = r.now - 16;
+        int64_t art = eng::step_ms(eng::kArtStep);
+        int64_t end = done + kPortDoneHoldMs + art;
+        bool span = r.pp.cross_end() == end && r.pp.animating(end - 1);
+        InkLayer ink;
+        Buffer b;
+        Canvas c(b.surface());
+        r.pp.draw(c, ink, done + kPortDoneHoldMs + 1);
+        Surface s = b.surface();
+        uint32_t g = s.at(kPortRowX / 2, kPortRowsTop + 120);
+        int pitch = px(sz().rowHeight);
+        int x0 = kPortRowX + px(tok::hubEdge - tok::focus_barOffset) + px(tok::focus_barWidth);
+        auto inked = [&](int k, int lim) {
+            int n = 0;
+            for (int y = kPortRowsTop + pitch * k; y < kPortRowsTop + pitch * (k + 1); y++)
+                for (int x = x0; x < kPortRowClip; x++)
+                    for (int sh = 0; sh < 24; sh += 8)
+                        n += std::abs((int)(s.at(x, y) >> sh & 0xFF) - (int)(g >> sh & 0xFF)) > lim;
+            return n;
+        };
+        bool slots = inked(0, 40) > 0 && inked(1, 2) == 0;
+        r.now = done + kPortDoneHoldMs + art / 2;
+        r.pp.tick(r.now);
+        r.flow.input(PadAction::Accept, false, r.now);
+        bool quiet = r.launches == 0 && r.pp.cross_end() < r.now && r.pp.action_count(r.now) == 2;
+        r.flow.input(PadAction::Accept, false, r.now);
+        check(held && span && slots && quiet && r.launches == 1,
+              "store block: an install done holds 250 ms, then play crosses in place and remove glows in at the art "
+              "step, all inside the hold, so an accept in the glow lands it and does nothing, the next plays");
+    }
+
+    {
+        Rig r(fonts);
+        bool run = getting(r);
+        r.steam.ports.clear();
+        r.helper.line("fail\tblockie-test-a.zip\tnetwork");
+        r.helper.finish();
+        check(run && r.pp.action_count(r.now) == 2 && r.pp.cross_end() < r.now,
+              "store block: a fail changes its rows at once, no cross");
+    }
+
+    {
+        Rig r(fonts);
+        bool held = to_hold(r);
+        r.flow.input(PadAction::Down, false, r.now);
+        bool landed = r.pp.cross_end() < r.now;
+        Catalog c;
+        c.ports = {port("blockie-test-a.zip", "action")};
+        r.index.clear();
+        r.sf.set_catalog(true, c, r.now);
+        check(held && landed && r.pp.cross_end() < r.now && r.pp.action_count(r.now) == 1,
+              "store block: a key that lands a done hold leaves nothing for a later change to cross");
+    }
+
+    {
+        Rig r(fonts);
+        bool held = to_hold(r);
+        r.helper.on_start(HelperCmd::Remove, r.pp.item().name);
+        check(held && r.pp.cross_end() < r.now && !r.pp.animating(r.now),
+              "store block: a queued remove that starts inside a done hold lands the hold, nothing left to cross");
+    }
+
+    {
+        Rig r(fonts);
+        Catalog c;
+        c.ports = {port("blockie-test-a.zip", "action")};
+        r.sf.set_catalog(true, c, r.now);
+        r.flow.input(PadAction::Context, false, r.now);
+        r.land();
+        bool open = r.flow.nav.store;
+        int renders = 0;
+        bool dealt = false;
+        auto draw = r.flow.ctl.render;
+        r.flow.ctl.render = [&r, &renders, &dealt, draw](const Surface& s, Rect b) {
+            if (r.flow.ctl.active()) {
+                renders++;
+                dealt = r.flow.home.recent.size() == 1 && r.flow.home.recent[0].id == 9;
+            }
+            draw(s, b);
+        };
+        r.sf.host.closed = [&r]() { r.flow.recent_changed({HomeGame{9, "blockie-test-b", "", ""}}); };
+        r.flow.input(PadAction::Back, false, r.now);
+        bool out = r.flow.ctl.active() && r.flow.ctl.kind() == FoldKind::Pop && !r.flow.nav.store;
+        r.land();
+        check(open && out && renders == 1 && dealt,
+              "store block: the store's close deals Recent before its fold renders the home, and renders it once");
+    }
+
+    {
+        Rig r(fonts);
+        Catalog c;
+        c.ports = {port("blockie-test-a.zip", "action")};
+        r.sf.set_catalog(true, c, r.now);
+        r.flow.input(PadAction::Context, false, r.now);
+        int64_t t0 = r.now;
+        bool opening = r.flow.nav.store && r.flow.ctl.active() && r.flow.ctl.kind() == FoldKind::Push;
+        while (r.now < t0 + 100) {
+            r.flow.frame(r.now, r.out.surface());
+            r.now += 16;
+        }
+        r.now = t0 + 100;
+        bool mid = r.flow.ctl.active() && r.flow.ctl.kind() == FoldKind::Push;
+        int renders = 0;
+        bool dealt = false;
+        auto draw = r.flow.ctl.render;
+        r.flow.ctl.render = [&r, &renders, &dealt, draw](const Surface& s, Rect b) {
+            if (r.flow.ctl.active()) {
+                renders++;
+                dealt = r.flow.home.recent.size() == 1 && r.flow.home.recent[0].id == 9;
+            }
+            draw(s, b);
+        };
+        r.sf.host.closed = [&r]() { r.flow.recent_changed({HomeGame{9, "blockie-test-b", "", ""}}); };
+        r.flow.input(PadAction::Back, false, r.now);
+        bool out = r.flow.ctl.active() && !r.flow.nav.store;
+        r.land();
+        check(opening && mid && out && renders == 1 && dealt,
+              "store block: a back 100 ms into the store's open deals Recent before the close renders the home, "
+              "and renders it once");
+    }
+
+    {
+        int pitch = px(sz().rowHeight);
+        int x0 = kPortRowX + px(tok::hubEdge - tok::focus_barOffset) + px(tok::focus_barWidth);
+        const int64_t at[] = {0, 17, 33, 50, 67};
+        const int rise[] = {0, 64, 125, 189, 254};
+        auto shoot = [](Rig& r, Buffer& b, int64_t t) {
+            InkLayer ink;
+            Canvas c(b.surface());
+            r.pp.draw(c, ink, t);
+        };
+        auto dist = [](const Surface& s, int x, int y) {
+            uint32_t g = s.at(kPortRowX / 2, kPortRowsTop + 120);
+            int d = 0;
+            for (int sh = 0; sh < 24; sh += 8)
+                d = std::max(d, std::abs((int)(s.at(x, y) >> sh & 0xFF) - (int)(g >> sh & 0xFF)));
+            return d;
+        };
+        auto peak = [&](const Surface& s, int k) {
+            int d = 0;
+            for (int y = kPortRowsTop + pitch * k; y < kPortRowsTop + pitch * (k + 1); y++)
+                for (int x = x0; x < kPortRowClip; x++)
+                    d = std::max(d, dist(s, x, y));
+            return d;
+        };
+        auto band_ink = [&](const Surface& s, int64_t* n) {
+            int64_t sum = 0;
+            for (int y = kPortRowsTop; y < kPortRowsTop + 3 * pitch; y++)
+                for (int x = x0; x < kPortRowClip; x++) {
+                    int d = dist(s, x, y);
+                    sum += d;
+                    if (n && d > 0)
+                        (*n)++;
+                }
+            return sum;
+        };
+        auto steady = [&](Rig& r, int64_t hold) {
+            Buffer b;
+            int64_t n = 0, end = r.pp.cross_end();
+            shoot(r, b, hold);
+            int64_t first = band_ink(b.surface(), &n);
+            std::vector<int64_t> mids;
+            for (int64_t t : at)
+                if (t > 0 && hold + t < end) {
+                    shoot(r, b, hold + t);
+                    mids.push_back(band_ink(b.surface(), nullptr));
+                }
+            shoot(r, b, end);
+            int64_t last = band_ink(b.surface(), &n), low = std::min(first, last);
+            bool ok = end > hold && !mids.empty();
+            for (int64_t v : mids)
+                ok = ok && v + n >= low;
+            return ok;
+        };
+        auto updated_run = [](Rig& r) {
+            bool open = to_port(r, true);
+            r.flow.input(PadAction::Down, false, r.now);
+            r.flow.input(PadAction::Accept, false, r.now);
+            return open && r.helper.running() && r.helper.cmd() == HelperCmd::Update && r.pp.focus() == 1;
+        };
+        auto updated = [&](Rig& r) {
+            bool asked = updated_run(r);
+            r.helper.line("done\tblockie-test-a.zip");
+            r.helper.finish();
+            return asked && r.pp.action_count(r.now) == 3;
+        };
+
+        Rig u(fonts);
+        bool up = updated(u);
+        int64_t hold = u.now + kPortDoneHoldMs;
+        bool span = u.pp.cross_end() == hold + 68 && u.pp.action_count(hold + 67) == 3 &&
+                    u.pp.action_count(hold + 68) == 2;
+        Buffer f0, mid, b, end;
+        shoot(u, f0, hold);
+        int full = peak(f0.surface(), 2);
+        bool table = full > 40, falling = false, step_left = false;
+        for (int i = 1; i < 5; i++) {
+            Buffer& fr = i == 2 ? mid : b;
+            shoot(u, fr, hold + at[i]);
+            int d = peak(fr.surface(), 2);
+            table = table && eng::step_a256(eng::kTextStep, at[i]) == rise[i] &&
+                    std::abs(d - full * (256 - rise[i]) / 256) <= 3;
+            falling = i == 3 ? d > 2 : falling;
+            step_left = i == 4 ? d <= 3 : step_left;
+        }
+        shoot(u, end, u.pp.cross_end());
+        bool ground = peak(end.surface(), 2) == 0;
+        int seen[2] = {0, 0}, miss = 0;
+        for (int y = kPortRowsTop + pitch; y < kPortRowsTop + 2 * pitch; y++)
+            for (int x = x0; x < kPortRowClip; x++) {
+                int o = dist(f0.surface(), x, y), n = dist(end.surface(), x, y), m = dist(mid.surface(), x, y);
+                for (int side = 0; side < 2; side++)
+                    if ((side ? n : o) > 40 && (side ? o : n) <= 2) {
+                        seen[side] += m > 8;
+                        miss += m <= 8;
+                    }
+            }
+        check(up && seen[0] > 0 && seen[1] > 0 && miss == 0,
+              "store block: an update done crosses update to remove in place, the frame mid cross holds both "
+              "words' ink");
+        check(up && span && table,
+              "store block: the cross down follows the engine's text step, 68 ms from the hold's end, the falling "
+              "row's ink at each 60 Hz frame as the table gives");
+        check(up && falling && step_left && ground,
+              "store block: the last row's fall reaches ground at the landing, one step from ground on the frame "
+              "before");
+
+        Rig su(fonts), sr(fonts), sg(fonts);
+        bool ready = updated(su) && steady(su, su.now + kPortDoneHoldMs);
+        bool removed = to_remove(sr);
+        sr.index.clear();
+        sr.helper.line("done\tblockie-test-a.zip");
+        sr.helper.finish();
+        removed = removed && sr.pp.action_count(sr.now + kPortDoneHoldMs + 68) == 1 &&
+                  steady(sr, sr.now + kPortDoneHoldMs);
+        bool got = getting(sg);
+        sg.helper.line("done\tblockie-test-a.zip");
+        sg.steam.ports = {{"blockie-test-a.zip", true}};
+        sg.helper.finish();
+        got = got && steady(sg, sg.now + kPortDoneHoldMs);
+        check(ready && removed && got,
+              "store block: no frame of an update, remove or get done's cross down is emptier than both ends in "
+              "the rows band");
+
+        Rig ka(fonts), kb(fonts);
+        bool held = updated(ka) && updated(kb);
+        ka.now += kPortDoneHoldMs - 100;
+        ka.flow.input(PadAction::Accept, false, ka.now);
+        bool landed = ka.pp.focus() == 0 && ka.pp.action_count(ka.now) == 2 && ka.pp.cross_end() < ka.now &&
+                      !ka.pp.animating(ka.now) && ka.launches == 0;
+        Buffer la, lb;
+        shoot(ka, la, ka.now);
+        shoot(kb, lb, kb.pp.cross_end());
+        bool same = true;
+        for (int y = kPortRowsTop; y < kPortraitH; y++)
+            for (int x = 0; x < kPaneSplit; x++)
+                same = same && la.surface().at(x, y) == lb.surface().at(x, y);
+        check(held && landed && same,
+              "store block: a key in an update done's hold lands on the end rows, as the cross down's landing "
+              "draws them");
+
+        auto stays = [&](Rig& r, bool get) {
+            bool run = get ? getting(r) : updated_run(r);
+            r.online = false;
+            r.sf.online_changed(r.now);
+            r.flow.input(PadAction::Back, false, r.now);
+            r.flow.input(PadAction::Up, false, r.now);
+            r.flow.input(PadAction::Accept, false, r.now);
+            int64_t t = r.now;
+            while (!r.pp.overlays_idle(r.now) && r.now < t + 1000)
+                r.now += 16;
+            r.helper.line("fail\tblockie-test-a.zip\tcancel");
+            r.helper.finish();
+            int64_t at0 = r.now, fin = r.pp.cross_end();
+            Buffer s0, m, e;
+            shoot(r, s0, at0);
+            shoot(r, m, at0 + 50);
+            shoot(r, e, fin);
+            int full = peak(s0.surface(), 2), moved[2] = {0, 0}, missed = 0;
+            for (int y = kPortRowsTop; y < kPortRowsTop + 2 * pitch; y++)
+                for (int x = x0; x < kPortRowClip; x++)
+                    if (dist(e.surface(), x, y) > 40 && dist(s0.surface(), x, y) <= 2) {
+                        moved[(y - kPortRowsTop) / pitch] += dist(m.surface(), x, y) > 8;
+                        missed += dist(m.surface(), x, y) <= 8;
+                    }
+            return run && fin == at0 + 68 && r.pp.action_count(fin) == 2 && full > 40 &&
+                   peak(m.surface(), 2) <= full / 2 && moved[1] > 0 && (!get || moved[0] > 0) && missed == 0;
+        };
+        Rig xu(fonts), xg(fonts);
+        check(stays(xu, false) && stays(xg, true),
+              "store block: a stop taken offline on an update or a get crosses each row in place, no row draws "
+              "away from its final row");
+
+        auto above = [&](bool get) {
+            Rig t(fonts), d(fonts), a(fonts);
+            int row = get ? 1 : 0, rows = get ? 3 : 2;
+            bool ready = true;
+            for (Rig* r : {&t, &d, &a}) {
+                if (get)
+                    r->steam.ports = {{"blockie-test-a.zip", false}};
+                ready = ready && updated(*r) && r->pp.action_count(r->pp.cross_end()) == rows;
+            }
+            t.now = t.pp.cross_end();
+            t.pp.tick(t.now);
+            bool timed = t.pp.focus() == row;
+            t.flow.input(PadAction::Accept, false, t.now);
+            timed = timed && t.launches == 1 && !t.helper.running();
+            d.flow.input(PadAction::Down, false, d.now);
+            bool down = d.pp.focus() == row + 1 && d.pp.action_count(d.now) == rows;
+            a.flow.input(PadAction::Accept, false, a.now);
+            bool quiet = a.launches == 0 && !a.helper.running() && a.pp.focus() == row;
+            a.flow.input(PadAction::Accept, false, a.now);
+            return ready && timed && down && quiet && a.launches == 1 && !a.helper.running();
+        };
+        check(above(false),
+              "store block: an update done moves the focus to play, the row above update, a key in the hold lands "
+              "there first");
+        check(above(true),
+              "store block: an update done that brings get files back moves the focus to play, the row above "
+              "update, now row 1, a key in the hold lands there first");
+    }
+
+    {
+        Rig r(fonts);
+        bool asked = to_remove(r);
+        r.flow.input(PadAction::Back, false, r.now);
+        const Overlay& d = r.pp.dialog_box();
+        bool words = d.shown && d.title == "stop removing" && d.items.size() == 2 && d.items[0] == "stop" &&
+                     d.items[1] == "keep removing" && d.focus == 1;
+        r.flow.input(PadAction::Accept, false, r.now);
+        check(asked && words && !r.pp.dialog_shown() && r.helper.running() && r.helper.deadline() < 0,
+              "store block: back during a running remove asks stop removing with keep removing, and keep removing "
+              "closes it");
     }
 
     std::printf("\n%d/%d checks passed\n", g_total - g_fail, g_total);
