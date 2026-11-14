@@ -134,12 +134,20 @@ void StoreFlow::rebuild(int64_t now)
 {
     items = store_items(have_catalog ? &catalog : nullptr, host.index());
     SteamState steam = host.steam ? host.steam() : SteamState{};
+    int64_t wall = host.wall();
+    bool bound = wall < steam.bound_until && steam.bound_until <= wall + kSteamBoundAheadS;
+    bool hid = false;
     for (StoreItem& it : items) {
         if (updated_.count(it.name))
             it.update = false;
         auto s = steam.ports.find(it.name);
-        it.steam = it.installed && s != steam.ports.end() && !s->second;
+        HelperCmd c = HelperCmd::Install;
+        bool get = it.installed && s != steam.ports.end() && !s->second;
+        it.steam = get && (!bound || (helper_.holds(it.name, c) && c == HelperCmd::SteamGet));
+        hid = hid || (get && !it.steam);
     }
+    bound_due_ = false;
+    bound_at_ = hid ? now + std::min(steam.bound_until - wall, kSteamBoundRecheckS) * 1000 : -1;
     std::vector<StoreGenre> was = rows;
     rows = store_genres(items, have_catalog);
     Nav& nav = flow_.nav;
@@ -187,6 +195,12 @@ int64_t StoreFlow::deadline() const
     bool resting = !nav.system_view && preview_at_ >= 0 && !leave_due_;
     bool due = grid_due_ || leave_due_ || (rest_due_ && !nav.system_view);
     if (due && nav.store && nav.stack.empty() && !flow_.ctl.active() && !resting) {
+        int64_t t = host.now();
+        d = d < 0 ? t : std::min(d, t);
+    }
+    if (bound_at_ >= 0)
+        d = d < 0 ? bound_at_ : std::min(d, bound_at_);
+    if (bound_due_ && !flow_.ctl.active() && !pp_.animating(host.now())) {
         int64_t t = host.now();
         d = d < 0 ? t : std::min(d, t);
     }
@@ -258,6 +272,22 @@ void StoreFlow::tick(int64_t now)
             rest_due_ = true;
         else
             grid_due_ = true;
+    }
+    if (bound_at_ >= 0 && now >= bound_at_) {
+        bound_at_ = -1;
+        bound_due_ = true;
+    }
+    if (bound_due_ && !flow_.ctl.active() && !pp_.animating(now)) {
+        const Nav& nav = flow_.nav;
+        HelperCmd c = HelperCmd::Install;
+        bool port = std::find(nav.stack.begin(), nav.stack.end(), Screen::Port) != nav.stack.end();
+        bound_due_ = false;
+        if (port && helper_.holds(pp_.item().name, c)) {
+            bound_at_ = now + kSteamBoundRecheckS * 1000;
+        } else if (nav.store || port) {
+            rebuild(now);
+            host.redraw();
+        }
     }
     settle(now);
 }

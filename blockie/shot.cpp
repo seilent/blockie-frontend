@@ -3294,6 +3294,7 @@ int run_store_shot(Fonts& fonts, const StoreShotOpts& so, const DriveOpts& o, co
                 added.push_back({fake_id++, dir, it.title, dir, it.cover});
     };
     sf.host.now = [&]() { return now; };
+    sf.host.wall = [&]() { return 1700000000 + now / 1000; };
     sf.host.is_ports = [](int sys) { return sys == 0; };
     sf.host.online = [&]() { return online; };
     sf.host.stale = [&]() {

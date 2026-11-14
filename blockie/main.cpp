@@ -1014,6 +1014,7 @@ static int run()
             want_redraw('s');
     };
     sf.host.now = now_ms;
+    sf.host.wall = []() { return (int64_t)time(nullptr); };
     sf.host.is_ports = [&](int sys) {
         return sys >= 0 && sys < (int)sys_ids.size() && sys_ids[(size_t)sys] == kPortsSystem;
     };

@@ -15,6 +15,7 @@ namespace fd {
 
 struct StoreHost {
     std::function<int64_t()> now;
+    std::function<int64_t()> wall;
     std::function<bool(int sys)> is_ports;
     std::function<bool()> online;
     std::function<bool()> stale;
@@ -82,6 +83,8 @@ private:
     bool grid_due_ = false;
     bool leave_due_ = false;
     bool rest_due_ = false;
+    int64_t bound_at_ = -1;
+    bool bound_due_ = false;
 };
 
 HomeGame store_game(const StoreItem& it);

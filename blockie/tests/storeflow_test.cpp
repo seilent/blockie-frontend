@@ -45,6 +45,7 @@ struct Rig {
     StoreFlow sf;
     Buffer out;
     int64_t now = 0;
+    int64_t wall = 1700000000;
     int rescans = 0, rereads = 0, toasts = 0, spawns = 0, launches = 0, redraws = 0, shots = 0;
     bool online = true;
     std::vector<IndexPort> index;
@@ -59,6 +60,7 @@ struct Rig {
         };
         helper.signal_child = [](pid_t, int) {};
         sf.host.now = [this]() { return now; };
+        sf.host.wall = [this]() { return wall + now / 1000; };
         sf.host.is_ports = [](int sys) { return sys == 0; };
         sf.host.online = [this]() { return online; };
         sf.host.stale = []() { return false; };
@@ -169,6 +171,14 @@ bool getting(Rig& r)
     r.flow.input(PadAction::Accept, false, r.now);
     return open && r.helper.running() && r.helper.cmd() == HelperCmd::SteamGet &&
            r.helper.name() == "blockie-test-a.zip";
+}
+
+bool offered(const Rig& r)
+{
+    for (const StoreItem& it : r.sf.items)
+        if (it.name == "blockie-test-a.zip")
+            return it.steam;
+    return false;
 }
 
 bool to_remove(Rig& r)
@@ -698,6 +708,238 @@ int main(int argc, char** argv)
         f.helper.finish();
         check(run && !toasts && f.pp.toasting(f.now) && f.pp.action_count(f.now) == 2,
               "sf1: fail owned toasts and the row goes once steam.tsv drops it");
+    }
+
+    {
+        Rig r(fonts);
+        r.steam.ports = {{"blockie-test-a.zip", false}};
+        r.steam.bound_until = r.wall + 3600;
+        bool open = to_port(r);
+        bool hidden = open && !offered(r) && r.pp.action_count(r.now) == 2 && r.pp.focus() == 0;
+        r.flow.input(PadAction::Accept, false, r.now);
+        check(hidden && r.launches == 1 && !r.helper.running(),
+              "bfe: while steam.tsv's bound is ahead the port page has no get files row and play is row 0");
+
+        Rig b(fonts);
+        b.steam.ports = {{"blockie-test-a.zip", false}};
+        bool shown = to_port(b) && b.pp.action_count(b.now) == 3;
+        b.now = (b.now / 1000 + 2) * 1000;
+        b.sf.tick(b.now);
+        int64_t t = b.now;
+        b.steam.bound_until = b.sf.host.wall() + 30;
+        b.sf.online_changed(b.now);
+        int64_t at = b.sf.deadline();
+        bool hid = !offered(b) && b.pp.action_count(b.now + 2000) == 2 && at == t + 30000;
+        b.now = at - 1;
+        b.sf.tick(b.now);
+        bool early = !offered(b);
+        b.now = at;
+        b.sf.tick(b.now);
+        bool back = offered(b) && b.sf.deadline() < 0;
+        b.now += 2000;
+        b.pp.tick(b.now);
+        bool kept = b.pp.action_count(b.now) == 3 && b.pp.focus() == 1;
+        b.flow.input(PadAction::Accept, false, b.now);
+        check(shown && hid && early && back && kept && b.launches == 1 && !b.helper.running(),
+              "bfe: a bound arms the deadline at its end, the tick there brings get files back and the focus stays "
+              "on play");
+
+        Rig c(fonts);
+        c.steam.ports = {{"blockie-test-a.zip", false}};
+        bool copen = to_port(c);
+        c.now = (c.now / 1000 + 2) * 1000;
+        c.sf.tick(c.now);
+        t = c.now;
+        c.steam.bound_until = c.sf.host.wall() + 90;
+        c.sf.online_changed(c.now);
+        int64_t first = c.sf.deadline();
+        c.now = first;
+        c.sf.tick(c.now);
+        int64_t second = c.sf.deadline();
+        bool still = !offered(c);
+        c.now = second;
+        c.sf.tick(c.now);
+        check(copen && first == t + 60000 && still && second == first + 30000 && offered(c) && c.sf.deadline() < 0,
+              "bfe: a bound more than 60 s ahead reads steam.tsv again every 60 s and stays hidden until its end");
+
+        Rig s(fonts);
+        s.steam.ports = {{"blockie-test-a.zip", false}};
+        bool sopen = to_port(s);
+        s.now = (s.now / 1000 + 2) * 1000;
+        s.sf.tick(s.now);
+        s.steam.bound_until = s.sf.host.wall() + 600;
+        s.sf.online_changed(s.now);
+        s.now = s.sf.deadline();
+        s.sf.tick(s.now);
+        bool shid = !offered(s);
+        int64_t step = s.now;
+        s.wall += 3600;
+        int64_t snext = s.sf.deadline();
+        s.now = snext;
+        s.sf.tick(s.now);
+        Rig k(fonts);
+        k.steam.ports = {{"blockie-test-a.zip", false}};
+        bool kopen = to_port(k);
+        k.now = (k.now / 1000 + 2) * 1000;
+        k.sf.tick(k.now);
+        k.steam.bound_until = k.sf.host.wall() + 90;
+        k.sf.online_changed(k.now);
+        k.now = k.sf.deadline();
+        k.sf.tick(k.now);
+        k.wall -= 30;
+        int64_t knext = k.sf.deadline();
+        k.now = knext;
+        k.sf.tick(k.now);
+        check(sopen && shid && snext > step && snext <= step + 60000 && offered(s) && s.sf.deadline() < 0 &&
+                  kopen && !offered(k) && k.sf.deadline() == knext + 30000,
+              "bfe: a wall step forward is read at the next deadline and brings get files back, a step back keeps "
+              "it hidden and armed");
+
+        Rig e(fonts);
+        e.steam.ports = {{"blockie-test-a.zip", false}};
+        bool eopen = to_port(e);
+        e.now = (e.now / 1000 + 2) * 1000;
+        e.sf.tick(e.now);
+        auto with = [&e](int64_t until) {
+            e.steam.bound_until = until;
+            e.sf.online_changed(e.now);
+            return offered(e);
+        };
+        int64_t w = e.sf.host.wall();
+        bool none = with(0), past = with(w - 5), ends = with(w), day = !with(w + kSteamBoundAheadS);
+        bool far = with(w + kSteamBoundAheadS + 1) && e.sf.deadline() < 0;
+        check(eopen && none && past && ends && day && far,
+              "bfe: a bound of 0, past or at the wall second hides nothing, one a day ahead hides get files, one "
+              "further binds nothing");
+    }
+
+    {
+        Rig r(fonts);
+        bool run = getting(r);
+        r.now = (r.now / 1000 + 2) * 1000;
+        r.sf.tick(r.now);
+        r.steam.bound_until = r.sf.host.wall() + 30;
+        r.sf.online_changed(r.now);
+        Rig m(fonts);
+        bool removing = to_remove(m);
+        m.steam.ports = {{"blockie-test-a.zip", false}};
+        m.steam.bound_until = m.sf.host.wall() + 30;
+        m.sf.online_changed(m.now);
+        check(run && offered(r) && r.pp.action_count(r.now + 2000) == 3 && r.helper.running() &&
+                  r.sf.deadline() < 0 && removing && !offered(m),
+              "bfe: a bound read while the port's get runs keeps its working row and arms nothing, while another "
+              "command runs it hides it");
+
+        Rig v(fonts);
+        bool vrem = to_remove(v);
+        v.now = (v.now / 1000 + 2) * 1000;
+        v.sf.tick(v.now);
+        v.steam.ports = {{"blockie-test-a.zip", false}};
+        v.steam.bound_until = v.sf.host.wall() + 1;
+        v.sf.online_changed(v.now);
+        int64_t vend = v.sf.deadline();
+        v.now = vend;
+        v.sf.tick(v.now);
+        bool vwaits = !offered(v) && v.pp.action_count(v.now + 2000) == 2 && v.sf.deadline() == vend + 60000;
+        v.helper.line("fail\tblockie-test-a.zip\tnetwork");
+        v.helper.finish();
+        check(vrem && vwaits && offered(v) && v.pp.action_count(v.now + 2000) == 3 && v.sf.deadline() < 0,
+              "bfe: a bound end met while the port's remove runs keeps get files away until the remove's result");
+
+        Rig q(fonts);
+        q.steam.ports = {{"blockie-test-a.zip", false}};
+        bool qopen = to_port(q);
+        q.helper.ask(q.kids, HelperCmd::Remove, "blockie-test-b.zip");
+        q.flow.input(PadAction::Accept, false, q.now);
+        HelperCmd next = HelperCmd::Install;
+        bool queued = q.helper.running() && q.helper.cmd() == HelperCmd::Remove &&
+                      q.helper.holds("blockie-test-a.zip", next) && next == HelperCmd::SteamGet;
+        q.steam.bound_until = q.sf.host.wall() + 30;
+        q.sf.online_changed(q.now);
+        check(qopen && queued && offered(q) && q.pp.action_count(q.now + 2000) == 3,
+              "bfe: a bound read while the port's get waits behind another port's command keeps its row");
+
+        Rig p(fonts);
+        p.steam.ports = {{"blockie-test-a.zip", false}};
+        bool open = to_port(p);
+        p.now = (p.now / 1000 + 2) * 1000;
+        p.sf.tick(p.now);
+        p.steam.bound_until = p.sf.host.wall() + 1;
+        p.sf.online_changed(p.now);
+        int64_t at = p.sf.deadline();
+        p.now = at;
+        p.flow.input(PadAction::Down, false, p.now);
+        bool moving = p.pp.animating(p.now);
+        p.sf.tick(p.now);
+        bool waits = moving && !offered(p) && p.sf.deadline() < 0;
+        while (p.pp.animating(p.now) && p.now < at + 5000)
+            p.now += 16;
+        bool due = p.sf.deadline() == p.now;
+        p.sf.tick(p.now);
+        check(open && waits && due && offered(p) && p.sf.deadline() < 0,
+              "bfe: a bound end met while the port page moves rebuilds once its motion ends");
+
+        Rig o(fonts);
+        o.steam.ports = {{"blockie-test-a.zip", false}};
+        bool oopen = to_port(o);
+        o.now = (o.now / 1000 + 2) * 1000;
+        o.sf.tick(o.now);
+        o.steam.bound_until = o.sf.host.wall() + 1;
+        o.sf.online_changed(o.now);
+        int64_t oat = o.sf.deadline();
+        o.now = oat;
+        o.flow.input(PadAction::Down, false, o.now);
+        o.sf.tick(o.now);
+        bool owed = o.pp.animating(o.now) && !offered(o);
+        o.sf.online_changed(o.now);
+        while (o.pp.animating(o.now) && o.now < oat + 5000)
+            o.now += 16;
+        check(oopen && owed && offered(o) && o.sf.deadline() < 0,
+              "bfe: a rebuild from another path while a bound end waits for the motion leaves nothing owed");
+
+        Rig f(fonts);
+        f.index = {{7, "blockie-test-a", "blockie-test-a.zip", "blockie-test-a", ""}};
+        f.steam.ports = {{"blockie-test-a.zip", false}};
+        f.sf.set_catalog(true, two_genres(), f.now);
+        f.flow.input(PadAction::Context, false, f.now);
+        f.land();
+        f.now = (f.now / 1000 + 2) * 1000;
+        f.sf.tick(f.now);
+        f.steam.bound_until = f.sf.host.wall() + 1;
+        f.sf.rebuild(f.now);
+        int64_t end = f.now + 1000;
+        bool hid = f.flow.nav.store && !offered(f) && f.sf.deadline() == end;
+        f.now = end - 600;
+        f.flow.input(PadAction::Down, false, f.now);
+        f.flow.input(PadAction::Down, false, f.now);
+        f.now = end - 16;
+        f.sf.tick(f.now);
+        bool folding = f.flow.ctl.active();
+        f.now = end;
+        f.sf.tick(f.now);
+        bool held = folding && f.flow.ctl.active() && !offered(f) && f.sf.deadline() < 0;
+        f.land();
+        check(hid && held && offered(f), "bfe: a bound end met while a fold runs rebuilds once the fold lands");
+
+        Rig h(fonts);
+        h.index = {{7, "blockie-test-a", "blockie-test-a.zip", "blockie-test-a", ""}};
+        h.steam.ports = {{"blockie-test-a.zip", false}};
+        h.now = 1000;
+        h.steam.bound_until = h.sf.host.wall() + 90;
+        int reads = 0;
+        h.sf.host.steam = [&h, &reads]() {
+            reads++;
+            return h.steam;
+        };
+        Catalog cat;
+        cat.ports = {port("blockie-test-a.zip", "action")};
+        h.sf.set_catalog(true, cat, h.now);
+        int64_t armed = h.sf.deadline();
+        int was = reads;
+        h.now = armed;
+        h.sf.tick(h.now);
+        check(!h.flow.nav.store && armed == 61000 && reads == was && h.sf.deadline() < 0 && !offered(h),
+              "bfe: with the store and port page closed a bound end reads nothing and arms nothing");
     }
 
     {

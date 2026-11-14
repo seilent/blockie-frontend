@@ -236,9 +236,18 @@ SteamState read_steam(const std::string& path)
     if (lines.empty() || (lines[0] != "signed\t0" && lines[0] != "signed\t1"))
         return out;
     out.signed_in = lines[0] == "signed\t1";
+    bool bound = false;
     for (size_t k = 1; k < lines.size(); k++) {
         const std::string& l = lines[k];
         size_t a = l.find('\t'), b = a == std::string::npos ? a : l.find('\t', a + 1);
+        if (l.compare(0, a, "bound") == 0) {
+            std::string v = a == std::string::npos ? std::string() : l.substr(a + 1);
+            bool num = v.size() <= 12 && v.find_first_not_of("0123456789") == std::string::npos;
+            if (!bound && num)
+                out.bound_until = std::strtoll(v.c_str(), nullptr, 10);
+            bound = true;
+            continue;
+        }
         if (b == std::string::npos || l.compare(0, a, "port") != 0)
             continue;
         std::string name = l.substr(a + 1, b - a - 1), state = l.substr(b + 1);

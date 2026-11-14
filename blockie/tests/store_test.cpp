@@ -608,6 +608,31 @@ int main()
     }
 
     {
+        std::string st = ports + fd::kSteamTsv;
+        auto steam_of = [&st](const std::string& body) {
+            write_file(st, body, 0644);
+            return fd::read_steam(st);
+        };
+        fd::SteamState old = steam_of("signed\t1\nport\tblockie-test-a.zip\tget\n");
+        fd::SteamState zero = steam_of("signed\t1\nbound\t0\nport\tblockie-test-a.zip\tget\n");
+        fd::SteamState ahead = steam_of("signed\t0\nbound\t1700000300\nport\tblockie-test-a.zip\tget\n");
+        check(old.signed_in && old.bound_until == 0 && old.ports.size() == 1 && zero.signed_in &&
+                  zero.bound_until == 0 && zero.ports.size() == 1 && !ahead.signed_in &&
+                  ahead.bound_until == 1700000300 && ahead.ports.size() == 1 && !ahead.ports.at("blockie-test-a.zip"),
+              "bfe: steam.tsv's bound line gives its end in wall seconds, 0 or no line is none, port lines still read");
+        bool bad = steam_of("signed\t1\n").bound_until == 0 && steam_of("signed\t1\nbound\n").bound_until == 0;
+        for (const char* v : {"", "-5", "12a", " 5", "5 ", "1\t2", "0x10", "1234567890123"})
+            bad = bad && steam_of(std::string("signed\t1\nbound\t") + v + "\n").bound_until == 0;
+        check(bad, "bfe: a bound line that is not 1 to 12 digits is no bound");
+        fd::SteamState twice = steam_of("signed\t1\nbound\t100\nbound\t200\n");
+        fd::SteamState first = steam_of("signed\t1\nbound\tx\nbound\t200\n");
+        fd::SteamState wide = steam_of("signed\t1\nbound\t999999999999\n");
+        check(twice.bound_until == 100 && first.bound_until == 0 && wide.bound_until == 999999999999,
+              "bfe: the first bound line counts, up to 12 digits");
+        unlink(st.c_str());
+    }
+
+    {
         check(fd::progress_words({"login", 0, -1}) == "signing in" &&
                   fd::progress_words({"login", 1, 300}) == "signing in 299" &&
                   fd::progress_words({"login", 299, 300}) == "signing in 1" &&
